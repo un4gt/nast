@@ -150,15 +150,17 @@ export const useStore = create<AppState>((set, get) => ({
 
   swipe: async (direction) => {
     const { activeAvatar, activeChatName, generating } = get();
-    if (!activeAvatar || !activeChatName) return;
-    if (!generating) {
-      const last = get().messages[get().messages.length - 1];
-      const total = last?.swipes?.length ?? 0;
-      if (total > 1) {
-        await rpc.call('chats.swipe', { avatar: activeAvatar, file_name: activeChatName, direction });
-        await get().reloadChat();
-        return;
-      }
+    if (!activeAvatar || !activeChatName || generating) return;
+    const last = get().messages[get().messages.length - 1];
+    const total = last?.swipes?.length ?? 0;
+    const idx = last?.swipe_id ?? 0;
+    // ST 语义：left 总是导航；right 在末位时生成新 swipe，否则导航
+    const isNav =
+      direction === 'left' ? idx > 0 : idx < total - 1;
+    if (isNav && total > 1) {
+      await rpc.call('chats.swipe', { avatar: activeAvatar, file_name: activeChatName, direction });
+      await get().reloadChat();
+      return;
     }
     set({ generating: true, streamingText: '' });
     try {

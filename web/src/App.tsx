@@ -342,21 +342,28 @@ function ChatView() {
               <>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="icon"
+                  className="size-7"
                   disabled={generating || swipeIdx <= 0}
                   onClick={() => swipe('left')}
+                  title="上一个 swipe"
                 >
-                  <ChevronLeft data-icon="inline-start" />
-                  {swipeTotal > 0 && (swipeIdx + 1) + '/' + swipeTotal}
+                  <ChevronLeft />
                 </Button>
+                {swipeTotal > 0 && (
+                  <span className="min-w-10 text-center text-xs tabular-nums text-muted-foreground">
+                    {swipeIdx + 1}/{swipeTotal}
+                  </span>
+                )}
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="icon"
+                  className="size-7"
                   disabled={generating}
                   onClick={() => swipe('right')}
+                  title={swipeTotal > 0 && swipeIdx < swipeTotal - 1 ? '下一个 swipe' : '生成新 swipe'}
                 >
-                  {swipeTotal > 0 && (swipeIdx + 1) + '/' + swipeTotal}
-                  <ChevronRight data-icon="inline-end" />
+                  <ChevronRight />
                 </Button>
               </>
             )}
