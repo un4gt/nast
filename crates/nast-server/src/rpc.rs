@@ -58,6 +58,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "groups.get" => groups_get(state),
         "groups.chats" => groups_chats(state, params),
         "generate.group" => crate::group_gen::generate_group(state, params).await,
+        "chats.swipe" => chats_swipe(state, params),
         "worlds.list" => worlds_list(state),
         "worlds.get" => worlds_get(state, params),
         "worlds.save" => worlds_save(state, params),
@@ -269,6 +270,48 @@ fn groups_chats(state: SharedState, params: Value) -> RpcResult {
         .find(|g| g.id == id)
         .ok_or_else(|| RpcError::NotFound(format!("group {id}")))?;
     Ok(json!(group.chats))
+}
+
+/// 切换到指定 swipe（左/右箭头）：更新 swipe_id、mes 镜像当前 swipe。
+fn chats_swipe(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let mut chat = state.user.read_chat(&avatar, &file_name)?;
+    let last = chat
+        .0
+        .last_mut()
+        .ok_or_else(|| RpcError::BadRequest("empty chat".into()))?;
+
+    let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("right");
+    let cur = last.get("swipe_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let total = last.get("swipes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(1);
+
+    let new_id = match direction {
+        "left" => (cur - 1).max(0),
+        _ => (cur + 1).min(total as i64 - 1),
+    };
+    if new_id != cur {
+        last["swipe_id"] = json!(new_id);
+        if let Some(swipes) = last.get("swipes").and_then(|v| v.as_array()) {
+            if let Some(text) = swipes.get(new_id as usize).and_then(|v| v.as_str()) {
+                last["mes"] = json!(text);
+            }
+        }
+        // 同步 swipe_info 的 send_date 语义（当前 swipe 的展示时间）
+        let mes_text = last
+            .get("mes")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        state.user.save_chat(&avatar, &file_name, &chat, false)?;
+        return Ok(json!({"swipe_id": new_id, "mes": mes_text}));
+    }
+    let mes_text = last
+        .get("mes")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(json!({"swipe_id": new_id, "mes": mes_text}))
 }
 
 fn worlds_list(state: SharedState) -> RpcResult {

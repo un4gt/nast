@@ -193,15 +193,15 @@ impl<'a> GenerateSession<'a> {
         let now = nast_storage::message_time_stamp();
         match p.generation_type {
             GenerationType::Swipe => {
-                // 原地写 swipes[swipe_id] + swipe_info + 新 send_date
+                // ST swipe() 语义：swipe_id 前进到最后（追加新 swipe 槽位），
+                // 生成结果写入该槽位。已有 swipes 时 swipe_id = swipes.len()
+                // （即新增一条），首次 swipe 从镜像的 swipes[0] 之后追加。
                 let last = chat.0.last_mut().ok_or("empty chat")?;
                 let msg: Msg = serde_json::from_value(last.clone()).map_err(|e| e.to_string())?;
                 let mut swipes = msg.swipes.clone().unwrap_or_else(|| vec![msg.mes.clone()]);
-                let swipe_id = msg.swipe_id.unwrap_or(0) as usize;
-                while swipes.len() <= swipe_id {
-                    swipes.push(String::new());
-                }
-                swipes[swipe_id] = streamed.clone();
+                let mut infos = msg.swipe_info.clone().unwrap_or_default();
+                let swipe_id = swipes.len(); // 新槽位（追加）
+                swipes.push(streamed.clone());
                 let mut extra = msg.extra.clone();
                 extra.api = Some("openai".into());
                 extra.model = Some(self.oai.openai_model.clone());
@@ -213,14 +213,11 @@ impl<'a> GenerateSession<'a> {
                     gen_finished: Some(now.clone()),
                     extra: extra.clone(),
                 };
-                let mut infos = msg.swipe_info.clone().unwrap_or_default();
-                while infos.len() <= swipe_id {
-                    infos.push(SwipeInfo::default());
-                }
-                infos[swipe_id] = swipe_info;
+                infos.push(swipe_info);
                 let mut new_msg = msg;
                 new_msg.swipes = Some(swipes);
                 new_msg.swipe_info = Some(infos);
+                new_msg.swipe_id = Some(swipe_id as i64);
                 new_msg.send_date = now.clone(); // 每 swipe 独立 send_date
                 new_msg.mes = streamed.clone();
                 *last = serde_json::to_value(&new_msg).map_err(|e| e.to_string())?;

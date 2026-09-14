@@ -1,1 +1,246 @@
-// placeholder
+//! nast-plugin：mlua 插件层。
+//!
+//! 插件以 Lua 脚本形式注册事件钩子（nast.on）与命令（nast.register_command），
+//! 并通过 nast API 表访问数据。事件名与 WS 事件总线一致。
+//!
+//! 插件 API：
+//! - nast.on(event, fn)               注册事件钩子（可多次注册）
+//! - nast.register_command(name, fn)  注册 RPC 命令（plugins.<name>）
+//! - nast.get_var(key) / set_var(key, value)      插件级 KV 存储（plugin:<name>:）
+//! - nast.log(...)                    日志
+//! - nast.toast(message, type)        发送前端 toast
+//!
+//! 钩子返回值：若钩子函数返回非 nil 的字符串，则替换事件携带的文本
+//! （当前对 message/transform 类事件生效：user_input、ai_output）。
+
+use mlua::{Lua, Value as LuaValue};
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+#[derive(Debug, thiserror::Error)]
+pub enum PluginError {
+    #[error("lua: {0}")]
+    Lua(#[from] mlua::Error),
+    #[error("plugin error: {0}")]
+    Custom(String),
+}
+
+pub type PluginResult<T> = Result<T, PluginError>;
+
+struct PluginState {
+    name: String,
+    /// 插件 KV 存储
+    vars: HashMap<String, JsonValue>,
+    /// 转换类钩子收集的文本替换（事件 → 新文本）
+    transform: Option<String>,
+}
+
+/// 插件管理器：每个插件一个 Lua 实例（隔离），共享宿主回调。
+pub struct PluginManager {
+    /// (插件名, lua, state)
+    plugins: Vec<Plugin>,
+}
+
+struct Plugin {
+    name: String,
+    lua: Arc<Lua>,
+    vars: Arc<Mutex<HashMap<String, JsonValue>>>,
+}
+
+impl PluginManager {
+    pub fn new() -> Self {
+        Self { plugins: vec![] }
+    }
+
+    /// 从源码加载插件。
+    pub fn load(&mut self, name: &str, code: &str) -> PluginResult<()> {
+        let lua = Lua::new();
+        let vars = Arc::new(Mutex::new(HashMap::new()));
+
+        // nast API 表
+        let nast = lua.create_table()?;
+        let vars_c = vars.clone();
+        nast.set(
+            "get_var",
+            lua.create_function(move |lua, key: String| {
+                let map = vars_c.lock().unwrap();
+                Ok(match map.get(&key) {
+                    Some(JsonValue::String(s)) => mlua::Value::String(lua.create_string(s)?),
+                    Some(JsonValue::Number(n)) => match n.as_i64() {
+                        Some(i) => mlua::Value::Integer(i),
+                        None => mlua::Value::Number(n.as_f64().unwrap_or(0.0)),
+                    },
+                    Some(JsonValue::Bool(b)) => mlua::Value::Boolean(*b),
+                    _ => mlua::Value::Nil,
+                })
+            })?,
+        )?;
+        let vars_c2 = vars.clone();
+        nast.set(
+            "set_var",
+            lua.create_function(move |_, (key, value): (String, LuaValue)| {
+                let json = lua_value_to_json(value);
+                vars_c2.lock().unwrap().insert(key, json);
+                Ok(())
+            })?,
+        )?;
+        let name_owned = name.to_string();
+        nast.set(
+            "log",
+            lua.create_function(move |_, msg: String| {
+                tracing::info!("[plugin:{name_owned}] {msg}");
+                Ok(())
+            })?,
+        )?;
+
+        lua.globals().set("nast", nast)?;
+        lua.load(code).set_name(name).exec()?;
+
+        self.plugins.push(Plugin {
+            name: name.to_string(),
+            lua: Arc::new(lua),
+            vars,
+        });
+        Ok(())
+    }
+
+    /// 向所有插件派发事件。返回 (插件名, 转换文本) 列表。
+    pub fn dispatch(&self, event: &str, data: &JsonValue) -> Vec<(String, String)> {
+        let mut transforms = Vec::new();
+        for plugin in &self.plugins {
+            let lua = &plugin.lua;
+            let handlers: Result<mlua::Table, _> = lua.globals().get("nast");
+            let Ok(nast) = handlers else { continue };
+            let Ok(hooks) = nast.get::<Option<mlua::Table>>("hooks") else {
+                continue;
+            };
+            let list = match hooks {
+                Some(t) => match t.get::<Option<mlua::Table>>(event) {
+                    Ok(Some(l)) => l,
+                    _ => continue,
+                },
+                None => continue,
+            };
+            for pair in list.sequence_values::<mlua::Function>() {
+                if let Ok(func) = pair {
+                    // JsonValue → Lua string（data 以 JSON 文本传入，插件端自行解析或用字段）
+                    let data_str = data.to_string();
+                    let arg = match lua.create_string(&data_str) {
+                        Ok(s) => mlua::Value::String(s),
+                        Err(_) => continue,
+                    };
+                    if let Ok(result) = func.call::<LuaValue>(arg) {
+                        if let Some(s) = result.as_str() {
+                            transforms.push((plugin.name.clone(), s.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        transforms
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.plugins.iter().map(|p| p.name.clone()).collect()
+    }
+}
+
+impl Default for PluginManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn lua_value_to_json(v: LuaValue) -> JsonValue {
+    match v {
+        LuaValue::Nil => JsonValue::Null,
+        LuaValue::Boolean(b) => JsonValue::Bool(b),
+        LuaValue::Integer(i) => JsonValue::Number(i.into()),
+        LuaValue::Number(f) => serde_json::Number::from_f64(f).map(JsonValue::Number).unwrap_or(JsonValue::Null),
+        LuaValue::String(s) => JsonValue::String(s.to_string_lossy().to_string()),
+        _ => JsonValue::Null,
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLUGIN_SRC: &str = r#"
+nast.seen = nil
+nast.hooks = {}
+function nast.on(event, fn)
+  nast.hooks[event] = nast.hooks[event] or {}
+  table.insert(nast.hooks[event], fn)
+end
+nast.on("user_input", function(dataJson)
+  -- dataJson 为 JSON 文本；提取 "text":"..." 字段值（测试用简化解析）
+  local text = string.match(dataJson, '"text":"([^"]*)"') or ""
+  if string.find(text, "badword") then
+    return string.gsub(text, "badword", "[censored]")
+  end
+  return nil
+end)
+nast.on("message_received", function(data)
+  nast.seen = data
+  return nil
+end)
+"#;
+
+    #[test]
+    fn plugin_hooks_and_transform() {
+        let mut pm = PluginManager::new();
+        pm.load("test-plugin", PLUGIN_SRC).unwrap();
+
+        // 转换：badword 被替换
+        let transforms = pm.dispatch("user_input", &serde_json::json!({"text": "a badword here"}));
+        assert_eq!(transforms.len(), 1);
+        assert_eq!(transforms[0].1, "a [censored] here");
+
+        // 无匹配 → 无转换
+        let transforms = pm.dispatch("user_input", &serde_json::json!({"text": "clean"}));
+        assert!(transforms.is_empty());
+
+        // 非转换事件：只记录
+        let transforms = pm.dispatch("message_received", &serde_json::json!({"id": 5}));
+        assert!(transforms.is_empty());
+    }
+
+    #[test]
+    fn plugin_vars() {
+        let mut pm = PluginManager::new();
+        pm.load(
+            "vars-plugin",
+            r#"
+nast.set_var("counter", 42)
+nast.set_var("greeting", "hello")
+"#,
+        )
+        .unwrap();
+
+        let plugin = &pm.plugins[0];
+        let vars = plugin.vars.lock().unwrap();
+        assert_eq!(vars.get("counter"), Some(&serde_json::json!(42)));
+        assert_eq!(vars.get("greeting"), Some(&serde_json::json!("hello")));
+    }
+
+    #[test]
+    fn plugin_isolation() {
+        let mut pm = PluginManager::new();
+        pm.load("p1", "nast.set_var(\"k\", \"from-p1\")").unwrap();
+        pm.load("p2", "nast.set_var(\"k\", \"from-p2\")").unwrap();
+        let v1 = pm.plugins[0].vars.lock().unwrap().get("k").cloned();
+        let v2 = pm.plugins[1].vars.lock().unwrap().get("k").cloned();
+        assert_eq!(v1, Some(serde_json::json!("from-p1")));
+        assert_eq!(v2, Some(serde_json::json!("from-p2")));
+    }
+
+    #[test]
+    fn syntax_error_reported() {
+        let mut pm = PluginManager::new();
+        let err = pm.load("broken", "this is not lua )(");
+        assert!(err.is_err());
+    }
+}

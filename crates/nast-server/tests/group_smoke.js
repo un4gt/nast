@@ -22,7 +22,7 @@ const mock = http.createServer((req, res) => {
     res.end();
   });
 });
-mock.listen(19998, () => log('MOCK UP on 19998'));
+mock.listen(19999, () => log('MOCK UP on 19998'));
 
 const ws = new WebSocket('ws://127.0.0.1:18080/ws');
 let nextId = 1;
