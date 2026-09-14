@@ -256,6 +256,8 @@ impl<'a> GenerateSession<'a> {
                 new_msg.swipe_id = Some(swipe_id as i64);
                 new_msg.send_date = now.clone(); // 每 swipe 独立 send_date
                 new_msg.mes = streamed.clone();
+                new_msg.gen_started = Some(gen_started.clone());
+                new_msg.gen_finished = Some(now.clone());
                 *last = serde_json::to_value(&new_msg).map_err(|e| e.to_string())?;
             }
             _ => {
@@ -272,6 +274,8 @@ impl<'a> GenerateSession<'a> {
                     is_system: false,
                     send_date: now.clone(),
                     mes: streamed.clone(),
+                    gen_started: Some(gen_started.clone()),
+                    gen_finished: Some(now.clone()),
                     extra,
                     // 每条新 AI 消息都有 swipes 基础设施（setFirstSwipe）
                     swipes: Some(vec![streamed.clone()]),
@@ -539,7 +543,7 @@ impl<'a> GenerateSession<'a> {
             world_info_before: wi_before,
             world_info_after: wi_after,
             messages,
-            message_examples: parse_examples(&p.character.data.mes_example),
+            message_examples: parse_examples(&p.character.data.mes_example, "User", &p.character.name),
             pin_examples: false,
             in_chat_injections: all_injections,
             system_prompt_override: {
@@ -711,26 +715,66 @@ fn ensure_integrity(chat: &mut ChatFile) {
     }
 }
 
-/// mes_example 解析：<START> 分块，{{user}}/{{char}} 行对。
-pub fn parse_examples(raw: &str) -> Vec<ExampleBlock> {
+/// mes_example 解析（对齐 openai.js parseMesExamples + parseExampleIntoIndividual）：
+/// - `<START>`（大小写不敏感）分块
+/// - 每块首行（"This is how X should talk"）跳过
+/// - 行首 `name1:`（user）或 `name2:`（char，宏已替换为实际名）切换发言者
+/// - 无前缀续行并入当前消息
+/// - 产出消息剥离名字前缀、trim；name 为 example_user/example_assistant，role 一律 system
+pub fn parse_examples(raw: &str, name1: &str, name2: &str) -> Vec<ExampleBlock> {
+    use once_cell::sync::Lazy;
+    static START_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"(?i)<START>").unwrap());
+
     let mut blocks = Vec::new();
-    for block in raw.split("<START>") {
-        let mut msgs = Vec::new();
-        for line in block.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Some(rest) = line.strip_prefix("{{user}}:") {
-                msgs.push(("user".into(), "example_user".into(), rest.trim().to_string()));
-            } else if let Some(rest) = line.strip_prefix("{{char}}:") {
-                msgs.push((
-                    "assistant".into(),
-                    "example_assistant".into(),
-                    rest.trim().to_string(),
-                ));
-            }
+    for block in START_RE.split(raw) {
+        let tmp: Vec<&str> = block.lines().collect();
+        if tmp.is_empty() {
+            continue;
         }
+        let mut msgs: Vec<(String, String, String)> = Vec::new();
+        let mut cur_lines: Vec<String> = Vec::new();
+        let mut in_user = false;
+        let mut in_bot = false;
+
+        let mut add_msg = |cur: &mut Vec<String>, msgs: &mut Vec<(String, String, String)>, speaker: &str, system_name: &str| {
+            // 剥离 "speaker:" 前缀（取首个出现）并 trim
+            let joined = cur.join("
+");
+            let parsed = joined
+                .replacen(&format!("{}:", speaker), "", 1)
+                .trim()
+                .to_string();
+            msgs.push(("system".into(), system_name.into(), parsed));
+            cur.clear();
+        };
+
+        // ST: skip first line as it'll always be "This is how {bot} should talk"
+        for line in tmp.iter().skip(1) {
+            let cur_str = line;
+            let user_prefix = format!("{}:", name1);
+            let char_prefix = format!("{}:", name2);
+            if cur_str.starts_with(&user_prefix) {
+                in_user = true;
+                if in_bot {
+                    add_msg(&mut cur_lines, &mut msgs, name2, "example_assistant");
+                }
+                in_bot = false;
+            } else if cur_str.starts_with(&char_prefix) {
+                in_bot = true;
+                if in_user {
+                    add_msg(&mut cur_lines, &mut msgs, name1, "example_user");
+                }
+                in_user = false;
+            }
+            cur_lines.push(cur_str.to_string());
+        }
+        if in_user {
+            add_msg(&mut cur_lines, &mut msgs, name1, "example_user");
+        } else if in_bot {
+            add_msg(&mut cur_lines, &mut msgs, name2, "example_assistant");
+        }
+
         if !msgs.is_empty() {
             blocks.push(ExampleBlock { messages: msgs });
         }
@@ -769,4 +813,37 @@ pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_examples;
+
+    #[test]
+    fn parse_examples_st_semantics() {
+        let raw = "This is how Seraphina should talk\n<START>\nUser: hello there\nSeraphina: hi! I am Seraphina.\ncontinuation line\nUser: bye";
+        let blocks = parse_examples(raw, "User", "Seraphina");
+        assert_eq!(blocks.len(), 1);
+        let msgs = &blocks[0].messages;
+        // 3 条消息：user hello / assistant hi+continuation / user bye
+        assert_eq!(msgs.len(), 3);
+        // role 全部是 system（CC 示例约定）
+        assert!(msgs.iter().all(|(r, _, _)| r == "system"));
+        // name 分别 example_user / example_assistant / example_user
+        assert_eq!(msgs[0].1, "example_user");
+        assert_eq!(msgs[1].1, "example_assistant");
+        assert_eq!(msgs[2].1, "example_user");
+        // 前缀剥离
+        assert_eq!(msgs[0].2, "hello there");
+        // 续行合并 + 前缀剥离
+        assert_eq!(msgs[1].2, "hi! I am Seraphina.\ncontinuation line");
+        assert_eq!(msgs[2].2, "bye");
+    }
+
+    #[test]
+    fn parse_examples_start_case_insensitive() {
+        let raw = "<start>\nUser: a\nSeraphina: b";
+        let blocks = parse_examples(raw, "User", "Seraphina");
+        assert_eq!(blocks.len(), 1);
+    }
 }

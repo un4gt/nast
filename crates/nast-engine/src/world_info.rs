@@ -202,22 +202,38 @@ pub fn check_world_info(
         }
     }
 
-    // min_activations pass（预算/深度限制内）
-    // （v1 简化：min_activations > 0 时按 skew 扩大扫描深度重试）
+    // min_activations 循环（对齐 world-info.js:4991-5007）：
+    // 每 pass 扫描深度 +1（buffer 加入更早的消息），直到激活数达标或深度耗尽。
+    // 深度上限判断：当前扫描深度 > min_activations_depth_max（若设置）或超过 chat 长度。
     while all_activated.len() < settings.min_activations as usize {
-        let depth_cap_ok = settings.min_activations_depth_max == 0
-            || (state.chat_length as i64) <= settings.min_activations_depth_max;
-        if !depth_cap_ok {
+        skew += 1;
+        let current_depth = settings.depth + skew;
+        if settings.min_activations_depth_max > 0 && current_depth > settings.min_activations_depth_max
+        {
             break;
         }
-        skew += 1;
+        if current_depth > state.chat_length as i64 {
+            break;
+        }
+        // 扩展扫描缓冲：加入更深（更早）的消息
+        let extra_depth = skew as usize;
+        let total_chat = source.chat.len();
+        let base = scan_depth.min(total_chat);
+        let from = total_chat.saturating_sub(base + extra_depth);
+        let to = total_chat.saturating_sub(base);
+        if to > from {
+            let older = source.chat[from..to].join("
+");
+            buffer = format!("{}
+{}", older, buffer);
+        }
         let before_len = all_activated.len();
         let _ = scan_pass(
             &all, &buffer, source, settings, state, &mut result, env,
             &mut activated_contents, &mut all_activated, skew,
         );
         if all_activated.len() == before_len {
-            break;
+            // 本 pass 无新增 → 提前终止（ST 在无新增时也会继续下一 pass，但深度会耗尽）
         }
     }
 
@@ -269,7 +285,8 @@ pub fn check_world_info(
                 let _ = at_d;
             }
             1 => {
-                after_list.push(content.clone());
+                // ST 同样 unshift（world-info.js:5098）→ after 块也是升序
+                after_list.insert(0, content.clone());
             }
             4 => {
                 // atDepth：@D 或数值 4；depth/role 已由 entry 解析
@@ -363,9 +380,45 @@ fn scan_pass(
             continue;
         }
 
-        // timed effects：sticky（激活期内直接通过，跳过概率）、cooldown（抑制）
+        // timed effects（对齐 world-info.js #checkTimedEffectOfType）：
+        // 1) 聊天未推进且非 protected → 删记录（swipe/regen 回滚）
+        // 2) chat_len >= end → 到期：删记录；sticky 到期且 entry.cooldown>0 → 武装 cooldown（protected，同 horizon）
+        // 3) 激活期内 sticky 直接通过（跳过 key/概率），cooldown 抑制
         let key = format!("{world}.{}", entry.uid);
         let entry_hash = string_hash_entry(entry);
+
+        // 聊天未推进回滚（非 protected）
+        if let Some(rec) = state.timed.sticky.get(&key).cloned() {
+            if chat_len <= rec.start && !rec.protected {
+                state.timed.sticky.remove(&key);
+            }
+        }
+        if let Some(rec) = state.timed.cooldown.get(&key).cloned() {
+            if chat_len <= rec.start && !rec.protected {
+                state.timed.cooldown.remove(&key);
+            }
+        }
+
+        // sticky 到期检测（在 cooldown 判定前，命中即武装 cooldown）
+        if let Some(rec) = state.timed.sticky.get(&key).cloned() {
+            if rec.hash == entry_hash && chat_len >= rec.end {
+                state.timed.sticky.remove(&key);
+                if entry.cooldown > 0 {
+                    // ST #getEntryTimedEffect('cooldown', entry, true)：start=chat.len, end=chat.len+cooldown, protected
+                    state.timed.cooldown.insert(
+                        key.clone(),
+                        nast_model::world::TimedEffect {
+                            hash: entry_hash,
+                            start: chat_len,
+                            end: chat_len + entry.cooldown,
+                            protected: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        // cooldown 抑制
         if let Some(rec) = state.timed.cooldown.get(&key) {
             if chat_len < rec.end && rec.hash == entry_hash {
                 continue;
@@ -443,7 +496,7 @@ fn scan_pass(
 
         // 激活！
         matched.push((world.clone(), entry.uid));
-        // sticky 记录 / 到期武装 cooldown
+        // sticky 记录（cooldown 到期时由 sticky 到期回调武装，见上方到期检测）
         if entry.sticky > 0 {
             let has = state
                 .timed
@@ -464,12 +517,12 @@ fn scan_pass(
                 timed_changed = true;
             }
         } else if entry.cooldown > 0 {
-            // 激活时记录 cooldown 起点（sticky 到期武装由 sticky 分支处理）
+            // 纯 cooldown 条目：激活时记录（首次激活即开始冷却窗口，end = len + cooldown）
             let has = state
                 .timed
                 .cooldown
                 .get(&key)
-                .map(|r| chat_len < r.end && r.hash == entry_hash)
+                .map(|r| r.hash == entry_hash && chat_len < r.end)
                 .unwrap_or(false);
             if !has {
                 state.timed.cooldown.insert(
@@ -506,21 +559,35 @@ fn substitute_entry(env: &MacroEnv, text: &str) -> String {
 }
 
 fn parse_decorators(content: &str) -> (String, Option<bool>) {
-    // @@dont_activate / @@activate 在内容行首；装饰行从内容剥离
+    // 对齐 world-info.js：仅当内容以 @@ 开头才进入装饰器解析；@@@ 为字面转义（@@）。
+    // 装饰器只允许出现在头部连续块中，正文中间的 @@ 行保持原样。
+    if !content.starts_with("@@") {
+        return (content.to_string(), None);
+    }
     let mut activate: Option<bool> = None;
     let mut kept: Vec<&str> = Vec::new();
+    let mut in_decorator_block = true;
     for line in content.lines() {
-        let t = line.trim();
-        if t == "@@dont_activate" {
-            activate = Some(false);
-            continue;
-        }
-        if t == "@@activate" {
-            activate = Some(true);
-            continue;
-        }
-        if t.starts_with("@@") {
-            continue; // 其他装饰器 v1 忽略（@@depth 等）
+        if in_decorator_block {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("@@@") {
+                // @@@xxx 转义为字面 @xxx（ST: escape hatch）
+                kept.push(rest);
+                in_decorator_block = false;
+                continue;
+            }
+            if t == "@@dont_activate" {
+                activate = Some(false);
+                continue;
+            }
+            if t == "@@activate" {
+                activate = Some(true);
+                continue;
+            }
+            if t.starts_with("@@") {
+                continue; // 其他头部装饰器忽略（@@depth 等）
+            }
+            in_decorator_block = false;
         }
         kept.push(line);
     }

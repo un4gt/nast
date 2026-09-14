@@ -26,19 +26,19 @@
 
 | # | 问题 | ST 行为 | nast 现状 | 位置 |
 |---|---|---|---|---|
-| D1 | WI after 块顺序 | before/after 都 unshift → 双升序 | after 用 push → 降序镜像 | world_info.rs:272 |
-| D2 | min_activations 失效 | 每 pass 扫描深度+1，重扫新 buffer | skew 未用、buffer 不加深；深度上限误用 chat_length | world_info.rs:205-222 |
-| D3 | sticky→cooldown 武装 | sticky 到期立即写同 horizon cooldown；protected 回滚（聊天未推进删非 protected 记录） | else-if 使 sticky+cooldown 共存条目永不进冷却；protected 存而不用 | world_info.rs:466-486 |
-| D4 | timed hash 兼容 | getStringHash(JSON.stringify(entry)) | 自身 serde hash，ST 记录全部失配 | world_info.rs:663 |
+| D1 ✅【已修复 4427a38+】WI after 块顺序 | before/after 都 unshift → 双升序 | after 用 push → 降序镜像 | world_info.rs:272 |
+| D2 ✅ min_activations 失效 | 每 pass 扫描深度+1，重扫新 buffer | skew 未用、buffer 不加深；深度上限误用 chat_length | world_info.rs:205-222 |
+| D3 ✅ sticky→cooldown 武装 | sticky 到期立即写同 horizon cooldown；protected 回滚（聊天未推进删非 protected 记录） | else-if 使 sticky+cooldown 共存条目永不进冷却；protected 存而不用 | world_info.rs:466-486 |
+| D4 ✅(自洽) timed hash 兼容 | getStringHash(JSON.stringify(entry)) | 自身 serde hash，ST 记录全部失配 | world_info.rs:663 |
 | D5 | 预算累计制 | 累计 newContent+换行，`>=budget` 溢出 | 逐条 tok+1，`>budget` 溢出（多塞一条） | world_info.rs:249 |
-| D6 | 装饰器解析过宽 | 仅内容以 @@ 开头才解析；@@@ 为字面 | 任意位置 @@ 行剥离、未知行丢弃 | world_info.rs:508 |
+| D6 ✅ 装饰器解析过宽 | 仅内容以 @@ 开头才解析；@@@ 为字面 | 任意位置 @@ 行剥离、未知行丢弃 | world_info.rs:508 |
 | D7 | WI 内容/key 预处理 | 内容过 WORLD_INFO 正则；key 过宏替换、/flags 解析 | 均不做 | world_info.rs:545 |
 | D8 | EM 锚点丢弃 | position 5/6 注入示例区 | 收集后无下游 | generate.rs:475 |
-| D9 | 示例对话解析 | 实际角色名前缀、续行合并、<START> 大小写不敏感 | 仅字面 {{user}}:/{{char}}:、丢续行 | generate.rs:661 |
-| D10 | tokenizer 按 source | claude/llama 等近似器 | 拼装/WI 硬编码 o200k | prompt.rs:40 |
+| D9 ✅ 示例对话解析 | 实际角色名前缀、续行合并、<START> 大小写不敏感 | 仅字面 {{user}}:/{{char}}:、丢续行 | generate.rs:661 |
+| D10 ✅ tokenizer 按 source | claude/llama 等近似器 | 拼装/WI 硬编码 o200k | prompt.rs:40 |
 | D11 | Claude 次级 | 尊重 prompt_processing_type；空文本 \u200b；示例名字前缀 | 无条件合并；无处理；name 恒 None | providers/lib.rs:199 |
-| D12 | 消息字段形状 | gen_started/gen_finished 顶层；token_count 可选 | 写在 extra；顶层字段透传缺失（原位改写丢字段） | generate.rs:208 |
-| D13 | 卡导入 | 总写 chara+ccv3；写前剔除旧 tEXt | 永不写 ccv3；不剔旧 chunk（V3 编辑被旧 ccv3 遮蔽） | rpc.rs:144 |
+| D12 ✅ 消息字段形状 | gen_started/gen_finished 顶层；token_count 可选 | 写在 extra；顶层字段透传缺失（原位改写丢字段） | generate.rs:208 |
+| D13 ✅ 卡导入 | 总写 chara+ccv3；写前剔除旧 tEXt | 永不写 ccv3；不剔旧 chunk（V3 编辑被旧 ccv3 遮蔽） | rpc.rs:144 |
 | D14 | AN 注入链路 | AN 扩展槽/injectToMain | 前端发 in_chat_injections，后端从不读取 | rpc.rs:357 |
 
 ## 三、缺失
@@ -53,4 +53,6 @@
 
 ## 修复顺序
 
-P1 流式订阅 → P2 AN 链路 → P3 问候消息 → P4 头像 → P5 消息删除+聊天管理 → P6 显示正则+markdown → P7 插件机制（mlua 运行时接入生成管线）→ P8 WI 四连（D1-D4）→ P9 示例解析（D9）→ P10 卡导入（D13）+ 字段形状（D12）+ tokenizer（D10）。其余偏差随里程碑消化。
+P1 流式订阅 → P2 AN 链路 → P3 问候消息 → P4 头像 → P5 消息删除+聊天管理 → P6 显示正则+markdown → P7 插件机制 → P8 WI 四连 → P9 示例解析 → P10 卡导入/字段/tokenizer。
+
+**全部已完成**（b2a5852 + abc59ad + 本轮提交）。剩余偏差：D5（预算 >= 边界）、D7（WI 内容/key 预处理）、D8（EM 锚点下游）、D11（Claude 次级）随后续里程碑消化。

@@ -47,6 +47,27 @@ impl PromptMessage {
             tokens,
         }
     }
+
+    /// 按来源选择 tokenizer 计数（D10：TokenHandler 语义）。
+    fn new_with_tok(
+        role: &str,
+        content: String,
+        identifier: &str,
+        injected: bool,
+        source: &str,
+        model: &str,
+    ) -> Self {
+        let model = crate::tokens::tokenizer_model_for_source(source, model);
+        let tokens = count_tokens(&content, crate::tokens::resolve_tokenizer(&model)) as i64;
+        Self {
+            role: role.to_string(),
+            content,
+            name: None,
+            identifier: identifier.to_string(),
+            injected,
+            tokens,
+        }
+    }
 }
 
 /// generation input（对应 prepareOpenAIMessages 的参数包）。
@@ -330,11 +351,11 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     } else {
         substitute(&oai.new_chat_prompt, input)
     };
-    let new_chat_tokens = tok(&new_chat_text);
+    let new_chat_tokens = tok_for(&new_chat_text, &oai.chat_completion_source, &oai.openai_model);
     reserved += new_chat_tokens;
 
     let group_nudge_tokens = if input.is_group && input.generation_type != "impersonate" {
-        let t = tok(&group_nudge);
+        let t = tok_for(&group_nudge, &oai.chat_completion_source, &oai.openai_model);
         reserved += t;
         t
     } else {
@@ -363,7 +384,11 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
             .unwrap_or_default();
         let nudge_text =
             substitute_dyn(&oai.continue_nudge_prompt, &[("lastChatMessage", &last_text)], input);
-        reserved += continued.as_ref().map(|m| tok(&m.content)).unwrap_or(0) + tok(&nudge_text);
+        reserved += continued
+            .as_ref()
+            .map(|m| tok_for(&m.content, &oai.chat_completion_source, &oai.openai_model))
+            .unwrap_or(0)
+            + tok_for(&nudge_text, &oai.chat_completion_source, &oai.openai_model);
         if let Some(c) = continued {
             continue_nudge_tail.push(PromptMessage::new(&c.role, c.content, "continueNudge", false));
         }
@@ -416,7 +441,7 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
             &format!("example-{bi}"),
             false,
         )];
-        let mut block_tokens = tok(&oai.new_example_prompt);
+        let mut block_tokens = tok_for(&oai.new_example_prompt, &oai.chat_completion_source, &oai.openai_model);
         for (_role, name, content) in &block.messages {
             let mut text = content.clone();
             if input.is_group {
@@ -477,7 +502,7 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         );
         if is_known {
             if !content.is_empty() || item.identifier == ID_MAIN {
-                let msg = PromptMessage::new(&item.role, content, &item.identifier, false);
+                let msg = PromptMessage::new_with_tok(&item.role, content, &item.identifier, false, &oai.chat_completion_source, &oai.openai_model);
                 // 预算检查：main 强制（超限报错，对应 JS TokenBudgetExceededError），
                 // 其余塞不下跳过（JS insert() 的 canAfford 检查）
                 if reserved + msg.tokens <= budget {
@@ -490,7 +515,7 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
             }
         } else if !content.is_empty() {
             // 用户自定义相对项
-            let msg = PromptMessage::new(&item.role, content, &item.identifier, false);
+            let msg = PromptMessage::new_with_tok(&item.role, content, &item.identifier, false, &oai.chat_completion_source, &oai.openai_model);
             if reserved + msg.tokens <= budget {
                 reserved += msg.tokens;
                 chat.push(msg);
@@ -638,7 +663,13 @@ fn squash_system_messages(messages: Vec<PromptMessage>) -> Vec<PromptMessage> {
 }
 
 fn tok(s: &str) -> i64 {
-    count_tokens(s, crate::tokens::resolve_tokenizer("gpt-4o")) as i64
+    tok_for(s, "openai", "gpt-4o")
+}
+
+/// 按 chat_completion_source/model 解析 tokenizer（TokenHandler 语义）。
+pub fn tok_for(s: &str, source: &str, model: &str) -> i64 {
+    let model = crate::tokens::tokenizer_model_for_source(source, model);
+    count_tokens(s, crate::tokens::resolve_tokenizer(&model)) as i64
 }
 
 fn format_wi(s: &str, fmt: &str) -> String {

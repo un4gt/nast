@@ -146,7 +146,13 @@ fn characters_import(state: SharedState, params: Value) -> RpcResult {
     } else {
         nast_cards::minimal_png()
     };
-    let out = nast_cards::write_card(&png, &v2_json, None)
+    // V3 卡同时写 ccv3 chunk（ST write 总是 chara + ccv3 双写）
+    let ccv3_json = if v2_json.get("spec").and_then(|s| s.as_str()) == Some("chara_card_v3") {
+        Some(&v2_json)
+    } else {
+        None
+    };
+    let out = nast_cards::write_card(&png, &v2_json, ccv3_json)
         .map_err(|e| RpcError::Internal(e.to_string()))?;
     std::fs::write(state.user.character_dir().join(&file_name), out)
         .map_err(|e| RpcError::Internal(e.to_string()))?;

@@ -87,6 +87,14 @@ pub struct ChatMessage {
     /// 群聊消息：头像锁定与身份
     pub force_avatar: Option<String>,
     pub original_avatar: Option<String>,
+    /// ST 写在消息顶层的生成时间戳（script.js:6617-6618）；extra 内另有同名副本
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gen_started: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gen_finished: Option<String>,
+    /// 消息标题（title 扩展）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// swipe 生成期间：当条 swipe 正在流式
     pub is_streaming: Option<bool>,
 }

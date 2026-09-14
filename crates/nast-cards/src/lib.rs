@@ -148,6 +148,16 @@ pub fn write_card(
     card_v3: Option<&serde_json::Value>,
 ) -> ModelResult<Vec<u8>> {
     let mut chunks = parse_chunks(png)?;
+    // ST write 语义（character-card-parser.js:18-27）：先剔除已有的 chara/ccv3 tEXt，避免旧数据遮蔽
+    chunks.retain(|c| {
+        if &c.kind != b"tEXt" {
+            return true;
+        }
+        match parse_text_chunk(&c.data) {
+            Some((kw, _)) => kw != KEY_CHARA && kw != KEY_CCV3,
+            None => true,
+        }
+    });
     let insert_at = chunks
         .iter()
         .position(|c| &c.kind == b"IHDR")

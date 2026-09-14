@@ -300,7 +300,7 @@ fn build_group_input<'a>(
         world_info_before: String::new(),
         world_info_after: String::new(),
         messages,
-        message_examples: crate::generate::parse_examples(&p.character.data.mes_example),
+        message_examples: crate::generate::parse_examples(&p.character.data.mes_example, "User", &p.character.name),
         pin_examples: false,
         in_chat_injections: injections,
         system_prompt_override: {
