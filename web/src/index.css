@@ -46,6 +46,14 @@
 }
 
 /* 消息内容排版 */
+.msg-content p {
+  margin: 0.25rem 0;
+}
+.msg-content ul,
+.msg-content ol {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
 .msg-content code {
   @apply rounded bg-secondary px-1 py-0.5 text-[0.85em];
 }

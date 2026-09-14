@@ -203,6 +203,27 @@ impl<'a> GenerateSession<'a> {
         // 插件钩子：ai_output 可改写 AI 回复
         let streamed = self
             .transform_or(&"ai_output", &json!({"text": streamed, "name": char_name}), &streamed);
+        // 正则 display pass（markdownOnly 脚本生效）→ extra.display_text
+        let display_text = {
+            let macro_fn = |s: &str| {
+                crate::prompt_bridge::substitute_basic(s, "User", &char_name)
+            };
+            let params = nast_engine::regex_engine::RegexParams {
+                is_markdown: true,
+                ..Default::default()
+            };
+            let metadata = self
+                .current_chat_metadata(&p.avatar, &p.chat_file)
+                .unwrap_or_default();
+            let scripts = self.collect_regex_scripts(&p.character, &metadata);
+            nast_engine::regex_engine::get_regexed_string(
+                &streamed,
+                nast_model::regex_script::RP_AI_OUTPUT,
+                &scripts,
+                &params,
+                &macro_fn,
+            )
+        };
         // 落盘：saveReply 语义
         let now = nast_storage::message_time_stamp();
         match p.generation_type {
@@ -221,6 +242,7 @@ impl<'a> GenerateSession<'a> {
                 extra.model = Some(self.oai.openai_model.clone());
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
+                extra.display_text = Some(display_text.clone());
                 let swipe_info = SwipeInfo {
                     send_date: Some(now.clone()),
                     gen_started: Some(gen_started.clone()),
@@ -243,6 +265,7 @@ impl<'a> GenerateSession<'a> {
                 extra.model = Some(self.oai.openai_model.clone());
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
+                extra.display_text = Some(display_text.clone());
                 let msg = Msg {
                     name: char_name.clone(),
                     is_user: false,

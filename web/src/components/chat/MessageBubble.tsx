@@ -1,4 +1,6 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -10,6 +12,12 @@ export function MessageBubble({ m, index }: { m: any; index: number }) {
   const char = characters.find((c) => c.name === m.name);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.mes);
+  // display_text 优先（后端正则 display pass 产物），否则 markdown 渲染 mes
+  const rendered = useMemo(() => {
+    const raw = m.extra?.display_text ?? m.mes;
+    const html = marked.parse(raw, { async: false }) as string;
+    return DOMPurify.sanitize(html);
+  }, [m.extra?.display_text, m.mes]);
 
   const saveEdit = async () => {
     if (!activeAvatar || !activeChatName) return;
@@ -70,12 +78,11 @@ export function MessageBubble({ m, index }: { m: any; index: number }) {
               setEditing(true);
             }}
             className={
-              'msg-content whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-sm leading-relaxed ' +
+              'msg-content break-words rounded-2xl px-4 py-2.5 text-sm leading-relaxed ' +
               (m.is_user ? 'rounded-tr-sm bg-primary/25' : 'rounded-tl-sm border bg-card')
             }
-          >
-            {m.mes}
-          </div>
+            dangerouslySetInnerHTML={{ __html: rendered }}
+          />
         )}
       </div>
       {m.is_user && (
