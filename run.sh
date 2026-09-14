@@ -9,4 +9,4 @@ if [ ! -f web/dist/index.html ]; then
 fi
 
 echo "[run] 启动 nast（http://127.0.0.1:${NAST_PORT:-8000}）"
-exec cargo run -p nast-server
+exec cargo run

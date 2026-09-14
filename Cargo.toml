@@ -7,7 +7,6 @@ members = [
     "crates/nast-engine",
     "crates/nast-providers",
     "crates/nast-plugin",
-    "crates/nast-server",
 ]
 
 [workspace.package]
@@ -39,11 +38,43 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio-tungstenite = "0.24"
 rand = "0.8"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 tiktoken-rs = "0.6"
 tempfile = "3"
+
+[package]
+name = "nast-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "nast"
+path = "src/main.rs"
+
+[dependencies]
+nast-model = { workspace = true }
+nast-cards = { workspace = true }
+nast-storage = { workspace = true }
+nast-engine = { workspace = true }
+nast-providers = { workspace = true }
+nast-plugin = { workspace = true }
+actix-web = { workspace = true }
+actix-ws = { workspace = true }
+actix-files = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+base64.workspace = true
+chrono.workspace = true
+tokio-util = "0.7.19"
+actix-multipart = "0.8.1"
+rand.workspace = true
 
 [profile.release]
 lto = "thin"

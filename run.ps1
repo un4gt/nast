@@ -12,4 +12,4 @@ if (-not (Test-Path "web/dist/index.html")) {
 
 $port = if ($env:NAST_PORT) { $env:NAST_PORT } else { "8000" }
 Write-Host "[run] 启动 nast（http://127.0.0.1:$port）"
-cargo run -p nast-server
+cargo run

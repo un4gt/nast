@@ -6,14 +6,19 @@
 
 ```
 nast/
+├── src/                  # 服务端根包（nast-server）：WS RPC、生成状态机、静态托管
+│   ├── main.rs           # 入口（cargo run 即启动）
+│   ├── generate.rs       # 生成状态机
+│   ├── rpc.rs / ws.rs    # WS RPC 分发与会话
+│   └── ...
 ├── crates/
 │   ├── nast-model/       # ST 1.18.0 同构数据类型（卡片/世界书/聊天/预设/正则/群组）
 │   ├── nast-cards/       # PNG tEXt chunk 读写（chara/ccv3），V1/V2/V3 卡规范化
 │   ├── nast-storage/     # data/<user>/ 布局、jsonl 聊天、integrity、节流备份
 │   ├── nast-engine/      # 宏引擎、ChatCompletion 拼装、世界书引擎、正则引擎、群聊调度、token 计数
 │   ├── nast-providers/   # OpenAI 兼容 / Anthropic / Gemini + 统一 StreamEvent
-│   ├── nast-plugin/      # mlua 插件：事件钩子 + KV 存储
-│   └── nast-server/      # actix-web + actix-ws 单端口：WS RPC、生成状态机、静态托管
+│   └── nast-plugin/      # mlua 插件：事件钩子 + KV 存储
+├── tests/                # 端到端冒烟脚本（Node）
 └── web/                  # rsbuild + react + tailwind + zustand
 ```
 
@@ -26,10 +31,10 @@ nast/
 cd web && npm install && npm run build && cd ..
 
 # 2. 启动（单端口：http://127.0.0.1:8000 同时服务前端与 /ws）
-cargo run -p nast-server
+cargo run            # 服务端在根包 nast-server，无需 -p
 
 # 或 release 模式
-cargo build --release -p nast-server && ./target/release/nast
+cargo build --release && ./target/release/nast
 ```
 
 也可以直接用一键脚本（自动补建前端 + 启动）：
@@ -93,7 +98,7 @@ cd web && npm run dev   # → http://localhost:3000
 
 ```bash
 cargo test --workspace   # 17 套件 / 100+ 测试
-node crates/nast-server/tests/smoke.js       # RPC 冒烟（需先启动服务 + npm i ws）
-node crates/nast-server/tests/gen_smoke.js   # 生成链路冒烟（内置 mock provider）
-node crates/nast-server/tests/group_smoke.js # 群聊冒烟
+node tests/smoke.js       # RPC 冒烟（需先启动服务 + npm i ws）
+node tests/gen_smoke.js   # 生成链路冒烟（内置 mock provider）
+node tests/group_smoke.js # 群聊冒烟
 ```
