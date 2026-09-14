@@ -50,6 +50,10 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "chats.save" => chats_save(state, params),
         "chats.delete" => chats_delete(state, params),
         "chats.rename" => chats_rename(state, params),
+        "chats.delete_message" => chats_delete_message(state, params),
+        "chats.export" => chats_export(state, params),
+        "plugins.list" => plugins_list(state),
+        "plugins.reload" => plugins_reload(state),
         "generate.run" => generate_run(state, params).await,
         "generate.stop" => generate_stop(state).await,
         "groups.create" => groups_create(state, params),
@@ -59,6 +63,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "groups.chats" => groups_chats(state, params),
         "generate.group" => crate::group_gen::generate_group(state, params).await,
         "chats.swipe" => chats_swipe(state, params),
+        "chats.new" => chats_new(state, params),
         "worlds.list" => worlds_list(state),
         "worlds.get" => worlds_get(state, params),
         "worlds.save" => worlds_save(state, params),
@@ -272,6 +277,97 @@ fn groups_chats(state: SharedState, params: Value) -> RpcResult {
     Ok(json!(group.chats))
 }
 
+/// 删除指定索引的消息（ST 双击删除语义；索引不含 header）。
+fn chats_delete_message(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| RpcError::BadRequest("missing index".into()))? as usize;
+
+    let mut chat = state.user.read_chat(avatar, file_name)?;
+    // +1 跳过 header
+    let pos = index + 1;
+    if pos >= chat.0.len() {
+        return Err(RpcError::BadRequest("index out of range".into()));
+    }
+    chat.0.remove(pos);
+    state.user.save_chat(avatar, file_name, &chat, false)?;
+    Ok(json!({"ok": true}))
+}
+
+/// 导出聊天为 jsonl 文本（ST 导出格式原样）。
+fn chats_export(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let raw = std::fs::read_to_string(state.user.chat_dir_for_character(avatar).join(file_name))
+        .map_err(|_| RpcError::NotFound(file_name.to_string()))?;
+    Ok(json!({"content": raw}))
+}
+
+fn plugins_list(state: SharedState) -> RpcResult {
+    let host = state.plugins.lock().unwrap();
+    Ok(json!({ "plugins": host.list(), "lua": host.lua_names() }))
+}
+
+fn plugins_reload(state: SharedState) -> RpcResult {
+    let mut host = state.plugins.lock().unwrap();
+    let loaded = host.load_dir().map_err(|e| RpcError::Internal(e.to_string()))?;
+    Ok(json!({ "loaded": loaded }))
+}
+
+/// 创建新聊天：写入首行 header + 随机（或指定）开场白消息。
+/// greeting_index: -1 = 随机；0 = first_mes；1.. = alternate_greetings。
+fn chats_new(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let character = read_character(&state, avatar)?;
+    let greeting_index = params
+        .get("greeting_index")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(-1);
+
+    let mut greetings: Vec<String> = Vec::new();
+    greetings.push(character.first_mes.clone());
+    greetings.extend(character.data.alternate_greetings.clone());
+    let greeting = if greeting_index < 0 || greeting_index as usize >= greetings.len() {
+        use rand::Rng;
+        let idx = rand::thread_rng().gen_range(0..greetings.len().max(1));
+        greetings.get(idx).cloned().unwrap_or_default()
+    } else {
+        greetings[greeting_index as usize].clone()
+    };
+
+    let metadata = nast_model::chat::ChatMetadata {
+        integrity: Some(uuid::Uuid::new_v4().to_string()),
+        ..Default::default()
+    };
+    let header = ChatHeader {
+        user_name: "unused".into(),
+        character_name: "unused".into(),
+        chat_metadata: metadata,
+    };
+    let greeting_msg = json!({
+        "name": character.name,
+        "is_user": false,
+        "is_system": false,
+        "send_date": nast_storage::message_time_stamp(),
+        "mes": greeting,
+        "swipes": [greeting],
+        "swipe_id": 0,
+        "swipe_info": [{"send_date": nast_storage::message_time_stamp()}],
+    });
+    let chat = ChatFile(vec![
+        serde_json::to_value(&header).map_err(|e| RpcError::Internal(e.to_string()))?,
+        greeting_msg,
+    ]);
+
+    // 文件名：humanizedDateTime（ST 语义）
+    let file_name = format!("{} - {}.jsonl", character.name, nast_storage::humanized_date_time());
+    state.user.save_chat(avatar, &file_name, &chat, false)?;
+    Ok(json!({"file_name": file_name}))
+}
+
 /// 切换到指定 swipe（左/右箭头）：更新 swipe_id、mes 镜像当前 swipe。
 fn chats_swipe(state: SharedState, params: Value) -> RpcResult {
     let avatar = param_str(&params, "avatar")?;
@@ -413,6 +509,7 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         settings_json: &settings_snapshot,
         provider,
         abort: abort.clone(),
+        plugins: &state.plugins,
     };
     let p = GenerateParams {
         generation_type,
@@ -434,6 +531,22 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         is_group: false,
+        extra_injections: params
+            .get("in_chat_injections")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|inj| {
+                        Some((
+                            inj.get("content")?.as_str()?.to_string(),
+                            inj.get("depth").and_then(|d| d.as_i64()).unwrap_or(4),
+                            inj.get("role").and_then(|r| r.as_i64()).unwrap_or(0),
+                            inj.get("injection_order").and_then(|o| o.as_i64()).unwrap_or(100),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     };
 
     let result = session.run(p).await;

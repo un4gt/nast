@@ -47,6 +47,8 @@ pub struct GenerationControl {
 pub struct AppState {
     pub user: UserData,
     pub hub: EventHub,
+    /// 插件宿主（Lua 插件 + Rust 钩子）；Mutex 因 mlua 非线程安全句柄
+    pub plugins: std::sync::Mutex<nast_plugin::PluginHost>,
     pub settings: RwLock<Value>,
     pub generation: RwLock<GenerationControl>,
     /// 生成循环内 → 广播流的专用通道（流式增量走事件总线）
@@ -65,9 +67,19 @@ pub type SharedState = Arc<AppState>;
 impl AppState {
     pub fn new(user: UserData, settings: Value) -> Self {
         let (stream_tx, stream_rx) = mpsc::channel(1024);
+        // 加载 plugins/ 目录
+        let mut host = nast_plugin::PluginHost::new(std::path::PathBuf::from("plugins"));
+        match host.load_dir() {
+            Ok(names) if !names.is_empty() => {
+                tracing::info!("plugins loaded: {:?}", names);
+            }
+            Err(e) => tracing::warn!("plugin load failed: {e}"),
+            _ => {}
+        }
         Self {
             user,
             hub: EventHub::new(),
+            plugins: std::sync::Mutex::new(host),
             settings: RwLock::new(settings),
             generation: RwLock::new(GenerationControl::default()),
             stream_tx,

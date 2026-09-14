@@ -7,6 +7,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import {
   ChevronLeft, ChevronRight, RefreshCw, Wand2, ArrowRightToLine, Square, SendHorizontal,
 } from 'lucide-react';
+import { rpc } from '../../rpc';
 import { useStore } from '../../store';
 import { MessageBubble } from './MessageBubble';
 import { StreamingBubble } from './StreamingBubble';
@@ -14,10 +15,17 @@ import { StreamingBubble } from './StreamingBubble';
 export function ChatArea() {
   const {
     messages, streamingText, generating, send, swipe, regenerate, continueGen, impersonate,
-    stopGeneration,
+    stopGeneration, appendStreamToken,
   } = useStore();
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // P1：接通后端流式事件——逐 token 追加到 streamingText
+  useEffect(() => {
+    return rpc.on('stream_token_received', (data: { text: string }) => {
+      appendStreamToken(data.text);
+    });
+  }, [appendStreamToken]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -47,7 +55,7 @@ export function ChatArea() {
           {messages.map((m, i) => {
             const isLastAi = i === messages.length - 1 && !m.is_user;
             if (isLastAi && generating && streamingText !== null) return null;
-            return <MessageBubble key={i} m={m} />;
+            return <MessageBubble key={i} m={m} index={i} />;
           })}
           {generating && streamingText !== null && (
             <StreamingBubble name={messages[messages.length - 1]?.name ?? ''} text={streamingText} />

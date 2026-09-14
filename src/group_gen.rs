@@ -115,6 +115,7 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         settings_json: &settings_snapshot,
         provider,
         abort,
+        plugins: &state.plugins,
     };
 
     // 逐成员生成
@@ -138,6 +139,7 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
             persona_description: String::new(),
             persona_position_in_prompt: true,
             is_group: true,
+            extra_injections: Vec::new(),
         };
         let history: Vec<nast_model::chat::ChatMessage> = chat
             .0

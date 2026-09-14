@@ -33,6 +33,8 @@ pub struct GenerateParams {
     pub persona_description: String,
     pub persona_position_in_prompt: bool,
     pub is_group: bool,
+    /// 前端透传的 IN_CHAT 注入（Author's Note 等）：content/depth/role/order
+    pub extra_injections: Vec<(String, i64, i64, i64)>,
 }
 
 pub struct GenerateResult {
@@ -47,6 +49,8 @@ pub struct GenerateSession<'a> {
     pub settings_json: &'a serde_json::Value,
     pub provider: Provider,
     pub abort: tokio_util::sync::CancellationToken,
+    /// 插件宿主（Lua + Rust 钩子）
+    pub plugins: &'a std::sync::Mutex<nast_plugin::PluginHost>,
 }
 
 impl<'a> GenerateSession<'a> {
@@ -54,6 +58,10 @@ impl<'a> GenerateSession<'a> {
         self.hub.emit(
             "generation_started",
             json!({"type": params.generation_type.as_str()}),
+        );
+        self.dispatch_plugin(
+            "generation_started",
+            &json!({"type": params.generation_type.as_str()}),
         );
         let result = match params.generation_type {
             GenerationType::Normal | GenerationType::Regenerate | GenerationType::Swipe => {
@@ -65,6 +73,7 @@ impl<'a> GenerateSession<'a> {
         };
         // GENERATION_ENDED（ST 由 hideStopButton 发出）
         self.hub.emit("generation_ended", json!({}));
+        self.dispatch_plugin("generation_ended", &json!({}));
         result
     }
 
@@ -88,12 +97,14 @@ impl<'a> GenerateSession<'a> {
 
         // normal：sendMessageAsUser —— 用户消息先落盘（无 swipes）
         if p.generation_type == GenerationType::Normal && !p.user_message.is_empty() {
+            // 插件钩子：user_input 可改写用户消息
+            let user_text = self.transform_or(&"user_input", &json!({"text": p.user_message}), &p.user_message);
             let msg = Msg {
                 name: "User".into(),
                 is_user: true,
                 is_system: false,
                 send_date: nast_storage::message_time_stamp(),
-                mes: p.user_message.clone(),
+                mes: user_text,
                 extra: MessageExtra::default(),
                 ..Default::default()
             };
@@ -189,6 +200,9 @@ impl<'a> GenerateSession<'a> {
             }
         }
 
+        // 插件钩子：ai_output 可改写 AI 回复
+        let streamed = self
+            .transform_or(&"ai_output", &json!({"text": streamed, "name": char_name}), &streamed);
         // 落盘：saveReply 语义
         let now = nast_storage::message_time_stamp();
         match p.generation_type {
@@ -550,6 +564,23 @@ impl<'a> GenerateSession<'a> {
         self.provider.generate(&gen_req).await.map_err(|e| e.to_string())
     }
 
+    /// 派发插件事件（无转换返回）。
+    fn dispatch_plugin(&self, event: &str, data: &serde_json::Value) {
+        if let Ok(host) = self.plugins.lock() {
+            let _ = host.dispatch(event, data);
+        }
+    }
+
+    /// 派发转换类钩子：返回插件改写文本或 fallback 原文。
+    fn transform_or(&self, event: &str, data: &serde_json::Value, fallback: &str) -> String {
+        if let Ok(host) = self.plugins.lock() {
+            if let Some(text) = host.dispatch(event, data) {
+                return text;
+            }
+        }
+        fallback.to_string()
+    }
+
     fn save_chat(&self, avatar: &str, file: &str, chat: &ChatFile) -> Result<(), String> {
         self.user
             .save_chat(avatar, file, chat, false)
@@ -687,6 +718,18 @@ pub fn parse_examples(raw: &str) -> Vec<ExampleBlock> {
 /// 角色卡 @depth 注入 + AN（v1：仅角色 depth_prompt；AN 由聊天元数据传入）。
 pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {
     let mut out = Vec::new();
+    // 前端透传（Author's Note 等）：P2 修通注入链路
+    for (content, depth, role, order) in &p.extra_injections {
+        if content.trim().is_empty() {
+            continue;
+        }
+        out.push(InChatInjection {
+            content: content.clone(),
+            depth: *depth,
+            role: *role,
+            injection_order: *order,
+        });
+    }
     if let Some(dp) = &p.character.data.extensions.depth_prompt {
         if !dp.prompt.is_empty() {
             let role = match dp.role.as_str() {

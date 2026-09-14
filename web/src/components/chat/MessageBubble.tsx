@@ -5,8 +5,9 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { rpc } from '../../rpc';
 import { useStore } from '../../store';
 
-export function MessageBubble({ m }: { m: any }) {
-  const { activeAvatar, activeChatName, reloadChat } = useStore();
+export function MessageBubble({ m, index }: { m: any; index: number }) {
+  const { activeAvatar, activeChatName, reloadChat, characters, deleteMessage } = useStore();
+  const char = characters.find((c) => c.name === m.name);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.mes);
 
@@ -26,6 +27,9 @@ export function MessageBubble({ m }: { m: any }) {
     <div className={'group flex w-full gap-2 ' + (m.is_user ? 'justify-end' : 'justify-start')}>
       {!m.is_user && (
         <Avatar className="mt-1 size-8 shrink-0">
+          {char?.avatarUrl ? (
+            <img src={char.avatarUrl} alt={m.name} className="size-full object-cover" />
+          ) : null}
           <AvatarFallback className="bg-primary/20 text-xs text-primary">
             {m.name.slice(0, 2)}
           </AvatarFallback>
@@ -35,6 +39,17 @@ export function MessageBubble({ m }: { m: any }) {
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground/80">{m.name}</span>
           <span className="opacity-60">{formatTime(m.send_date)}</span>
+        </div>
+        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <button
+            onClick={() => {
+              if (activeAvatar && activeChatName) void deleteMessage(index);
+            }}
+            className="text-[10px] text-muted-foreground hover:text-destructive"
+            title="删除此消息"
+          >
+            删除
+          </button>
         </div>
         {editing ? (
           <div className="flex w-full flex-col gap-2">

@@ -40,6 +40,39 @@ async fn upload(mut payload: actix_multipart::Multipart) -> impl Responder {
     HttpResponse::Ok().json(out)
 }
 
+/// 角色头像缩略图：GET /thumbnail?file=<avatar>.png
+/// ST 前端 <img src> 直接可用；v1 原样返回 PNG（浏览器端缩放）。
+async fn thumbnail(
+    req: actix_web::HttpRequest,
+    state: web::Data<crate::state::SharedState>,
+) -> impl Responder {
+    use actix_web::http::header;
+    let file = req
+        .uri()
+        .query()
+        .and_then(|q| {
+            q.split('&').find_map(|kv| {
+                let (k, v) = kv.split_once('=')?;
+                (k == "file").then(|| v.to_string())
+            })
+        })
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // 防目录穿越：只允许文件名字符
+    if file.is_empty() || file.contains("..") || file.contains('/') || file.contains('\\') {
+        return HttpResponse::BadRequest().finish();
+    }
+    let path = state.user.character_dir().join(&file);
+    match std::fs::read(&path) {
+        Ok(bytes) => HttpResponse::Ok()
+            .insert_header((header::CONTENT_TYPE, "image/png"))
+            .insert_header((header::CACHE_CONTROL, "max-age=3600"))
+            .body(bytes),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
@@ -75,6 +108,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(state.clone()))
             .route("/ws", web::get().to(ws::ws_route))
             .route("/upload", web::post().to(upload))
+            .route("/thumbnail", web::get().to(thumbnail))
             .service(Files::new("/", &web_dist).index_file("index.html"))
     })
     .bind(("127.0.0.1", port))?

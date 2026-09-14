@@ -164,6 +164,98 @@ fn lua_value_to_json(v: LuaValue) -> JsonValue {
 }
 
 
+
+/// 生成管线钩子 trait：Rust 扩展点（与 Lua 插件同等地位）。
+/// 返回 Some(新文本) 表示转换；None 表示放行。
+pub trait GenerationHook: Send + Sync {
+    fn name(&self) -> &str;
+    /// 事件："user_input" / "ai_output" / "generation_started" / "generation_ended"
+    fn on_event(&self, event: &str, data: &JsonValue) -> Option<String>;
+}
+
+/// 插件宿主：管理 plugins/ 目录的 Lua 插件 + Rust 钩子。
+/// dispatch_with_timeout 对每个钩子调用限时，防插件死循环卡死生成管线。
+pub struct PluginHost {
+    lua_manager: PluginManager,
+    rust_hooks: Vec<std::sync::Arc<dyn GenerationHook>>,
+    dir: std::path::PathBuf,
+}
+
+impl Default for PluginHost {
+    fn default() -> Self {
+        Self {
+            lua_manager: PluginManager::new(),
+            rust_hooks: Vec::new(),
+            dir: std::path::PathBuf::from("plugins"),
+        }
+    }
+}
+
+impl PluginHost {
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        Self {
+            dir,
+            ..Default::default()
+        }
+    }
+
+    /// 扫描插件目录并加载全部 .lua（存在即重载）。
+    pub fn load_dir(&mut self) -> PluginResult<Vec<String>> {
+        self.lua_manager = PluginManager::new();
+        let mut loaded = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Ok(loaded);
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("lua") {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("plugin")
+                    .to_string();
+                match std::fs::read_to_string(&path) {
+                    Ok(code) => match self.lua_manager.load(&name, &code) {
+                        Ok(()) => loaded.push(name),
+                        Err(e) => tracing::warn!("[plugin:{name}] load failed: {e}"),
+                    },
+                    Err(e) => tracing::warn!("[plugin:{name}] read failed: {e}"),
+                }
+            }
+        }
+        Ok(loaded)
+    }
+
+    pub fn register_rust_hook(&mut self, hook: std::sync::Arc<dyn GenerationHook>) {
+        self.rust_hooks.push(hook);
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.lua_manager.names();
+        names.extend(self.rust_hooks.iter().map(|h| h.name().to_string()));
+        names
+    }
+
+    /// 派发事件：Lua 插件 + Rust 钩子。返回拼接后的转换文本（首个有效转换生效）。
+    pub fn dispatch(&self, event: &str, data: &JsonValue) -> Option<String> {
+        // Lua 侧
+        if let Some((_, text)) = self.lua_manager.dispatch(event, data).into_iter().next() {
+            return Some(text);
+        }
+        // Rust 侧
+        for hook in &self.rust_hooks {
+            if let Some(text) = hook.on_event(event, data) {
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    pub fn lua_names(&self) -> Vec<String> {
+        self.lua_manager.names()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

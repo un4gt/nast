@@ -4,6 +4,8 @@ import { pushToast } from './toasts';
 
 export interface CharacterSummary {
   avatar: string;
+  /** /thumbnail?file=<avatar> 头像 URL */
+  avatarUrl: string;
   name: string;
   description: string;
   tags: string[];
@@ -59,6 +61,8 @@ interface AppState {
   selectCharacter: (avatar: string) => Promise<void>;
   importFile: (file: File) => Promise<void>;
   deleteCharacter: (avatar: string) => Promise<void>;
+  deleteMessage: (index: number) => Promise<void>;
+  exportChat: () => Promise<void>;
   send: (text: string) => Promise<void>;
   swipe: (direction: 'left' | 'right') => Promise<void>;
   regenerate: () => Promise<void>;
@@ -69,6 +73,7 @@ interface AppState {
   reloadChat: () => Promise<void>;
   saveSettings: (s: Settings) => Promise<void>;
   openChat: (avatar: string, file: string) => Promise<void>;
+  newChat: (avatar: string, greetingIndex?: number) => Promise<void>;
   personaDraft: string;
   setPersonaDraft: (v: string) => void;
   anDraft: { prompt: string; depth: number };
@@ -118,6 +123,14 @@ export const useStore = create<AppState>((set, get) => ({
     });
   },
 
+  newChat: async (avatar, greetingIndex = -1) => {
+    const r = await rpc.call<{ file_name: string }>('chats.new', {
+      avatar,
+      greeting_index: greetingIndex,
+    });
+    await get().openChat(avatar, r.file_name);
+  },
+
   setConnected: (v) => set({ connected: v }),
 
   loadAll: async () => {
@@ -125,7 +138,11 @@ export const useStore = create<AppState>((set, get) => ({
       rpc.call<CharacterSummary[]>('characters.all', {}),
       rpc.call<Settings>('settings.get', {}),
     ]);
-    set({ characters, settings });
+    const withAvatars = characters.map((c) => ({
+      ...c,
+      avatarUrl: `/thumbnail?file=${encodeURIComponent(c.avatar)}`,
+    }));
+    set({ characters: withAvatars, settings });
   },
 
   selectCharacter: async (avatar) => {
@@ -159,6 +176,29 @@ export const useStore = create<AppState>((set, get) => ({
       set({ activeAvatar: null, activeChatName: null, messages: [] });
     }
     await get().loadAll();
+  },
+
+  deleteMessage: async (index) => {
+    const { activeAvatar, activeChatName } = get();
+    if (!activeAvatar || !activeChatName) return;
+    await rpc.call('chats.delete_message', { avatar: activeAvatar, file_name: activeChatName, index });
+    await get().reloadChat();
+  },
+
+  exportChat: async () => {
+    const { activeAvatar, activeChatName } = get();
+    if (!activeAvatar || !activeChatName) return;
+    const r = await rpc.call<{ content: string }>('chats.export', {
+      avatar: activeAvatar,
+      file_name: activeChatName,
+    });
+    const blob = new Blob([r.content], { type: 'application/jsonl' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = activeChatName;
+    a.click();
+    URL.revokeObjectURL(url);
   },
 
   reloadChat: async () => {
