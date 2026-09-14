@@ -68,6 +68,26 @@ interface AppState {
   appendStreamToken: (t: string) => void;
   reloadChat: () => Promise<void>;
   saveSettings: (s: Settings) => Promise<void>;
+  openChat: (avatar: string, file: string) => Promise<void>;
+  personaDraft: string;
+  setPersonaDraft: (v: string) => void;
+  anDraft: { prompt: string; depth: number };
+  setAnDraft: (v: { prompt: string; depth: number }) => void;
+}
+
+/** generate.run 的 persona/AN 附加参数（第一期：前端草稿，localStorage 持久化）。 */
+function buildGenExtras(get: () => AppState): Record<string, unknown> {
+  const { personaDraft, anDraft } = get();
+  const extras: Record<string, unknown> = {
+    persona_description: personaDraft,
+    persona_position_in_prompt: true,
+  };
+  if (anDraft.prompt.trim()) {
+    extras.in_chat_injections = [
+      { content: anDraft.prompt, depth: anDraft.depth, role: 0, injection_order: 100 },
+    ];
+  }
+  return extras;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -80,6 +100,23 @@ export const useStore = create<AppState>((set, get) => ({
   streamingText: null,
   generating: false,
   settings: null,
+  personaDraft: '',
+  anDraft: { prompt: '', depth: 4 },
+
+  setPersonaDraft: (v) => set({ personaDraft: v }),
+  setAnDraft: (v) => set({ anDraft: v }),
+
+  openChat: async (avatar, file) => {
+    const chatList = await rpc.call<string[]>('characters.chats', { avatar });
+    const raw = await rpc.call<any[]>('chats.get', { avatar, file_name: file });
+    set({
+      activeAvatar: avatar,
+      chatList,
+      activeChatName: file,
+      messages: raw.slice(1),
+      streamingText: null,
+    });
+  },
 
   setConnected: (v) => set({ connected: v }),
 
@@ -141,6 +178,7 @@ export const useStore = create<AppState>((set, get) => ({
         chat_file: activeChatName,
         type: 'normal',
         user_message: text,
+        ...buildGenExtras(get),
       });
       await get().reloadChat();
     } finally {
@@ -176,7 +214,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (!activeAvatar || !activeChatName || get().generating) return;
     set({ generating: true, streamingText: '' });
     try {
-      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'regenerate' });
+      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'regenerate', ...buildGenExtras(get) });
       await get().reloadChat();
     } finally {
       set({ generating: false, streamingText: null });
@@ -204,7 +242,7 @@ export const useStore = create<AppState>((set, get) => ({
     if (!activeAvatar || !activeChatName || get().generating) return;
     set({ generating: true, streamingText: '' });
     try {
-      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'continue' });
+      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'continue', ...buildGenExtras(get) });
       await get().reloadChat();
     } finally {
       set({ generating: false, streamingText: null });

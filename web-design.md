@@ -38,3 +38,24 @@ Right Inspector
 ├─ Memory
 └─ Generation
 ```
+
+## 设计
+
+layout:
+shadcn sidebar-15
+
+message UI:
+shadcn-chat 风格
+
+streaming / AI:
+shadcn chatbot-template
+
+RP inspector:
+自己做
+
+
+### 相关链接
+
+shadcn sidebar-15 https://ui.shadcn.com/view/new-york-v4/sidebar-15
+
+shadcn chatbot-template
