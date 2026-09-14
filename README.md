@@ -19,9 +19,24 @@ nast/
 
 ## 运行
 
+入口在 `crates/nast-server`（根目录无包，这是 Cargo workspace）。
+
 ```bash
-cargo run -p nast-server            # http://127.0.0.1:8000
-cd web && npm run build             # 前端构建到 web/dist（服务端托管）
+# 1. 首次：构建前端（产物 web/dist，服务端自动托管）
+cd web && npm install && npm run build && cd ..
+
+# 2. 启动（单端口：http://127.0.0.1:8000 同时服务前端与 /ws）
+cargo run -p nast-server
+
+# 或 release 模式
+cargo build --release -p nast-server && ./target/release/nast
+```
+
+也可以直接用一键脚本（自动补建前端 + 启动）：
+
+```bash
+./run.sh        # Git Bash / Linux / macOS
+./run.ps1       # PowerShell
 ```
 
 环境变量：
