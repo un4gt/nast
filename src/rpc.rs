@@ -46,6 +46,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "characters.import" => characters_import(state, params),
         "characters.delete" => characters_delete(state, params),
         "characters.chats" => characters_chats(state, params),
+        "characters.edit" => characters_edit(state, params),
         "chats.get" => chats_get(state, params),
         "chats.save" => chats_save(state, params),
         "chats.delete" => chats_delete(state, params),
@@ -186,6 +187,84 @@ fn characters_delete(state: SharedState, params: Value) -> RpcResult {
     if chat_dir.exists() {
         std::fs::remove_dir_all(chat_dir).map_err(|e| RpcError::Internal(e.to_string()))?;
     }
+    Ok(json!({"ok": true}))
+}
+
+/// 编辑角色卡：部分更新 data 字段（description/personality/scenario/first_mes/mes_example/
+/// system_prompt/post_history_instructions/tags 等），写回 PNG chara chunk。
+fn characters_edit(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let mut ch = read_character(&state, avatar)?;
+
+    let data = params
+        .get("data")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| RpcError::BadRequest("missing data".into()))?;
+    for (k, v) in data {
+        // 白名单：仅允许编辑卡内容字段
+        if matches!(
+            k.as_str(),
+            "description" | "personality" | "scenario" | "first_mes" | "mes_example"
+                | "system_prompt" | "post_history_instructions" | "creator_notes"
+                | "character_version" | "tags" | "alternate_greetings"
+        ) {
+            if let Ok(v) = serde_json::from_value::<serde_json::Value>(v.clone()) {
+                ch.data.extra.remove(k);
+                // 直接写 typed 字段
+                match k.as_str() {
+                    "description" => ch.data.description = v.as_str().unwrap_or_default().to_string(),
+                    "personality" => ch.data.personality = v.as_str().unwrap_or_default().to_string(),
+                    "scenario" => ch.data.scenario = v.as_str().unwrap_or_default().to_string(),
+                    "first_mes" => ch.data.first_mes = v.as_str().unwrap_or_default().to_string(),
+                    "mes_example" => ch.data.mes_example = v.as_str().unwrap_or_default().to_string(),
+                    "system_prompt" => ch.data.system_prompt = v.as_str().unwrap_or_default().to_string(),
+                    "post_history_instructions" => {
+                        ch.data.post_history_instructions = v.as_str().unwrap_or_default().to_string()
+                    }
+                    "creator_notes" => ch.data.creator_notes = v.as_str().unwrap_or_default().to_string(),
+                    "character_version" => {
+                        ch.data.character_version = v.as_str().unwrap_or_default().to_string()
+                    }
+                    "tags" => {
+                        ch.data.tags = v
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                            .unwrap_or_default()
+                    }
+                    "alternate_greetings" => {
+                        ch.data.alternate_greetings = v
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                            .unwrap_or_default()
+                    }
+                    _ => {}
+                }
+                // 同步顶层（ST 内存形态双写）
+                match k.as_str() {
+                    "description" => ch.description = ch.data.description.clone(),
+                    "personality" => ch.personality = ch.data.personality.clone(),
+                    "scenario" => ch.scenario = ch.data.scenario.clone(),
+                    "first_mes" => ch.first_mes = ch.data.first_mes.clone(),
+                    "mes_example" => ch.mes_example = ch.data.mes_example.clone(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // 写回 PNG（剔除旧 chunk + 双写 chara）
+    let path = state.user.character_dir().join(avatar);
+    let png_bytes = std::fs::read(&path).map_err(|e| RpcError::Internal(e.to_string()))?;
+    let v2_json =
+        serde_json::to_value(&ch).map_err(|e| RpcError::Internal(e.to_string()))?;
+    let ccv3 = if v2_json.get("spec").and_then(|s| s.as_str()) == Some("chara_card_v3") {
+        Some(&v2_json)
+    } else {
+        None
+    };
+    let out = nast_cards::write_card(&png_bytes, &v2_json, ccv3)
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    std::fs::write(&path, out).map_err(|e| RpcError::Internal(e.to_string()))?;
     Ok(json!({"ok": true}))
 }
 

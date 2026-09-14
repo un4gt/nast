@@ -46,6 +46,11 @@
 }
 
 /* 消息内容排版 */
+:root {
+  --chat-font-scale: 1;
+  --chat-width: 100%;
+}
+
 .msg-content p {
   margin: 0.25rem 0;
 }

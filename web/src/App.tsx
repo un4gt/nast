@@ -10,7 +10,7 @@ import { ToastHost } from './toasts';
 import { rpc } from './rpc';
 import { useStore } from './store';
 import WorldEditor from './WorldEditor';
-import { SettingsDialog } from './SettingsDialog';
+import { SettingsSheet } from './components/settings/SettingsSheet';
 
 export default function App() {
   const { connected, characters, activeAvatar, activeChatName, setConnected, loadAll, importFile } =
@@ -21,6 +21,14 @@ export default function App() {
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => {
     return localStorage.getItem('nast:inspector_collapsed') === '1';
   });
+
+  useEffect(() => {
+    // 外观设置恢复（localStorage → CSS 变量）
+    const fs = localStorage.getItem('nast:font_scale');
+    if (fs) document.documentElement.style.setProperty('--chat-font-scale', String(Number(fs) / 100));
+    const cw = localStorage.getItem('nast:chat_width');
+    if (cw) document.documentElement.style.setProperty('--chat-width', `${cw}%`);
+  }, []);
 
   useEffect(() => {
     rpc.connect();
@@ -105,7 +113,7 @@ export default function App() {
       <RightInspector collapsed={inspectorCollapsed} onToggleCollapse={toggleInspector} onOpenWorldEditor={() => setShowWorlds(true)} />
 
       {showWorlds && <WorldEditor onClose={() => setShowWorlds(false)} />}
-      <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
+      <SettingsSheet open={showSettings} onOpenChange={setShowSettings} />
       <ToastHost />
       <span className="hidden">{connected}</span>
     </SidebarProvider>
