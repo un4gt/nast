@@ -44,6 +44,7 @@ pub struct GenerateSession<'a> {
     pub user: &'a nast_storage::UserData,
     pub hub: &'a EventHub,
     pub oai: OaiSettings,
+    pub settings_json: &'a serde_json::Value,
     pub provider: Provider,
     pub abort: tokio_util::sync::CancellationToken,
 }
@@ -360,32 +361,136 @@ impl<'a> GenerateSession<'a> {
         p: &'b GenerateParams,
         history: &'b [Msg],
     ) -> crate::prompt_bridge::BridgeInput<'b> {
+        // 正则引擎（M3）：脚本来源 = 全局(extension_settings.regex) + 角色内嵌 + 聊天级
+        let metadata = self
+            .current_chat_metadata(&p.avatar, &p.chat_file)
+            .unwrap_or_default();
+        let regex_scripts = self.collect_regex_scripts(&p.character, &metadata);
+        let total = history.len();
+
         let messages: Vec<HistoryMessage> = history
             .iter()
             .filter(|m| !m.is_system)
-            .map(|m| {
+            .enumerate()
+            .map(|(idx, m)| {
+                // 距底深度（0 = 最新）
+                let depth = (total - 1 - idx) as i64;
+                let placement = if m.is_user {
+                    nast_model::regex_script::RP_USER_INPUT
+                } else {
+                    nast_model::regex_script::RP_AI_OUTPUT
+                };
+                let macro_fn = |s: &str| {
+                    crate::prompt_bridge::substitute_basic(s, "User", &p.character.name)
+                };
+                let params = nast_engine::regex_engine::RegexParams {
+                    depth: Some(depth),
+                    is_prompt: true,
+                    ..Default::default()
+                };
                 let role = if m.is_user { "user" } else { "assistant" };
-                let mut content = m.mes.clone();
+                let mut content = nast_engine::regex_engine::get_regexed_string(
+                    &m.mes, placement, &regex_scripts, &params, &macro_fn,
+                );
                 // names_behavior CONTENT（2）：所有人加前缀；DEFAULT（0）：仅群/强制头像
                 let names_behavior = self.oai.character_names_behavior;
-                if (names_behavior == 2 && m.extra.kind.as_deref() != Some("narrator"))
-                    || (names_behavior == 0 && p.is_group && m.name != "User")
+                let is_narrator = m.extra.kind.as_deref() == Some("narrator");
+                if (names_behavior == 2 && !is_narrator)
+                    || (names_behavior == 0 && p.is_group && m.name != "User" && !is_narrator)
                 {
-                    if m.extra.kind.as_deref() != Some("narrator") {
-                        content = format!("{}: {}", m.name, content);
-                    }
+                    content = format!("{}: {}", m.name, content);
                 }
-                content = content.replace('\r', "");
+                content = content.replace(String::from("\r").as_str(), "");
                 HistoryMessage {
                     role: role.into(),
                     content,
                     name: None, // COMPLETION(1) 才带 name 字段，v1 默认 0
-                    is_narrator: m.extra.kind.as_deref() == Some("narrator"),
+                    is_narrator,
                     injected: false,
                 }
             })
             .collect();
         let _ = CC_DUMMY_ID;
+
+        // 世界书引擎（M3）：聊天书 = chat_metadata.world；角色书 = data.extensions.world
+        let mut wi_before = String::new();
+        let mut wi_after = String::new();
+        let mut wi_depth_injections: Vec<InChatInjection> = Vec::new();
+        {
+            let settings = self.wi_settings();
+            // 聊天级世界书
+            let chat_book_name = metadata.world.clone();
+            let mut chat_book = None;
+            if let Some(name) = &chat_book_name {
+                chat_book = self.user.read_world(name).ok();
+            }
+            let mut char_book = None;
+            if let Some(name) = &p.character.data.extensions.world {
+                char_book = self.user.read_world(name).ok();
+            }
+            let empty: Vec<&nast_model::world::WorldInfoBook> = Vec::new();
+            let books = nast_engine::world_info::WiBooks {
+                chat_lore: chat_book.as_ref().map(|b| vec![b]).unwrap_or(empty.clone()),
+                character_lore: char_book.as_ref().map(|b| vec![b]).unwrap_or(empty.clone()),
+                persona_lore: empty.clone(),
+                global_lore: empty,
+            };
+            if chat_book.is_some() || char_book.is_some() {
+                let scan_source = nast_engine::world_info::ScanSource {
+                    chat: history.iter().map(|m| m.mes.clone()).collect(),
+                    persona_description: p.persona_description.clone(),
+                    char_description: p.character.data.description.clone(),
+                    char_personality: p.character.data.personality.clone(),
+                    char_depth_prompt: p
+                        .character
+                        .data
+                        .extensions
+                        .depth_prompt
+                        .as_ref()
+                        .map(|d| d.prompt.clone())
+                        .unwrap_or_default(),
+                    scenario: p.character.data.scenario.clone(),
+                };
+                // timedWorldInfo 持久化到聊天元数据
+                let mut timed = metadata.timed_world_info.clone().unwrap_or_default();
+                let chat_length = history.len() as i64;
+                let max_context = self.oai.openai_max_context - self.oai.openai_max_tokens;
+                let env = nast_engine::macros::MacroEnv {
+                    user: "User".into(),
+                    char: p.character.name.clone(),
+                    group: p.character.name.clone(),
+                    description: p.character.data.description.clone(),
+                    personality: p.character.data.personality.clone(),
+                    scenario: p.character.data.scenario.clone(),
+                    persona: p.persona_description.clone(),
+                    ..Default::default()
+                };
+                let mut state = nast_engine::world_info::WiState {
+                    timed: &mut timed,
+                    chat_length,
+                };
+                let wi = nast_engine::world_info::check_world_info(
+                    &books, &settings, &scan_source, &mut state, &env, max_context,
+                );
+                let mut metadata_to_save = metadata.clone();
+                metadata_to_save.timed_world_info = Some(timed);
+                self.save_chat_metadata(&p.avatar, &p.chat_file, &metadata_to_save);
+                wi_before = wi.world_info_before;
+                wi_after = wi.world_info_after;
+                for de in &wi.depth_entries {
+                    wi_depth_injections.push(InChatInjection {
+                        content: de.content.clone(),
+                        depth: de.depth,
+                        role: de.role,
+                        injection_order: de.order,
+                    });
+                }
+            }
+        }
+
+        let mut all_injections = build_injections(p);
+        all_injections.extend(wi_depth_injections);
+
         crate::prompt_bridge::BridgeInput {
             oai: &self.oai,
             generation_type: p.generation_type.as_str(),
@@ -397,12 +502,12 @@ impl<'a> GenerateSession<'a> {
             scenario: p.character.data.scenario.clone(),
             persona_description: p.persona_description.clone(),
             persona_position_in_prompt: p.persona_position_in_prompt,
-            world_info_before: String::new(), // M3 接入世界书
-            world_info_after: String::new(),
+            world_info_before: wi_before,
+            world_info_after: wi_after,
             messages,
             message_examples: parse_examples(&p.character.data.mes_example),
             pin_examples: false,
-            in_chat_injections: build_injections(p),
+            in_chat_injections: all_injections,
             system_prompt_override: {
                 let sp = &p.character.data.system_prompt;
                 if !sp.is_empty() { Some(sp.clone()) } else { None }
@@ -456,6 +561,87 @@ impl<'a> GenerateSession<'a> {
 
     fn emit_message_deleted(&self, at: usize) {
         self.hub.emit("message_deleted", json!(at));
+    }
+
+    /// 读当前聊天的 chat_metadata。
+    fn current_chat_metadata(
+        &self,
+        avatar: &str,
+        file: &str,
+    ) -> Option<nast_model::chat::ChatMetadata> {
+        self.user.read_chat(avatar, file).ok().map(|c| c.metadata())
+    }
+
+    /// 仅保存聊天元数据（保留消息不变）。
+    fn save_chat_metadata(&self, avatar: &str, file: &str, metadata: &nast_model::chat::ChatMetadata) {
+        if let Ok(mut chat) = self.user.read_chat(avatar, file) {
+            if let Some(header) = chat.0.first_mut() {
+                header["chat_metadata"] =
+                    serde_json::to_value(metadata).unwrap_or_else(|_| json!({}));
+                let _ = self.user.save_chat(avatar, file, &chat, false);
+            }
+        }
+    }
+
+    /// 聚合三作用域正则脚本：全局（settings）→ 角色内嵌 → 聊天级。
+    fn collect_regex_scripts(
+        &self,
+        character: &nast_model::card::Character,
+        metadata: &nast_model::chat::ChatMetadata,
+    ) -> Vec<nast_model::regex_script::RegexScript> {
+        let mut out: Vec<nast_model::regex_script::RegexScript> = Vec::new();
+        // 全局：extension_settings.regex
+        if let Some(list) = self
+            .settings_json
+            .get("extension_settings")
+            .and_then(|e| e.get("regex"))
+            .and_then(|v| v.as_array())
+        {
+            for s in list {
+                if let Ok(script) =
+                    serde_json::from_value::<nast_model::regex_script::RegexScript>(s.clone())
+                {
+                    out.push(script);
+                }
+            }
+        }
+        // 角色内嵌：data.extensions.regex_scripts
+        out.extend(character.data.extensions.regex_scripts.clone());
+        // 聊天级
+        out.extend(metadata.regex_scripts.clone());
+        out
+    }
+
+    /// WI 全局设置（settings.json 的 world_info 切片；缺省用默认值）。
+    fn wi_settings(&self) -> nast_engine::world_info::WiSettings {
+        let default = nast_engine::world_info::WiSettings::default();
+        let Some(wi) = self
+            .settings_json
+            .get("world_info")
+            .and_then(|v| v.as_object())
+        else {
+            return default;
+        };
+        nast_engine::world_info::WiSettings {
+            depth: wi.get("world_info_depth").and_then(|v| v.as_i64()).unwrap_or(default.depth),
+            min_activations: wi.get("world_info_min_activations").and_then(|v| v.as_i64()).unwrap_or(default.min_activations),
+            min_activations_depth_max: wi.get("world_info_min_activations_depth_max").and_then(|v| v.as_i64()).unwrap_or(default.min_activations_depth_max),
+            budget: wi.get("world_info_budget").and_then(|v| v.as_i64()).unwrap_or(default.budget),
+            budget_cap: wi.get("world_info_budget_cap").and_then(|v| v.as_i64()).unwrap_or(default.budget_cap),
+            recursive: wi.get("world_info_recursive").and_then(|v| v.as_bool()).unwrap_or(default.recursive),
+            case_sensitive: wi.get("world_info_case_sensitive").and_then(|v| v.as_bool()).unwrap_or(default.case_sensitive),
+            match_whole_words: wi.get("world_info_match_whole_words").and_then(|v| v.as_bool()).unwrap_or(default.match_whole_words),
+            use_group_scoring: wi.get("world_info_use_group_scoring").and_then(|v| v.as_bool()).unwrap_or(default.use_group_scoring),
+            max_recursion_steps: wi
+                .get("world_info_max_recursion_steps")
+                .map(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_bool().map(|b| b as i64))
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0),
+            character_strategy: wi.get("world_info_character_strategy").and_then(|v| v.as_i64()).unwrap_or(default.character_strategy),
+        }
     }
 }
 

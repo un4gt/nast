@@ -307,10 +307,12 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         },
     });
 
+    let settings_snapshot = state.settings.read().await.clone();
     let session = GenerateSession {
         user: &state.user,
         hub: &state.hub,
         oai,
+        settings_json: &settings_snapshot,
         provider,
         abort: abort.clone(),
     };

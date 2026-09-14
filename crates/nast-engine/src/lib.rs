@@ -2,5 +2,7 @@
 
 pub mod macros;
 pub mod prompt;
+pub mod regex_engine;
 pub mod rng;
 pub mod tokens;
+pub mod world_info;
