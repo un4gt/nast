@@ -24,6 +24,26 @@ export interface ChatMessage {
   extra?: Record<string, unknown>;
 }
 
+export interface Settings {
+  oai_settings?: {
+    chat_completion_source?: string;
+    openai_model?: string;
+    openai_max_context?: number;
+    openai_max_tokens?: number;
+    temperature?: number;
+    top_p?: number;
+    frequency_penalty?: number;
+    presence_penalty?: number;
+    stream_openai?: boolean;
+    continue_prefill?: boolean;
+    send_if_empty?: string;
+    squash_system_messages?: boolean;
+    [k: string]: unknown;
+  };
+  world_info?: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
 interface AppState {
   connected: boolean;
   characters: CharacterSummary[];
@@ -31,19 +51,23 @@ interface AppState {
   activeChatName: string | null;
   chatList: string[];
   messages: ChatMessage[];
-  streamingText: string | null; // 流式中的增量文本
+  streamingText: string | null;
   generating: boolean;
+  settings: Settings | null;
   setConnected: (v: boolean) => void;
-  loadCharacters: () => Promise<void>;
+  loadAll: () => Promise<void>;
   selectCharacter: (avatar: string) => Promise<void>;
   importFile: (file: File) => Promise<void>;
+  deleteCharacter: (avatar: string) => Promise<void>;
   send: (text: string) => Promise<void>;
-  swipe: () => Promise<void>;
+  swipe: (direction: 'left' | 'right') => Promise<void>;
   regenerate: () => Promise<void>;
-  impersonate: () => Promise<void>;
+  impersonate: () => Promise<string | undefined>;
+  continueGen: () => Promise<void>;
+  stopGeneration: () => Promise<void>;
   appendStreamToken: (t: string) => void;
-  clearStreaming: () => void;
   reloadChat: () => Promise<void>;
+  saveSettings: (s: Settings) => Promise<void>;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -55,21 +79,25 @@ export const useStore = create<AppState>((set, get) => ({
   messages: [],
   streamingText: null,
   generating: false,
+  settings: null,
 
   setConnected: (v) => set({ connected: v }),
 
-  loadCharacters: async () => {
-    const characters = await rpc.call<CharacterSummary[]>('characters.all', {});
-    set({ characters });
+  loadAll: async () => {
+    const [characters, settings] = await Promise.all([
+      rpc.call<CharacterSummary[]>('characters.all', {}),
+      rpc.call<Settings>('settings.get', {}),
+    ]);
+    set({ characters, settings });
   },
 
   selectCharacter: async (avatar) => {
     const chatList = await rpc.call<string[]>('characters.chats', { avatar });
     const activeChatName = chatList.length ? chatList[chatList.length - 1] : null;
-    let messages: ChatMessage[] = [];
+    let messages = [];
     if (activeChatName) {
       const raw = await rpc.call<any[]>('chats.get', { avatar, file_name: activeChatName });
-      messages = raw.slice(1) as ChatMessage[];
+      messages = raw.slice(1);
     }
     set({ activeAvatar: avatar, chatList, activeChatName, messages, streamingText: null });
   },
@@ -80,25 +108,33 @@ export const useStore = create<AppState>((set, get) => ({
     const data_base64 = btoa(bin);
     try {
       await rpc.call('characters.import', { data_base64 });
-      await get().loadCharacters();
-      pushToast(`已导入 ${file.name}`, 'success');
+      await get().loadAll();
+      pushToast('已导入 ' + file.name, 'success');
     } catch (e) {
-      pushToast(`导入失败 ${file.name}: ${(e as Error).message}`, 'error');
+      pushToast('导入失败 ' + file.name + ': ' + (e instanceof Error ? e.message : String(e)), 'error');
       throw e;
     }
+  },
+
+  deleteCharacter: async (avatar) => {
+    await rpc.call('characters.delete', { avatar });
+    if (get().activeAvatar === avatar) {
+      set({ activeAvatar: null, activeChatName: null, messages: [] });
+    }
+    await get().loadAll();
   },
 
   reloadChat: async () => {
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName) return;
     const raw = await rpc.call<any[]>('chats.get', { avatar: activeAvatar, file_name: activeChatName });
-    set({ messages: raw.slice(1) as ChatMessage[] });
+    set({ messages: raw.slice(1) });
   },
 
   send: async (text) => {
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName || get().generating) return;
-    set({ generating: true, streamingText: '', user_message_pending: text } as any);
+    set({ generating: true, streamingText: '' });
     try {
       await rpc.call('generate.run', {
         avatar: activeAvatar,
@@ -109,13 +145,21 @@ export const useStore = create<AppState>((set, get) => ({
       await get().reloadChat();
     } finally {
       set({ generating: false, streamingText: null });
-      delete (get() as any).user_message_pending;
     }
   },
 
-  swipe: async () => {
-    const { activeAvatar, activeChatName } = get();
-    if (!activeAvatar || !activeChatName || get().generating) return;
+  swipe: async (direction) => {
+    const { activeAvatar, activeChatName, generating } = get();
+    if (!activeAvatar || !activeChatName) return;
+    if (!generating) {
+      const last = get().messages[get().messages.length - 1];
+      const total = last?.swipes?.length ?? 0;
+      if (total > 1) {
+        await rpc.call('chats.swipe', { avatar: activeAvatar, file_name: activeChatName, direction });
+        await get().reloadChat();
+        return;
+      }
+    }
     set({ generating: true, streamingText: '' });
     try {
       await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'swipe' });
@@ -153,8 +197,27 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  appendStreamToken: (t) =>
-    set((s) => ({ streamingText: (s.streamingText ?? '') + t })),
+  continueGen: async () => {
+    const { activeAvatar, activeChatName } = get();
+    if (!activeAvatar || !activeChatName || get().generating) return;
+    set({ generating: true, streamingText: '' });
+    try {
+      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'continue' });
+      await get().reloadChat();
+    } finally {
+      set({ generating: false, streamingText: null });
+    }
+  },
 
-  clearStreaming: () => set({ streamingText: null }),
+  stopGeneration: async () => {
+    await rpc.call('generate.stop', {});
+    set({ generating: false });
+  },
+
+  appendStreamToken: (t) => set((s) => ({ streamingText: (s.streamingText ?? '') + t })),
+
+  saveSettings: async (s) => {
+    await rpc.call('settings.save', { settings: s });
+    set({ settings: s });
+  },
 }));
