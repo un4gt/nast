@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { rpc } from './rpc';
 import { useStore } from './store';
+import WorldEditor from './WorldEditor';
 
 export default function App() {
   const {
@@ -8,6 +9,7 @@ export default function App() {
     setConnected, loadCharacters, selectCharacter, importFile,
   } = useStore();
   const [dragOver, setDragOver] = useState(false);
+  const [showWorlds, setShowWorlds] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -61,6 +63,12 @@ export default function App() {
             </div>
           )}
         </div>
+        <button
+          onClick={() => setShowWorlds(true)}
+          className="m-2 mb-0 py-2 rounded-lg bg-raised text-fg text-sm hover:bg-line"
+        >
+          世界书管理
+        </button>
         <input
           ref={fileRef}
           type="file"
@@ -79,6 +87,9 @@ export default function App() {
           导入角色卡
         </button>
       </aside>
+
+      {/* 世界书编辑器 */}
+      {showWorlds && <WorldEditor onClose={() => setShowWorlds(false)} />}
 
       {/* 聊天区 */}
       <main className="flex-1 flex flex-col min-w-0">
