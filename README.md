@@ -39,6 +39,20 @@ cargo build --release -p nast-server && ./target/release/nast
 ./run.ps1       # PowerShell
 ```
 
+### 前端开发模式（HMR）
+
+两个终端：API 服务（8000）+ rsbuild devserver（3000，热更新）。devserver 把
+`/ws`（WebSocket）与 `/upload` 代理到 8000，前端代码改动即时生效，无需构建：
+
+```bash
+# 终端 1
+cargo run -p nast-server
+# 终端 2
+cd web && npm run dev   # → http://localhost:3000
+```
+
+代理目标在 `web/rsbuild.config.ts` 的 `server.proxy`，后端端口改动时同步修改。
+
 环境变量：
 
 | 变量 | 默认 | 说明 |
