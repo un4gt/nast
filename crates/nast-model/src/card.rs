@@ -312,14 +312,59 @@ pub struct CardChunk {
 
 impl Character {
     /// V1 顶层 + V2 data 合并的 ST 内存形态（characters.js import 后的形状）。
+    ///
+    /// 兼容三种输入形态（characters.js charaFormatData 语义）：
+    /// - V1：字段全在顶层，无 data
+    /// - V2/V3：字段全在 data 下，顶层只有 spec（野生卡常见——顶层 name 可缺失）
+    /// - ST 内存形态：顶层 + data 并存
     pub fn from_card_json(v: &Value) -> ModelResult<Self> {
         let obj = v
             .as_object()
             .ok_or(ModelError::InvalidValue { field: "card", reason: "root is not an object".into() })?;
         let spec = obj.get("spec").and_then(|s| s.as_str()).unwrap_or("");
-        let mut ch: Character = serde_json::from_value(v.clone())?;
-        // data 缺失（V1）→ 从顶层合成
-        if spec.is_empty() && obj.get("data").is_none() {
+        let has_data = obj.get("data").is_some();
+
+        // 第一阶段：data 对象优先解析（野生 V2/V3 的字段全部在此）
+        let mut ch: Character = if has_data {
+            // 顶层宽容解析：name 缺失时先置空（后面从 data 回填）
+            let mut c: Character = serde_json::from_value(v.clone()).or_else(|_| {
+                let mut partial: Value = v.clone();
+                partial["name"] = Value::String(String::new());
+                serde_json::from_value(partial)
+            })?;
+            // 顶层字段从 data 合成（ST import 后顶层与 data 并存）
+            let d = &c.data;
+            if c.name.is_empty() {
+                c.name = d.name.clone();
+            }
+            if c.description.is_empty() && !d.description.is_empty() {
+                c.description = d.description.clone();
+            }
+            if c.personality.is_empty() && !d.personality.is_empty() {
+                c.personality = d.personality.clone();
+            }
+            if c.scenario.is_empty() && !d.scenario.is_empty() {
+                c.scenario = d.scenario.clone();
+            }
+            if c.first_mes.is_empty() && !d.first_mes.is_empty() {
+                c.first_mes = d.first_mes.clone();
+            }
+            if c.mes_example.is_empty() && !d.mes_example.is_empty() {
+                c.mes_example = d.mes_example.clone();
+            }
+            if c.creator_notes.is_empty() && !d.creator_notes.is_empty() {
+                c.creator_notes = d.creator_notes.clone();
+            }
+            if c.tags.is_empty() && !d.tags.is_empty() {
+                c.tags = d.tags.clone();
+            }
+            c
+        } else {
+            serde_json::from_value(v.clone())?
+        };
+
+        // 第二阶段：V1（无 data）→ 从顶层合成 data
+        if spec.is_empty() && !has_data {
             ch.data = V2CharData {
                 name: ch.name.clone(),
                 description: ch.description.clone(),

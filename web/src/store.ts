@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { rpc } from './rpc';
+import { pushToast } from './toasts';
 
 export interface CharacterSummary {
   avatar: string;
@@ -77,8 +78,14 @@ export const useStore = create<AppState>((set, get) => ({
     const buf = await file.arrayBuffer();
     const bin = Array.from(new Uint8Array(buf), (b) => String.fromCharCode(b)).join('');
     const data_base64 = btoa(bin);
-    await rpc.call('characters.import', { data_base64 });
-    await get().loadCharacters();
+    try {
+      await rpc.call('characters.import', { data_base64 });
+      await get().loadCharacters();
+      pushToast(`已导入 ${file.name}`, 'success');
+    } catch (e) {
+      pushToast(`导入失败 ${file.name}: ${(e as Error).message}`, 'error');
+      throw e;
+    }
   },
 
   reloadChat: async () => {

@@ -1,5 +1,5 @@
 // WS RPC 客户端：请求-响应 + 事件订阅
-type Pending = { resolve: (v: any) => void; reject: (e: Error) => void };
+type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; method: string };
 
 type Handler = (data: any) => void;
 
@@ -27,8 +27,11 @@ class RpcClient {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
-      else p.resolve(msg.result);
+      if (msg.error) {
+        // 所有 RPC 错误统一走 rpc_error 事件（全局 toast），调用方仍可 catch 覆盖
+        this.emit('$rpc_error', { method: p.method, code: msg.error.code, message: msg.error.message });
+        p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
+      } else p.resolve(msg.result);
     };
     ws.onclose = () => {
       this.ws = null;
@@ -59,7 +62,7 @@ class RpcClient {
         return;
       }
       const id = String(this.nextId++);
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, method });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }

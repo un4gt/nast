@@ -149,3 +149,49 @@ fn chat_header_defaults_unused() {
     assert_eq!(h.character_name, "unused");
     assert_eq!(h.chat_metadata.world.as_deref(), Some("Eldoria"));
 }
+
+#[test]
+fn parse_wild_v2_card_no_top_level_name() {
+    // 野生 V2 卡：字段全在 data 下，顶层只有 spec（用户报告的 missing field name 场景）
+    let v2 = serde_json::json!({
+        "spec": "chara_card_v2",
+        "spec_version": "2.0",
+        "data": {
+            "name": "WildCard",
+            "description": "desc only in data",
+            "first_mes": "hi",
+            "alternate_greetings": ["a"],
+            "extensions": {"world": "SomeBook"}
+        }
+    });
+    let ch = card::Character::from_card_json(&v2).unwrap();
+    assert_eq!(ch.name, "WildCard");
+    assert_eq!(ch.data.name, "WildCard");
+    // 顶层字段回填
+    assert_eq!(ch.description, "desc only in data");
+    assert_eq!(ch.first_mes, "hi");
+    // extensions 合成
+    assert_eq!(ch.data.extensions.world.as_deref(), Some("SomeBook"));
+    let dp = ch.data.extensions.depth_prompt.as_ref().unwrap();
+    assert_eq!(dp.depth, 4);
+}
+
+#[test]
+fn parse_v3_card_no_top_level_name() {
+    let v3 = serde_json::json!({
+        "spec": "chara_card_v3",
+        "spec_version": "3.0",
+        "data": {
+            "name": "V3Char",
+            "nickname": "V3",
+            "description": "d",
+            "creator_notes": "notes",
+            "assets": [{"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}]
+        }
+    });
+    let ch = card::Character::from_card_json(&v3).unwrap();
+    assert_eq!(ch.name, "V3Char");
+    assert_eq!(ch.data.nickname.as_deref(), Some("V3"));
+    assert_eq!(ch.data.creator_notes, "notes");
+    assert_eq!(ch.data.assets.as_ref().unwrap().len(), 1);
+}

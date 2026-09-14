@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { rpc } from './rpc';
 import { useStore } from './store';
 import WorldEditor from './WorldEditor';
+import { ToastHost, pushToast } from './toasts';
 
 export default function App() {
   const {
@@ -22,11 +23,16 @@ export default function App() {
     const onToken = rpc.on('stream_token_received', (data: { text: string }) => {
       useStore.getState().appendStreamToken(data.text);
     });
-    return () => { onConnect(); onDisconnect(); onToken(); };
+    // 全局 RPC 错误 → toast（调用方未 catch 的也至少有提示）
+    const onRpcError = rpc.on('$rpc_error', (e: { method: string; message: string }) => {
+      pushToast(`${e.message}`, 'error');
+    });
+    return () => { onConnect(); onDisconnect(); onToken(); onRpcError(); };
   }, []);
 
   return (
     <div className="flex h-screen">
+      <ToastHost />
       {/* 角色侧栏 */}
       <aside className="w-64 shrink-0 border-r border-line bg-surface flex flex-col">
         <header className="px-4 py-3 border-b border-line">
