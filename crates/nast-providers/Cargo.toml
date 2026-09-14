@@ -1,0 +1,15 @@
+[package]
+name = "nast-providers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nast-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = "1.12.1"

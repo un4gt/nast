@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nast-model",
+    "crates/nast-cards",
+    "crates/nast-storage",
+    "crates/nast-engine",
+    "crates/nast-providers",
+    "crates/nast-plugin",
+    "crates/nast-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0"
+
+[workspace.dependencies]
+nast-model = { path = "crates/nast-model" }
+nast-cards = { path = "crates/nast-cards" }
+nast-storage = { path = "crates/nast-storage" }
+nast-engine = { path = "crates/nast-engine" }
+nast-providers = { path = "crates/nast-providers" }
+nast-plugin = { path = "crates/nast-plugin" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["full"] }
+actix-web = "4"
+actix-ws = "0.3"
+actix-files = "0.6"
+reqwest = { version = "0.12", features = ["json", "stream", "gzip"] }
+futures-util = "0.3"
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-tungstenite = "0.24"
+rand = "0.8"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+tiktoken-rs = "0.6"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,11 @@
+[package]
+name = "nast-plugin"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nast-model = { workspace = true }
+mlua = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
