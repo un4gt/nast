@@ -29,3 +29,4 @@ base64.workspace = true
 chrono.workspace = true
 tokio-util = "0.7.19"
 actix-multipart = "0.8.1"
+rand.workspace = true

@@ -1498,6 +1498,7 @@ dependencies = [
  "nast-plugin",
  "nast-providers",
  "nast-storage",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "thiserror",

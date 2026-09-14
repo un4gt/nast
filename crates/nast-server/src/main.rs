@@ -2,6 +2,7 @@
 
 mod events;
 mod generate;
+mod group_gen;
 mod prompt_bridge;
 mod rpc;
 mod state;

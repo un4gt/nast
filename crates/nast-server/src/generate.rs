@@ -521,7 +521,7 @@ impl<'a> GenerateSession<'a> {
         }
     }
 
-    async fn call_provider(
+    pub async fn call_provider(
         &self,
         assembled: &AssembleOutput,
         prefill: Option<&str>,
@@ -564,7 +564,7 @@ impl<'a> GenerateSession<'a> {
     }
 
     /// 读当前聊天的 chat_metadata。
-    fn current_chat_metadata(
+    pub fn current_chat_metadata(
         &self,
         avatar: &str,
         file: &str,
@@ -584,7 +584,7 @@ impl<'a> GenerateSession<'a> {
     }
 
     /// 聚合三作用域正则脚本：全局（settings）→ 角色内嵌 → 聊天级。
-    fn collect_regex_scripts(
+    pub fn collect_regex_scripts(
         &self,
         character: &nast_model::card::Character,
         metadata: &nast_model::chat::ChatMetadata,
@@ -661,7 +661,7 @@ fn ensure_integrity(chat: &mut ChatFile) {
 }
 
 /// mes_example 解析：<START> 分块，{{user}}/{{char}} 行对。
-fn parse_examples(raw: &str) -> Vec<ExampleBlock> {
+pub fn parse_examples(raw: &str) -> Vec<ExampleBlock> {
     let mut blocks = Vec::new();
     for block in raw.split("<START>") {
         let mut msgs = Vec::new();
@@ -688,7 +688,7 @@ fn parse_examples(raw: &str) -> Vec<ExampleBlock> {
 }
 
 /// 角色卡 @depth 注入 + AN（v1：仅角色 depth_prompt；AN 由聊天元数据传入）。
-fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {
+pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {
     let mut out = Vec::new();
     if let Some(dp) = &p.character.data.extensions.depth_prompt {
         if !dp.prompt.is_empty() {

@@ -52,6 +52,12 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "chats.rename" => chats_rename(state, params),
         "generate.run" => generate_run(state, params).await,
         "generate.stop" => generate_stop(state).await,
+        "groups.create" => groups_create(state, params),
+        "groups.edit" => groups_edit(state, params),
+        "groups.delete" => groups_delete(state, params),
+        "groups.get" => groups_get(state),
+        "groups.chats" => groups_chats(state, params),
+        "generate.group" => crate::group_gen::generate_group(state, params).await,
         "worlds.list" => worlds_list(state),
         "worlds.get" => worlds_get(state, params),
         "worlds.save" => worlds_save(state, params),
@@ -79,7 +85,7 @@ async fn settings_save(state: SharedState, params: Value) -> RpcResult {
 
 // ---------- characters ----------
 
-fn read_character(state: &SharedState, avatar: &str) -> Result<Character, RpcError> {
+pub fn read_character(state: &SharedState, avatar: &str) -> Result<Character, RpcError> {
     let path = state.user.character_dir().join(avatar);
     let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(avatar.into()))?;
     nast_cards::read_card(&bytes).map_err(|e| RpcError::BadRequest(e.to_string()))
@@ -215,6 +221,55 @@ fn chats_rename(state: SharedState, params: Value) -> RpcResult {
 }
 
 // ---------- worlds ----------
+
+fn groups_create(state: SharedState, params: Value) -> RpcResult {
+    let mut group: nast_model::group::Group = serde_json::from_value(
+        params.get("group").cloned().unwrap_or(json!({})),
+    )
+    .unwrap_or_default();
+    group.id = uuid::Uuid::new_v4().to_string();
+    if group.name.is_empty() {
+        group.name = "New Group".into();
+    }
+    let chat_id = nast_storage::humanized_date_time();
+    group.chat_id = chat_id.clone();
+    group.chats = vec![chat_id];
+    state.user.save_group(&group)?;
+    serde_json::to_value(&group).map_err(|e| RpcError::Internal(e.to_string()))
+}
+
+fn groups_edit(state: SharedState, params: Value) -> RpcResult {
+    let group: nast_model::group::Group = serde_json::from_value(
+        params
+            .get("group")
+            .cloned()
+            .ok_or_else(|| RpcError::BadRequest("missing group".into()))?,
+    )
+    .map_err(|e| RpcError::BadRequest(format!("invalid group: {e}")))?;
+    state.user.save_group(&group)?;
+    Ok(json!({"ok": true}))
+}
+
+fn groups_delete(state: SharedState, params: Value) -> RpcResult {
+    let id = param_str(&params, "id")?;
+    state.user.delete_group(id)?;
+    Ok(json!({"ok": true}))
+}
+
+fn groups_get(state: SharedState) -> RpcResult {
+    let groups = state.user.list_groups()?;
+    serde_json::to_value(groups).map_err(|e| RpcError::Internal(e.to_string()))
+}
+
+fn groups_chats(state: SharedState, params: Value) -> RpcResult {
+    let id = param_str(&params, "id")?;
+    let groups = state.user.list_groups()?;
+    let group = groups
+        .iter()
+        .find(|g| g.id == id)
+        .ok_or_else(|| RpcError::NotFound(format!("group {id}")))?;
+    Ok(json!(group.chats))
+}
 
 fn worlds_list(state: SharedState) -> RpcResult {
     Ok(json!(state.user.list_worlds()?))
