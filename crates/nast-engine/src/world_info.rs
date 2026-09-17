@@ -3,23 +3,33 @@
 //! 契约锚点（refrence/SillyTavern/public/scripts/world-info.js）：
 //! - 枚举：position 0-7、selectiveLogic 0-3（AND_ANY/NOT_ALL/NOT_ANY/AND_ALL）、
 //!   insertion strategy 0-2（evenly/character_first/global_first）
-//! - 排序：order 降序迭代；before 块 unshift 翻转为升序、after 块 push 保持降序（GOTCHA #2）
-//! - 预算：round(world_info_budget% × maxContext)，budget_cap 上限；sticky 优先计数；
-//!   超限丢弃后续条目除非 ignoreBudget（GOTCHA #3）
+//! - 排序：order 降序迭代；before/after 块 unshift 翻转为升序、after 块同样 unshift（world-info.js:5093-5105）
+//! - 预算（v1.18 精确语义，4936-4955）：每 pass 累计 newContent（"content\n" 追加），
+//!   基线 = tokens(allActivatedText)，`(base + tokens(newContent)) >= budget` 即溢出；
+//!   溢出后非 ignoreBudget 条目跳过（前方还有 ignoreBudget 时 continue，否则 break）；
+//!   被预算丢弃的条目内容仍进递归扫描文本
 //! - timed effects：sticky/cooldown/delay 存 chat_metadata.timedWorldInfo["world.uid"]；
-//!   sticky 到期立即武装同 horizon 的 cooldown；protected 隔离不推进的回合（swipe）；
+//!   sticky 到期立即武装同 horizon cooldown；protected 隔离不推进的回合（swipe）；
 //!   entry hash 变化失效记录（GOTCHA #4）
-//! - 递归：world_info_recursive 全局门；preventRecursion 条目内容不进递归扫描文本
-//! - key 匹配：/regex/ 覆盖全局大小写/全词设置；无 * 通配；多词 = 字面子串
-//! - 宏替换在激活期（预算计数前）
-//! - @D 语法：position 字符串 "@D3"/"@D2[a]" 解析为 atDepth + role 覆盖
+//! - 递归：world_info_recursive 全局门；preventRecursion 条目内容不进递归扫描文本；
+//!   delayUntilRecursion 支持 bool/数字多级（4641-4649：级别 N 在递归层级 ≥N 才放行，
+//!   扫描结束后剩余层级驱动继续递归 5010-5014）
+//! - key 匹配（4803/4835）：key/keysecondary 先过宏替换；/pattern/flags 正则 key 覆盖全局大小写/全词；无 * 通配
+//! - 内容（4939 + 5086）：激活期宏替换；输出装配期过 WORLD_INFO 正则
+//!   （depth=atDepth 条目的 depth，isPrompt:true）
+//! - per-entry scanDepth（280）：覆盖全局扫描深度切窗口
+//! - characterFilter（4726-4746）：names/tags 分别判，isExclude XOR included 则过滤
+//! - 输出（5081-5145）：ANTop/ANBottom 独立块（由 AN 链合并）；EM 锚点条目按示例对话
+//!   解析前后拼接；outlet 条目按 outletName 分桶（{{outlet::name}} 宏消费）；
+//!   atDepth 条目按 (depth, role) 合并、桶内 unshift → 升序 join
 //! - 插入组：groupOverride 优先（order 高者胜），否则 groupWeight 加权随机；
-//!   useGroupScoring 按主/次命中数取最高分组内存活
+//!   useGroupScoring 按命中数评分取最高（简化为 order 最高）
 
 use crate::macros::{evaluate_macros, MacroContext, MacroEnv};
 use crate::rng;
+use nast_model::regex_script::{RegexScript, RP_WORLD_INFO};
 use nast_model::world::{TimedEffect, TimedWorldInfo, WIEntry, WorldInfoBook as WIBook};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 全局 WI 设置切片。
 #[derive(Debug, Clone)]
@@ -66,14 +76,22 @@ pub struct ScanSource {
     pub char_personality: String,
     pub char_depth_prompt: String,
     pub scenario: String,
+    /// 角色卡 creator notes（matchCreatorNotes）
+    pub creator_notes: String,
+    /// 当前角色头像文件名（characterFilter.names 匹配）
+    pub char_file: String,
+    /// 当前角色标签（characterFilter.tags 匹配）
+    pub char_tags: Vec<String>,
+    /// 注入扫描文本（AN 等允许扫描的扩展提示，buffer.addInject 语义）
+    pub extra_scan: String,
 }
 
-/// 世界书来源集合（getSortedEntries 的组装结果由调用方完成，这里接收已分组的书）。
+/// 世界书来源集合（带书名；getSortedEntries 的组装结果由调用方完成）。
 pub struct WiBooks<'a> {
-    pub chat_lore: Vec<&'a WIBook>,
-    pub persona_lore: Vec<&'a WIBook>,
-    pub global_lore: Vec<&'a WIBook>,
-    pub character_lore: Vec<&'a WIBook>,
+    pub chat_lore: Vec<(&'a str, &'a WIBook)>,
+    pub persona_lore: Vec<(&'a str, &'a WIBook)>,
+    pub global_lore: Vec<(&'a str, &'a WIBook)>,
+    pub character_lore: Vec<(&'a str, &'a WIBook)>,
 }
 
 /// 激活输出（getWorldInfoPrompt 等价）。
@@ -81,12 +99,18 @@ pub struct WiBooks<'a> {
 pub struct WiResult {
     /// position=0 (before_char) 块（升序，最高 order 邻近角色描述）
     pub world_info_before: String,
-    /// position=1 (after_char) 块（降序）
+    /// position=1 (after_char) 块（同 unshift → 升序）
     pub world_info_after: String,
-    /// atDepth 条目（depth/role/content），交由拼装器做 IN_CHAT 注入
+    /// atDepth 条目（已按 (depth,role) 合并，桶内升序 join；injection_order=100）
     pub depth_entries: Vec<DepthEntry>,
-    /// EM 锚点条目（0=before examples / 1=after examples）
+    /// EM 锚点条目（0=before examples / 1=after examples；升序）
     pub em_entries: Vec<(i64, String)>,
+    /// ANTop 块（由 AN 链合并到 AN 文本上方）
+    pub an_top: String,
+    /// ANBottom 块
+    pub an_bottom: String,
+    /// outlet 条目（outletName → join 后内容；{{outlet::name}} 宏消费）
+    pub outlet_entries: BTreeMap<String, String>,
     /// 激活的条目数（调试/overflow alert）
     pub activated_count: usize,
     /// budget 是否溢出
@@ -108,14 +132,24 @@ pub struct WiState<'a> {
     pub chat_length: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanPhase {
+    Initial,
+    Recursion,
+    MinActivations,
+}
+
 /// 主入口：等价 checkWorldInfo + getWorldInfoPrompt。
-/// `max_context` 为本次生成的 context 上限（预算计算基准）。
+/// `max_context` 为本次生成的 context 上限（预算计算基准）；
+/// `regex_scripts` 为输出装配期 WORLD_INFO pass 的脚本集合。
+#[allow(clippy::too_many_arguments)]
 pub fn check_world_info(
     books: &WiBooks,
     settings: &WiSettings,
     source: &ScanSource,
     state: &mut WiState,
     env: &MacroEnv,
+    regex_scripts: &[RegexScript],
     max_context: i64,
 ) -> WiResult {
     let mut result = WiResult::default();
@@ -135,7 +169,6 @@ pub fn check_world_info(
             // evenly：global+character 洗牌后按 order 排
             let mut mixed: Vec<(String, WIEntry)> = global_entries;
             mixed.extend(character_entries);
-            // JS shuffle 后再 sortFn；洗牌只影响同 order 平局。Rust: 稳定排序前随机打乱
             shuffle(&mut mixed);
             mixed.sort_by(|a, b| sort_fn(&a.1, &b.1));
             all.extend(mixed);
@@ -151,96 +184,24 @@ pub fn check_world_info(
         }
     }
     // 去重 uid+world
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     all.retain(|(w, e)| seen.insert(format!("{w}#{}", e.uid)));
 
-    // ---------- 2. 构建扫描缓冲 ----------
-    let scan_depth = settings.depth.min(1000).max(0) as usize;
-    let mut buffer: String = source
-        .chat
+    // ---------- 2. delay 层级（4646-4656） ----------
+    let mut available_delay_levels: Vec<i64> = all
         .iter()
-        .rev()
-        .take(scan_depth)
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+        .map(|(_, e)| e.delay_until_recursion.level())
+        .filter(|l| *l > 0)
+        .collect();
+    available_delay_levels.sort_unstable();
+    available_delay_levels.dedup();
+    let mut current_delay_level = if available_delay_levels.is_empty() {
+        0
+    } else {
+        available_delay_levels.remove(0)
+    };
 
-    let hash_cache: HashMap<String, i64> = HashMap::new();
-    let _ = hash_cache;
-
-    // ---------- 3. 状态机：INITIAL → RECURSION → MIN_ACTIVATIONS ----------
-    let mut activated_contents: Vec<String> = Vec::new(); // 递归扫描累积
-    let mut all_activated: Vec<(String, WIEntry)> = Vec::new();
-    let mut skew: i64 = 0;
-
-    // 初始 pass
-    let (matched, timed_changed) = scan_pass(
-        &all, &buffer, source, settings, state, &mut result, env,
-        &mut activated_contents, &mut all_activated, skew,
-    );
-    let _ = timed_changed;
-    buffer.push_str(&activated_contents.connect_pass_text());
-
-    // 递归 pass
-    if settings.recursive && !matched.is_empty() {
-        loop {
-            let steps = skew; // 已完成的递归步数
-            if settings.max_recursion_steps > 0 && steps >= settings.max_recursion_steps {
-                break;
-            }
-            skew += 1;
-            let before_len = all_activated.len();
-            let (m2, _) = scan_pass(
-                &all, &buffer, source, settings, state, &mut result, env,
-                &mut activated_contents, &mut all_activated, skew,
-            );
-            if all_activated.len() == before_len || m2.is_empty() {
-                break;
-            }
-            buffer.push_str(&activated_contents.connect_pass_text());
-        }
-    }
-
-    // min_activations 循环（对齐 world-info.js:4991-5007）：
-    // 每 pass 扫描深度 +1（buffer 加入更早的消息），直到激活数达标或深度耗尽。
-    // 深度上限判断：当前扫描深度 > min_activations_depth_max（若设置）或超过 chat 长度。
-    while all_activated.len() < settings.min_activations as usize {
-        skew += 1;
-        let current_depth = settings.depth + skew;
-        if settings.min_activations_depth_max > 0 && current_depth > settings.min_activations_depth_max
-        {
-            break;
-        }
-        if current_depth > state.chat_length as i64 {
-            break;
-        }
-        // 扩展扫描缓冲：加入更深（更早）的消息
-        let extra_depth = skew as usize;
-        let total_chat = source.chat.len();
-        let base = scan_depth.min(total_chat);
-        let from = total_chat.saturating_sub(base + extra_depth);
-        let to = total_chat.saturating_sub(base);
-        if to > from {
-            let older = source.chat[from..to].join("
-");
-            buffer = format!("{}
-{}", older, buffer);
-        }
-        let before_len = all_activated.len();
-        let _ = scan_pass(
-            &all, &buffer, source, settings, state, &mut result, env,
-            &mut activated_contents, &mut all_activated, skew,
-        );
-        if all_activated.len() == before_len {
-            // 本 pass 无新增 → 提前终止（ST 在无新增时也会继续下一 pass，但深度会耗尽）
-        }
-    }
-
-    // ---------- 4. 插入组过滤（group override / weighted / scoring） ----------
-    let survivors = resolve_groups(all_activated, settings);
-
-    // ---------- 5. 预算计数（sticky 优先，然后迭代序；超限丢弃除 ignoreBudget） ----------
+    // ---------- 3. 预算 ----------
     let mut budget = ((settings.budget as f64) * (max_context as f64) / 100.0).round() as i64;
     if budget < 1 {
         budget = 1;
@@ -249,81 +210,435 @@ pub fn check_world_info(
         budget = settings.budget_cap;
     }
 
-    // sticky-activated 条目优先进入预算（1.18.0：sticky 首先被包含）
-    let (sticky_list, normal_list): (Vec<_>, Vec<_>) = survivors
-        .into_iter()
-        .partition(|(_, e)| e.sticky > 0);
-    let ordered: Vec<(String, WIEntry)> = sticky_list.into_iter().chain(normal_list).collect();
+    // ---------- 4. 状态机（INITIAL → RECURSION → MIN_ACTIVATIONS） ----------
+    let mut all_activated: Vec<(String, WIEntry)> = Vec::new();
+    let mut failed_probability: HashSet<String> = HashSet::new();
+    let mut all_activated_text = String::new();
+    let mut recurse_buffer: Vec<String> = Vec::new();
+    let mut budget_overflowed = false;
+    let mut skew: i64 = 0; // buffer.getDepth() = depth + skew
+    let mut completed_passes: i64 = 0;
+    let mut scan_phase = Some(ScanPhase::Initial);
 
-    let mut used: i64 = 0;
-    let mut final_entries: Vec<(String, WIEntry)> = Vec::new();
-    for (world, entry) in ordered {
-        if entry.ignore_budget {
-            final_entries.push((world, entry));
-            continue;
+    while let Some(phase) = scan_phase {
+        // max_recursion_steps：非 0 时统计 pass 数封顶（同时禁用 min_activations）
+        if settings.max_recursion_steps > 0 && completed_passes >= settings.max_recursion_steps {
+            break;
         }
-        let cost = tok_cost(&entry.content) + 1; // content + '\n'
-        if used + cost > budget {
-            result.budget_overflowed = true;
-            continue; // 丢弃
+        completed_passes += 1;
+
+        let mut new_entries: Vec<(String, WIEntry)> = Vec::new();
+
+        for (world, entry) in &all {
+            let key = format!("{world}.{}", entry.uid);
+            if failed_probability.contains(&key)
+                || all_activated
+                    .iter()
+                    .any(|(w, e)| w == world && e.uid == entry.uid)
+            {
+                continue;
+            }
+            if entry.disable {
+                continue;
+            }
+
+            // characterFilter（4726-4746）：names/tags 分别判定
+            if let Some(cf) = &entry.character_filter {
+                if !cf.names.is_empty() {
+                    let included = cf.names.iter().any(|n| n == &source.char_file);
+                    let filtered = if cf.is_exclude { included } else { !included };
+                    if filtered {
+                        continue;
+                    }
+                }
+                if !cf.tags.is_empty() {
+                    let includes = source.char_tags.iter().any(|t| cf.tags.contains(t));
+                    let filtered = if cf.is_exclude { includes } else { !includes };
+                    if filtered {
+                        continue;
+                    }
+                }
+            }
+
+            // timed effects 状态更新（对齐 #checkTimedEffectOfType）：
+            // 1) 聊天未推进且非 protected → 删记录（swipe/regen 回滚）
+            // 2) chat_len >= end → 到期：删记录；sticky 到期且 cooldown>0 → 武装 cooldown（protected，同 horizon）
+            let entry_hash = string_hash_entry(entry);
+            if let Some(rec) = state.timed.sticky.get(&key).cloned() {
+                if chat_len_le(state, rec.start) && !rec.protected {
+                    state.timed.sticky.remove(&key);
+                }
+            }
+            if let Some(rec) = state.timed.cooldown.get(&key).cloned() {
+                if chat_len_le(state, rec.start) && !rec.protected {
+                    state.timed.cooldown.remove(&key);
+                }
+            }
+            if let Some(rec) = state.timed.sticky.get(&key).cloned() {
+                if rec.hash == entry_hash && state.chat_length >= rec.end {
+                    state.timed.sticky.remove(&key);
+                    if entry.cooldown > 0 {
+                        state.timed.cooldown.insert(
+                            key.clone(),
+                            TimedEffect {
+                                hash: entry_hash,
+                                start: state.chat_length,
+                                end: state.chat_length + entry.cooldown,
+                                protected: true,
+                            },
+                        );
+                    }
+                }
+            }
+            let cooldown_active = state
+                .timed
+                .cooldown
+                .get(&key)
+                .map(|rec| state.chat_length < rec.end && rec.hash == entry_hash)
+                .unwrap_or(false);
+            let sticky_active = state
+                .timed
+                .sticky
+                .get(&key)
+                .map(|rec| state.chat_length < rec.end && rec.hash == entry_hash)
+                .unwrap_or(false);
+
+            // delay：绝对消息数
+            if entry.delay > 0 && state.chat_length < entry.delay {
+                continue;
+            }
+            if cooldown_active && !sticky_active {
+                continue;
+            }
+
+            // delayUntilRecursion 层级（4684-4694）
+            let delay_level = entry.delay_until_recursion.level();
+            if phase != ScanPhase::Recursion && delay_level > 0 && !sticky_active {
+                continue;
+            }
+            if phase == ScanPhase::Recursion
+                && delay_level > current_delay_level
+                && !sticky_active
+            {
+                continue;
+            }
+            if phase == ScanPhase::Recursion
+                && settings.recursive
+                && entry.exclude_recursion
+                && !sticky_active
+            {
+                continue;
+            }
+
+            // decorator：@@dont_activate / @@activate
+            let (content_decorated, decorator_active) = parse_decorators(&entry.content);
+            if decorator_active == Some(false) {
+                continue;
+            }
+
+            // sticky 激活期内 / @@activate：跳过 key 直接成为候选
+            if !sticky_active && decorator_active != Some(true) {
+                // 扫描文本（per-entry scanDepth 覆盖全局窗口）
+                let scan_text = build_scan_text(entry, source, settings.depth + skew, &recurse_buffer);
+                // key 匹配（constant 条目跳过 key 检查）
+                let primary_ok =
+                    entry.constant || match_keys(&entry.key, &scan_text, entry, settings, env);
+                if !primary_ok {
+                    continue;
+                }
+                if entry.selective && !entry.keysecondary.is_empty() {
+                    if !check_secondary(entry, &scan_text, settings, env) {
+                        continue;
+                    }
+                }
+            }
+
+            let mut candidate = entry.clone();
+            candidate.content = content_decorated;
+            new_entries.push((world.clone(), candidate));
         }
-        used += cost;
-        final_entries.push((world, entry));
+
+        // ---------- 插入组过滤（filterByInclusionGroups，仅本 pass 候选） ----------
+        filter_inclusion_groups(&mut new_entries, settings);
+
+        // ---------- probability + 预算 + 激活（4899-4958） ----------
+        let text_to_scan_tokens = tok_cost(&all_activated_text);
+        let mut new_content = String::new();
+        let mut ignores_budget_left = new_entries.iter().filter(|(_, e)| e.ignore_budget).count();
+        let mut successful_for_recurse: Vec<String> = Vec::new();
+
+        for (world, entry) in &new_entries {
+            if entry.ignore_budget {
+                ignores_budget_left = ignores_budget_left.saturating_sub(1);
+            }
+            if budget_overflowed && !entry.ignore_budget {
+                if ignores_budget_left > 0 {
+                    continue;
+                }
+                break;
+            }
+            // probability（sticky 免掷骰）
+            if entry.use_probability && entry.probability < 100 && !sticky_active_for(state, world, entry)
+            {
+                let roll = rand::random::<f64>() * 100.0;
+                if roll > entry.probability as f64 {
+                    failed_probability.insert(format!("{world}.{}", entry.uid));
+                    continue;
+                }
+            }
+            // 内容宏替换（激活期）
+            let content = substitute_entry(env, &entry.content);
+            new_content.push_str(&content);
+            new_content.push('\n');
+            // 预算：累计制 >= 溢出（D5）
+            if !entry.ignore_budget
+                && text_to_scan_tokens + tok_cost(&new_content) >= budget
+            {
+                budget_overflowed = true;
+                result.budget_overflowed = true;
+                continue;
+            }
+            // 激活
+            arm_timed_effects(state, world, entry, entry_hash(entry));
+            let mut activated = entry.clone();
+            activated.content = content.clone();
+            all_activated.push((world.clone(), activated));
+            if !entry.prevent_recursion {
+                successful_for_recurse.push(content);
+            }
+        }
+
+        // ---------- 下一状态判定（5008-5032） ----------
+        let mut next: Option<ScanPhase> = None;
+        if settings.recursive
+            && !budget_overflowed
+            && !successful_for_recurse.is_empty()
+        {
+            next = Some(ScanPhase::Recursion);
+        }
+        if settings.recursive
+            && !budget_overflowed
+            && phase == ScanPhase::MinActivations
+            && !recurse_buffer.is_empty()
+        {
+            next = Some(ScanPhase::Recursion);
+        }
+        if next.is_none()
+            && !budget_overflowed
+            && settings.min_activations > 0
+            && all_activated.len() < settings.min_activations as usize
+            && settings.max_recursion_steps == 0
+        {
+            let current_depth = settings.depth + skew;
+            let over_max = (settings.min_activations_depth_max > 0
+                && current_depth > settings.min_activations_depth_max)
+                || current_depth > state.chat_length;
+            if !over_max {
+                next = Some(ScanPhase::MinActivations);
+                skew += 1;
+            }
+        }
+        if next.is_none() && !available_delay_levels.is_empty() {
+            next = Some(ScanPhase::Recursion);
+            current_delay_level = available_delay_levels.remove(0);
+        }
+
+        if next.is_some() {
+            if !successful_for_recurse.is_empty() {
+                let text = successful_for_recurse.join("\n");
+                recurse_buffer.push(text.clone());
+                all_activated_text = format!("{}\n{}", text, all_activated_text);
+            }
+        }
+        scan_phase = next;
     }
 
-    // ---------- 6. 位置分发（order 降序迭代 → before unshift 翻转 / after push） ----------
-    // final_entries 已按预算序（= 迭代序 = order 降序）
+    // ---------- 5. 输出装配（5081-5145，order 降序迭代 → unshift 翻转） ----------
+    let mut sorted_final = all_activated.clone();
+    sorted_final.sort_by(|a, b| b.1.order.cmp(&a.1.order));
+
     let mut before_list: Vec<String> = Vec::new();
     let mut after_list: Vec<String> = Vec::new();
-    for (_, entry) in &final_entries {
-        let content = &entry.content;
+    let mut em_list: Vec<(i64, String)> = Vec::new();
+    let mut an_top_list: Vec<String> = Vec::new();
+    let mut an_bottom_list: Vec<String> = Vec::new();
+    let mut depth_map: BTreeMap<(i64, i64), Vec<String>> = BTreeMap::new();
+    let mut outlet_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    let macro_fn = |s: &str| substitute_entry(env, s);
+    for (_, entry) in &sorted_final {
         let (pos, at_d) = entry.position.resolve();
+        let regex_depth = if pos == 4 {
+            Some(at_d.as_ref().map(|(d, _)| *d).unwrap_or(entry.depth))
+        } else {
+            None
+        };
+        let params = crate::regex_engine::RegexParams {
+            depth: regex_depth,
+            is_prompt: true,
+            ..Default::default()
+        };
+        let content = crate::regex_engine::get_regexed_string(
+            &entry.content,
+            RP_WORLD_INFO,
+            regex_scripts,
+            &params,
+            &macro_fn,
+        );
+        if content.is_empty() {
+            continue;
+        }
         match pos {
-            0 => {
-                // WIBeforeEntries.unshift → 最终升序
-                before_list.insert(0, content.clone());
-                let _ = at_d;
-            }
-            1 => {
-                // ST 同样 unshift（world-info.js:5098）→ after 块也是升序
-                after_list.insert(0, content.clone());
-            }
+            0 => before_list.insert(0, content),
+            1 => after_list.insert(0, content),
             4 => {
-                // atDepth：@D 或数值 4；depth/role 已由 entry 解析
                 let (depth, role) = match &at_d {
                     Some((d, r)) => (*d, r.unwrap_or(entry.role.unwrap_or(0))),
                     None => (entry.depth, entry.role.unwrap_or(0)),
                 };
-                result.depth_entries.push(DepthEntry {
-                    depth,
-                    role,
-                    content: content.clone(),
-                    order: entry.order,
-                });
+                depth_map.entry((depth, role)).or_default().insert(0, content);
             }
-            5 => result.em_entries.push((0, content.clone())),
-            6 => result.em_entries.push((1, content.clone())),
-            _ => {
-                // ANTop/ANBottom/outlet：v1 将 ANTop/ANBottom 并入 before/after 尾部，
-                // outlet 由扩展消费（未实现则忽略）
-                before_list.insert(0, content.clone());
+            5 => em_list.insert(0, (0, content)),
+            6 => em_list.insert(0, (1, content)),
+            2 => an_top_list.insert(0, content),
+            3 => an_bottom_list.insert(0, content),
+            7 => {
+                if let Some(name) = &entry.outlet_name {
+                    if !name.is_empty() {
+                        outlet_map.entry(name.clone()).or_default().push(content);
+                    }
+                }
             }
+            _ => {}
         }
     }
+
     result.world_info_before = before_list.join("\n");
     result.world_info_after = after_list.join("\n");
-    result.activated_count = final_entries.len();
+    result.em_entries = em_list;
+    result.an_top = an_top_list.join("\n");
+    result.an_bottom = an_bottom_list.join("\n");
+    for ((depth, role), contents) in depth_map {
+        result.depth_entries.push(DepthEntry {
+            depth,
+            role,
+            content: contents.join("\n"),
+            order: 100, // 扩展注入默认 injection_order
+        });
+    }
+    for (name, contents) in outlet_map {
+        result.outlet_entries.insert(name, contents.join("\n"));
+    }
+    result.activated_count = all_activated.len();
     result
 }
 
-fn sorted_entries<'a>(
-    books: &[&'a WIBook],
+fn chat_len_le(state: &WiState, start: i64) -> bool {
+    state.chat_length <= start
+}
+
+fn sticky_active_for(state: &WiState, world: &str, entry: &WIEntry) -> bool {
+    let key = format!("{world}.{}", entry.uid);
+    let entry_hash = string_hash_entry(entry);
+    state
+        .timed
+        .sticky
+        .get(&key)
+        .map(|rec| state.chat_length < rec.end && rec.hash == entry_hash)
+        .unwrap_or(false)
+}
+
+fn entry_hash(entry: &WIEntry) -> i64 {
+    string_hash_entry(entry)
+}
+
+/// 激活时武装 timed effects（sticky 记录 / 纯 cooldown 记录）。
+fn arm_timed_effects(state: &mut WiState, world: &str, entry: &WIEntry, entry_hash: i64) {
+    let key = format!("{world}.{}", entry.uid);
+    let chat_len = state.chat_length;
+    if entry.sticky > 0 {
+        let has = state
+            .timed
+            .sticky
+            .get(&key)
+            .map(|r| chat_len < r.end && r.hash == entry_hash)
+            .unwrap_or(false);
+        if !has {
+            state.timed.sticky.insert(
+                key.clone(),
+                TimedEffect {
+                    hash: entry_hash,
+                    start: chat_len,
+                    end: chat_len + entry.sticky,
+                    protected: true,
+                },
+            );
+        }
+    } else if entry.cooldown > 0 {
+        let has = state
+            .timed
+            .cooldown
+            .get(&key)
+            .map(|r| r.hash == entry_hash && chat_len < r.end)
+            .unwrap_or(false);
+        if !has {
+            state.timed.cooldown.insert(
+                key.clone(),
+                TimedEffect {
+                    hash: entry_hash,
+                    start: chat_len,
+                    end: chat_len + entry.cooldown,
+                    protected: false,
+                },
+            );
+        }
+    }
+}
+
+/// 扫描文本：per-entry scanDepth 覆盖窗口 + 递归缓冲 + match_* 字段 + 注入文本。
+fn build_scan_text(
+    entry: &WIEntry,
+    source: &ScanSource,
+    global_depth: i64,
+    recurse_buffer: &[String],
+) -> String {
+    let depth = entry
+        .scan_depth
+        .unwrap_or(global_depth)
+        .clamp(0, nast_model::world::WI_MAX_SCAN_DEPTH)
+        .max(0) as usize;
+    let chat_len = source.chat.len();
+    let start = chat_len.saturating_sub(depth);
+    let mut parts: Vec<String> = vec![source.chat[start..].to_vec().join("\n")];
+    for (flag, text) in [
+        (entry.match_persona_description, &source.persona_description),
+        (entry.match_character_description, &source.char_description),
+        (entry.match_character_personality, &source.char_personality),
+        (entry.match_character_depth_prompt, &source.char_depth_prompt),
+        (entry.match_scenario, &source.scenario),
+        (entry.match_creator_notes, &source.creator_notes),
+    ] {
+        if flag && !text.is_empty() {
+            parts.push(text.clone());
+        }
+    }
+    if !source.extra_scan.is_empty() {
+        parts.push(source.extra_scan.clone());
+    }
+    for r in recurse_buffer {
+        parts.push(r.clone());
+    }
+    parts.join("\n")
+}
+
+fn sorted_entries(
+    books: &[(&str, &WIBook)],
     sort_fn: impl Fn(&WIEntry, &WIEntry) -> std::cmp::Ordering + Copy,
 ) -> Vec<(String, WIEntry)> {
     let mut out: Vec<(String, WIEntry)> = Vec::new();
-    for book in books {
-        for (uid_s, entry) in &book.entries {
-            out.push((uid_s.clone(), entry.clone()));
+    for (name, book) in books {
+        for (_uid_s, entry) in &book.entries {
+            out.push((name.to_string(), entry.clone()));
         }
     }
     out.sort_by(|a, b| sort_fn(&a.1, &b.1));
@@ -334,222 +649,6 @@ fn shuffle<T>(v: &mut [T]) {
     for i in (1..v.len()).rev() {
         v.swap(i, (rand::random::<f64>() * (i as f64 + 1.0)) as usize);
     }
-}
-
-type PassOutcome = (
-    Vec<(String, i64)>, // matched (world, uid)
-    bool,               // timed state changed
-);
-
-/// 单次扫描（对每个条目做 disable/timed/decorator/key/secondary/probability 判定）。
-#[allow(clippy::too_many_arguments)]
-fn scan_pass(
-    all: &[(String, WIEntry)],
-    buffer: &str,
-    source: &ScanSource,
-    settings: &WiSettings,
-    state: &mut WiState,
-    _result: &mut WiResult,
-    env: &MacroEnv,
-    activated_contents: &mut Vec<String>,
-    all_activated: &mut Vec<(String, WIEntry)>,
-    _skew: i64,
-) -> PassOutcome {
-    let mut matched: Vec<(String, i64)> = Vec::new();
-    let mut timed_changed = false;
-    let chat_len = state.chat_length;
-
-    for (world, entry) in all {
-        // 已激活过的跳过
-        if all_activated.iter().any(|(w, e)| w == world && e.uid == entry.uid) {
-            continue;
-        }
-        if entry.disable {
-            continue;
-        }
-        // delayUntilRecursion：非递归 pass（skew==0）跳过
-        if entry.delay_until_recursion && _skew == 0 {
-            continue;
-        }
-        // excludeRecursion：递归 pass 跳过
-        if entry.exclude_recursion && _skew > 0 {
-            continue;
-        }
-        // delay：绝对消息数
-        if entry.delay > 0 && chat_len < entry.delay {
-            continue;
-        }
-
-        // timed effects（对齐 world-info.js #checkTimedEffectOfType）：
-        // 1) 聊天未推进且非 protected → 删记录（swipe/regen 回滚）
-        // 2) chat_len >= end → 到期：删记录；sticky 到期且 entry.cooldown>0 → 武装 cooldown（protected，同 horizon）
-        // 3) 激活期内 sticky 直接通过（跳过 key/概率），cooldown 抑制
-        let key = format!("{world}.{}", entry.uid);
-        let entry_hash = string_hash_entry(entry);
-
-        // 聊天未推进回滚（非 protected）
-        if let Some(rec) = state.timed.sticky.get(&key).cloned() {
-            if chat_len <= rec.start && !rec.protected {
-                state.timed.sticky.remove(&key);
-            }
-        }
-        if let Some(rec) = state.timed.cooldown.get(&key).cloned() {
-            if chat_len <= rec.start && !rec.protected {
-                state.timed.cooldown.remove(&key);
-            }
-        }
-
-        // sticky 到期检测（在 cooldown 判定前，命中即武装 cooldown）
-        if let Some(rec) = state.timed.sticky.get(&key).cloned() {
-            if rec.hash == entry_hash && chat_len >= rec.end {
-                state.timed.sticky.remove(&key);
-                if entry.cooldown > 0 {
-                    // ST #getEntryTimedEffect('cooldown', entry, true)：start=chat.len, end=chat.len+cooldown, protected
-                    state.timed.cooldown.insert(
-                        key.clone(),
-                        nast_model::world::TimedEffect {
-                            hash: entry_hash,
-                            start: chat_len,
-                            end: chat_len + entry.cooldown,
-                            protected: true,
-                        },
-                    );
-                }
-            }
-        }
-
-        // cooldown 抑制
-        if let Some(rec) = state.timed.cooldown.get(&key) {
-            if chat_len < rec.end && rec.hash == entry_hash {
-                continue;
-            }
-        }
-        let sticky_active = state
-            .timed
-            .sticky
-            .get(&key)
-            .map(|rec| chat_len < rec.end && rec.hash == entry_hash)
-            .unwrap_or(false);
-
-        // decorator：@@dont_activate / @@activate
-        let (content_decorated, decorator_active) = parse_decorators(&entry.content);
-        if decorator_active == Some(false) {
-            continue;
-        }
-
-        // 扫描文本扩展（match_* 开关）
-        let mut scan_text = buffer.to_string();
-        if entry.match_persona_description {
-            scan_text.push('\n');
-            scan_text.push_str(&source.persona_description);
-        }
-        if entry.match_character_description {
-            scan_text.push('\n');
-            scan_text.push_str(&source.char_description);
-        }
-        if entry.match_character_personality {
-            scan_text.push('\n');
-            scan_text.push_str(&source.char_personality);
-        }
-        if entry.match_character_depth_prompt {
-            scan_text.push('\n');
-            scan_text.push_str(&source.char_depth_prompt);
-        }
-        if entry.match_scenario {
-            scan_text.push('\n');
-            scan_text.push_str(&source.scenario);
-        }
-
-        // sticky 激活期内跳过 key 匹配直接激活（world-info.js: active without re-matching）
-        if sticky_active {
-            matched.push((world.clone(), entry.uid));
-            let content = substitute_entry(env, &entry.content);
-            let mut entry_with_content = entry.clone();
-            entry_with_content.content = content.clone();
-            all_activated.push((world.clone(), entry_with_content));
-            if !entry.prevent_recursion {
-                activated_contents.push(content);
-            }
-            continue;
-        }
-
-        // key 匹配（constant 条目跳过 key 检查）
-        let primary_ok = entry.constant
-            || match_keys(&entry.key, &scan_text, entry, settings);
-        if !primary_ok {
-            continue;
-        }
-        // secondary keys（selective 语义）
-        if entry.selective && !entry.keysecondary.is_empty() {
-            if !check_secondary(entry, &scan_text, settings) {
-                continue;
-            }
-        }
-
-        // probability（sticky 激活期跳过 roll）
-        if entry.use_probability && entry.probability < 100 && !sticky_active {
-            let roll: f64 = rand::random::<f64>() * 100.0;
-            if roll > entry.probability as f64 {
-                continue;
-            }
-        }
-
-        // 激活！
-        matched.push((world.clone(), entry.uid));
-        // sticky 记录（cooldown 到期时由 sticky 到期回调武装，见上方到期检测）
-        if entry.sticky > 0 {
-            let has = state
-                .timed
-                .sticky
-                .get(&key)
-                .map(|r| chat_len < r.end && r.hash == entry_hash)
-                .unwrap_or(false);
-            if !has {
-                state.timed.sticky.insert(
-                    key.clone(),
-                    TimedEffect {
-                        hash: entry_hash,
-                        start: chat_len,
-                        end: chat_len + entry.sticky,
-                        protected: true,
-                    },
-                );
-                timed_changed = true;
-            }
-        } else if entry.cooldown > 0 {
-            // 纯 cooldown 条目：激活时记录（首次激活即开始冷却窗口，end = len + cooldown）
-            let has = state
-                .timed
-                .cooldown
-                .get(&key)
-                .map(|r| r.hash == entry_hash && chat_len < r.end)
-                .unwrap_or(false);
-            if !has {
-                state.timed.cooldown.insert(
-                    key.clone(),
-                    TimedEffect {
-                        hash: entry_hash,
-                        start: chat_len,
-                        end: chat_len + entry.cooldown,
-                        protected: false,
-                    },
-                );
-                timed_changed = true;
-            }
-        }
-
-        // 内容宏替换（激活期，预算前）
-        let mut macro_ctx = MacroContext::default();
-        let content = evaluate_macros(&content_decorated, env, &mut macro_ctx);
-        let mut entry_with_content = entry.clone();
-        entry_with_content.content = content.clone();
-        all_activated.push((world.clone(), entry_with_content));
-        // preventRecursion：内容不进递归扫描
-        if !entry.prevent_recursion {
-            activated_contents.push(content);
-        }
-    }
-    (matched, timed_changed)
 }
 
 /// 激活期内容宏替换。
@@ -571,7 +670,6 @@ fn parse_decorators(content: &str) -> (String, Option<bool>) {
         if in_decorator_block {
             let t = line.trim();
             if let Some(rest) = t.strip_prefix("@@@") {
-                // @@@xxx 转义为字面 @xxx（ST: escape hatch）
                 kept.push(rest);
                 in_decorator_block = false;
                 continue;
@@ -594,15 +692,22 @@ fn parse_decorators(content: &str) -> (String, Option<bool>) {
     (kept.join("\n"), activate)
 }
 
-/// key 匹配：/regex/ 覆盖全局设置；多词/子串按全局大小写与全词设置。
-fn match_keys(keys: &[String], scan: &str, entry: &WIEntry, settings: &WiSettings) -> bool {
+/// key 匹配：先宏替换（4803）；/pattern/flags 正则 key；多词/子串按全局大小写与全词设置。
+fn match_keys(
+    keys: &[String],
+    scan: &str,
+    entry: &WIEntry,
+    settings: &WiSettings,
+    env: &MacroEnv,
+) -> bool {
     if keys.is_empty() {
         return false;
     }
     let case_sensitive = entry.case_sensitive.unwrap_or(settings.case_sensitive);
     let whole_words = entry.match_whole_words.unwrap_or(settings.match_whole_words);
     for key in keys {
-        if key_matches(key, scan, case_sensitive, whole_words) {
+        let key = substitute_entry(env, key);
+        if key_matches(&key, scan, case_sensitive, whole_words) {
             return true;
         }
     }
@@ -610,52 +715,73 @@ fn match_keys(keys: &[String], scan: &str, entry: &WIEntry, settings: &WiSetting
 }
 
 fn key_matches(key: &str, scan: &str, case_sensitive: bool, whole_words: bool) -> bool {
-    // /pattern/flags → 正则 key
-    if let Some(pattern) = key.strip_prefix('/').and_then(|k| k.strip_suffix('/')) {
-        let pattern = if case_sensitive {
-            pattern.to_string()
-        } else {
-            format!("(?i){pattern}")
-        };
-        return regex::Regex::new(&pattern)
-            .map(|re| re.is_match(scan))
-            .unwrap_or(false);
+    // /pattern/flags → 正则 key（4762-4772 parseRegexFromString 语义）。
+    // 正则 key 不受全局/条目大小写设置影响（覆盖语义），大小写只由自身 flags 决定。
+    if key.starts_with('/') {
+        if let Some((pattern, flags)) = parse_regex_key(key) {
+            let pattern = if flags.contains('i') {
+                format!("(?i){pattern}")
+            } else {
+                pattern
+            };
+            return regex::Regex::new(&pattern)
+                .map(|re| re.is_match(scan))
+                .unwrap_or(false);
+        }
     }
-    if case_sensitive {
-        if whole_words && !key.contains(' ') {
-            let re = regex::Regex::new(&format!(
-                r"(?:^|\W)({})(?:$|\W)",
-                regex::escape(key)
-            ))
-            .unwrap();
-            re.is_match(scan)
-        } else {
-            scan.contains(key)
-        }
+    let _ = case_sensitive;
+    let scan_lc;
+    let key_lc;
+    let (scan_eff, key_eff) = if case_sensitive {
+        (scan, key)
     } else {
-        let scan_lc = scan.to_lowercase();
-        let key_lc = key.to_lowercase();
-        if whole_words && !key_lc.contains(' ') {
-            let re = regex::Regex::new(&format!(
-                r"(?i)(?:^|\W)({})(?:$|\W)",
-                regex::escape(&key_lc)
-            ))
-            .unwrap();
-            re.is_match(&scan_lc)
-        } else {
-            scan_lc.contains(&key_lc)
-        }
+        scan_lc = scan.to_lowercase();
+        key_lc = key.to_lowercase();
+        (scan_lc.as_str(), key_lc.as_str())
+    };
+    if whole_words && !key.contains(' ') {
+        let re = regex::Regex::new(&format!(
+            r"(?:^|\W)({})(?:$|\W)",
+            regex::escape(key_eff)
+        ))
+        .unwrap();
+        re.is_match(scan_eff)
+    } else {
+        scan_eff.contains(key_eff)
     }
 }
 
-/// secondary logic 判定：0 AND_ANY / 1 NOT_ALL / 2 NOT_ANY / 3 AND_ALL。
-fn check_secondary(entry: &WIEntry, scan: &str, settings: &WiSettings) -> bool {
+/// "/pattern/flags" → (pattern, flags)；无闭合斜杠返回 None。
+fn parse_regex_key(key: &str) -> Option<(String, String)> {
+    let rest = key.strip_prefix('/')?;
+    let last_slash = rest.rfind('/')?;
+    let (pattern, flags) = rest.split_at(last_slash);
+    let flags = &flags[1..];
+    if pattern.is_empty() {
+        return None;
+    }
+    if !flags.chars().all(|c| "imsUux".contains(c)) {
+        return None;
+    }
+    Some((pattern.to_string(), flags.to_string()))
+}
+
+/// secondary logic 判定（4835：keysecondary 先宏替换）：0 AND_ANY / 1 NOT_ALL / 2 NOT_ANY / 3 AND_ALL。
+fn check_secondary(
+    entry: &WIEntry,
+    scan: &str,
+    settings: &WiSettings,
+    env: &MacroEnv,
+) -> bool {
     let case_sensitive = entry.case_sensitive.unwrap_or(settings.case_sensitive);
     let whole_words = entry.match_whole_words.unwrap_or(settings.match_whole_words);
     let hits: Vec<bool> = entry
         .keysecondary
         .iter()
-        .map(|k| key_matches(k, scan, case_sensitive, whole_words))
+        .map(|k| {
+            let k = substitute_entry(env, k);
+            key_matches(&k, scan, case_sensitive, whole_words)
+        })
         .collect();
     match entry.selective_logic {
         1 => !hits.iter().all(|h| *h),           // NOT_ALL
@@ -665,61 +791,76 @@ fn check_secondary(entry: &WIEntry, scan: &str, settings: &WiSettings) -> bool {
     }
 }
 
-/// 插入组：每组合一格。groupOverride 优先（order 高者胜）；否则 groupWeight 加权随机。
-/// useGroupScoring：按命中数评分取最高（未实现逐条评分时退化为默认）。
-fn resolve_groups(activated: Vec<(String, WIEntry)>, settings: &WiSettings) -> Vec<(String, WIEntry)> {
-    use std::collections::HashMap;
-    // group 字段是逗号分隔列表
-    let mut groups: HashMap<String, Vec<(String, WIEntry)>> = HashMap::new();
-    let mut free = Vec::new();
-    for (w, e) in activated {
-        if e.group.trim().is_empty() {
-            free.push((w, e));
-        } else {
-            for g in e.group.split(',') {
-                groups.entry(g.trim().to_string()).or_default().push((w.clone(), e.clone()));
+/// 插入组过滤（filterByInclusionGroups，本 pass 候选）：
+/// groupOverride 优先（order 高者胜）；否则 groupWeight 加权随机；
+/// useGroupScoring 退化取 order 最高。free 条目直接通过。
+fn filter_inclusion_groups(candidates: &mut Vec<(String, WIEntry)>, settings: &WiSettings) {
+    let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut keep = vec![true; candidates.len()];
+    for (i, (_, e)) in candidates.iter().enumerate() {
+        for g in e.group.split(',') {
+            let g = g.trim();
+            if !g.is_empty() {
+                groups.entry(g.to_string()).or_default().push(i);
             }
         }
     }
-    let mut winners: Vec<(String, WIEntry)> = free;
     for (_, members) in groups {
-        // scoring
-        if settings.use_group_scoring {
-            // v1 scoring：keys 命中数已在扫描期判定；此处取 order 最高为胜者简化
-            let mut best = members;
-            best.sort_by(|a, b| b.1.order.cmp(&a.1.order));
-            if let Some(w) = best.into_iter().next() {
-                winners.push(w);
+        if members.len() <= 1 {
+            continue;
+        }
+        let use_scoring = settings.use_group_scoring
+            || members
+                .iter()
+                .any(|i| candidates[*i].1.use_group_scoring.unwrap_or(false));
+        let winner: Option<usize> = if use_scoring {
+            // 简化：order 最高者为胜（keys 命中数已在扫描期过滤）
+            members
+                .iter()
+                .copied()
+                .max_by_key(|i| candidates[*i].1.order)
+        } else {
+            let override_member = members
+                .iter()
+                .copied()
+                .filter(|i| candidates[*i].1.group_override)
+                .max_by_key(|i| candidates[*i].1.order);
+            if override_member.is_some() {
+                override_member
+            } else {
+                // 加权随机
+                let total: i64 = members
+                    .iter()
+                    .map(|i| candidates[*i].1.group_weight.max(0))
+                    .sum();
+                if total <= 0 {
+                    None
+                } else {
+                    let pick = (rand::random::<f64>() * total as f64) as i64;
+                    let mut acc = 0;
+                    let mut chosen = None;
+                    for i in &members {
+                        acc += candidates[*i].1.group_weight.max(0);
+                        if pick < acc {
+                            chosen = Some(*i);
+                            break;
+                        }
+                    }
+                    chosen
+                }
             }
-            continue;
-        }
-        let override_member = members
-            .iter()
-            .filter(|(_, e)| e.group_override)
-            .max_by_key(|(_, e)| e.order)
-            .cloned();
-        if let Some(w) = override_member {
-            winners.push(w);
-            continue;
-        }
-        // 加权随机
-        let total: i64 = members.iter().map(|(_, e)| e.group_weight.max(0)).sum();
-        if total <= 0 {
-            continue;
-        }
-        let pick = (rand::random::<f64>() * total as f64) as i64;
-        let mut acc = 0;
-        for (w, e) in &members {
-            acc += e.group_weight.max(0);
-            if pick < acc {
-                winners.push((w.clone(), e.clone()));
-                break;
-            }
+        };
+        for i in members {
+            keep[i] = winner.is_some() && i == winner.unwrap();
         }
     }
-    // 恢复 order 降序（预算计数序）
-    winners.sort_by(|a, b| b.1.order.cmp(&a.1.order));
-    winners
+    let mut out = Vec::new();
+    for (i, item) in candidates.drain(..).enumerate() {
+        if keep[i] {
+            out.push(item);
+        }
+    }
+    *candidates = out;
 }
 
 fn tok_cost(s: &str) -> i64 {
@@ -734,17 +875,29 @@ fn string_hash_entry(entry: &WIEntry) -> i64 {
     rng::string_hash(&json)
 }
 
-trait ConnectPass {
-    fn connect_pass_text(&self) -> String;
-}
-
-impl ConnectPass for Vec<String> {
-    fn connect_pass_text(&self) -> String {
-        self.join("\n")
-    }
-}
-
 /// 从书中提取匹配条目（供测试注入简化）。
 pub fn book_entries(book: &WIBook) -> Vec<(String, WIEntry)> {
-    book.entries.iter().map(|(k, e)| (k.clone(), e.clone())).collect()
+    book.entries
+        .iter()
+        .map(|(k, e)| (k.clone(), e.clone()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regex_key_flags_parsing() {
+        assert_eq!(
+            parse_regex_key("/abc/i"),
+            Some(("abc".to_string(), "i".to_string()))
+        );
+        assert_eq!(
+            parse_regex_key("/a\\/b/"),
+            Some(("a\\/b".to_string(), "".to_string()))
+        );
+        assert_eq!(parse_regex_key("/abc"), None);
+        assert_eq!(parse_regex_key("abc"), None);
+    }
 }

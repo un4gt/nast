@@ -50,6 +50,8 @@ pub struct AppState {
     /// 插件宿主（Lua 插件 + Rust 钩子）；Mutex 因 mlua 非线程安全句柄
     pub plugins: std::sync::Mutex<nast_plugin::PluginHost>,
     pub settings: RwLock<Value>,
+    /// secrets.json（密钥；值不随 settings 广播）
+    pub secrets: RwLock<Value>,
     pub generation: RwLock<GenerationControl>,
 }
 
@@ -57,7 +59,7 @@ pub struct AppState {
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
-    pub fn new(user: UserData, settings: Value) -> Self {
+    pub fn new(user: UserData, settings: Value, secrets: Value) -> Self {
         // 加载 plugins/ 目录
         let mut host = nast_plugin::PluginHost::new(std::path::PathBuf::from("plugins"));
         match host.load_dir() {
@@ -72,6 +74,7 @@ impl AppState {
             hub: EventHub::new(),
             plugins: std::sync::Mutex::new(host),
             settings: RwLock::new(settings),
+            secrets: RwLock::new(secrets),
             generation: RwLock::new(GenerationControl::default()),
         }
     }

@@ -5,54 +5,51 @@
 
 ## 一、已完整对齐
 
-- ✅ WI 扫描源接线（persona/char desc/personality/depth prompt/scenario，generate.rs:436-450）
-- ✅ WI probability 掷骰语义（world_info.rs:437-442 = world-info.js:4922）
-- ✅ WI 预算公式 round(%×context) + cap + sticky 优先
-- ✅ WI 插入组 groupOverride/groupWeight；selectiveLogic 0-3
-- ✅ WI @D 位置字符串（@D3 / @D2[a] / [r] / [s]）
-- ✅ WI key 匹配主体（/regex/ 覆盖、整词、多词子串）
-- ✅ continue nudge 尾部顺序（在 controlPrompts 之前、prompt 最末）
-- ✅ squash 排除表 + 空消息丢弃
-- ✅ 预算模型 reserve3/newMainChat 无条件/倒序断式填充/main 超限报错
-- ✅ Claude 转换主链（前导 system 提取、mid system→user、连续合并、prefill trimEnd、空历史占位）
-- ✅ swipe 弹出被重 roll 消息；用户消息先落盘；regenerate 先删；impersonate/quiet 不落盘
-- ✅ swipe 保存（追加槽位/独立 send_date/swipe_info/setFirstSwipe 镜像）
-- ✅ 停止保留半截文本；错误不写消息
-- ✅ 后端逐 token 流式事件
-- ✅ 聊天 jsonl header/integrity/备份节流/原子写
-- ✅ PNG tEXt-only 解析（与 ST 一致）、ccv3 优先读取
+- ✅ WI 扫描源接线（persona/char desc/personality/depth prompt/scenario/creator notes，含 per-entry match_*）
+- ✅ WI 四源书（chat→persona→char(内嵌+charLore extraBooks)→global，strategy 0-2，去重，generate.rs）
+- ✅ WI per-entry：scanDepth / caseSensitive / matchWholeWords / useGroupScoring（null=全局）、excludeRecursion、delayUntilRecursion 多级、characterFilter（names/tags/isExclude）、probability、sticky/cooldown/delay
+- ✅ WI 预算逐 pass 累计制 `>=budget` + ignoreBudget 计数穿透（D5，world-info.js:4899-4958 精确复刻）
+- ✅ WI 内容输出期 WORLD_INFO 正则 + key/keysecondary 宏替换 + /pattern/flags（D7）
+- ✅ WI position 0-7 全消费：ANTop/ANBottom 并入 AN、EM 锚点按示例解析前后拼、outlet 走 {{outlet::key}} 宏（D8）
+- ✅ AN 服务端化：chat_metadata.note_*，interval 用户消息数取模，位置 0/1/2，角色卡 note replace/prepend/append，默认 note，allowWIScan，ANTop/Bottom 合并
+- ✅ Persona 服务端化：power_user.personas/persona_descriptions/default_persona + chat_metadata.persona 绑定；位置 0/2/3/4/9（TOP/BOTTOM_AN 并入 AN、AT_DEPTH 注入、NONE）；persona lorebook 为第 4 WI 源
+- ✅ Reasoning：流捕获 → extra.reasoning/reasoning_duration/reasoning_type + swipe_info 镜像；auto_parse 剥离 <think>；前端折叠展示（含流式）；time_to_first_token
+- ✅ Stopping strings：custom_stopping_strings（JSON+宏）→ 请求 stop（上限 4）+ 输出尾部前缀剥离
+- ✅ cleanUpMessage 管线：user_prompt_bias / 正则默认 pass / collapseNewlines / 行尾空白 / 错误说话人移除（allow_name1/2_display）/ <|endoftext|> 截断 / 名字前缀剥离 / fixMarkdown(false) / trim_sentences / trim_spaces；显示侧 fixMarkdown(true) 引号/星号补齐（前端 st-display.ts）
+- ✅ 消息编辑：chats.update_message 按索引只更新当前 swipe（mes+swipes[swipe_id]）+ runOnEdit 正则 + tainted（D12 后续）
+- ✅ names_behavior COMPLETION（1）：历史消息带 name 字段
+- ✅ 连接闭环：secrets.json（ST 同构掩码）、models.list 代理（临时 url/key 覆盖）、custom_url/custom_model 消费（env 降级）、custom_include_headers/body 透传；UI：baseURL/key/模型 Combobox/连接测试
+- ✅ continue nudge 尾部顺序；squash 排除表；预算模型 reserve3/倒序断式填充；Claude 转换主链
+- ✅ swipe/用户消息先落盘/regenerate 先删/impersonate/quiet 不落盘；错误不写消息；流式 + 停止保留半截
+- ✅ 聊天 jsonl header/integrity/备份节流/原子写；PNG tEXt 解析、ccv3 优先、双写
 
 ## 二、有偏差（待修）
 
 | # | 问题 | ST 行为 | nast 现状 | 位置 |
 |---|---|---|---|---|
-| D1 ✅【已修复 4427a38+】WI after 块顺序 | before/after 都 unshift → 双升序 | after 用 push → 降序镜像 | world_info.rs:272 |
-| D2 ✅ min_activations 失效 | 每 pass 扫描深度+1，重扫新 buffer | skew 未用、buffer 不加深；深度上限误用 chat_length | world_info.rs:205-222 |
-| D3 ✅ sticky→cooldown 武装 | sticky 到期立即写同 horizon cooldown；protected 回滚（聊天未推进删非 protected 记录） | else-if 使 sticky+cooldown 共存条目永不进冷却；protected 存而不用 | world_info.rs:466-486 |
-| D4 ✅(自洽) timed hash 兼容 | getStringHash(JSON.stringify(entry)) | 自身 serde hash，ST 记录全部失配 | world_info.rs:663 |
-| D5 | 预算累计制 | 累计 newContent+换行，`>=budget` 溢出 | 逐条 tok+1，`>budget` 溢出（多塞一条） | world_info.rs:249 |
-| D6 ✅ 装饰器解析过宽 | 仅内容以 @@ 开头才解析；@@@ 为字面 | 任意位置 @@ 行剥离、未知行丢弃 | world_info.rs:508 |
-| D7 | WI 内容/key 预处理 | 内容过 WORLD_INFO 正则；key 过宏替换、/flags 解析 | 均不做 | world_info.rs:545 |
-| D8 | EM 锚点丢弃 | position 5/6 注入示例区 | 收集后无下游 | generate.rs:475 |
-| D9 ✅ 示例对话解析 | 实际角色名前缀、续行合并、<START> 大小写不敏感 | 仅字面 {{user}}:/{{char}}:、丢续行 | generate.rs:661 |
-| D10 ✅ tokenizer 按 source | claude/llama 等近似器 | 拼装/WI 硬编码 o200k | prompt.rs:40 |
-| D11 | Claude 次级 | 尊重 prompt_processing_type；空文本 \u200b；示例名字前缀 | 无条件合并；无处理；name 恒 None | providers/lib.rs:199 |
-| D12 ✅ 消息字段形状 | gen_started/gen_finished 顶层；token_count 可选 | 写在 extra；顶层字段透传缺失（原位改写丢字段） | generate.rs:208 |
-| D13 ✅ 卡导入 | 总写 chara+ccv3；写前剔除旧 tEXt | 永不写 ccv3；不剔旧 chunk（V3 编辑被旧 ccv3 遮蔽） | rpc.rs:144 |
-| D14 | AN 注入链路 | AN 扩展槽/injectToMain | 前端发 in_chat_injections，后端从不读取 | rpc.rs:357 |
+| D11 ⏸️(范围外) | Claude 次级 system 处理 | prompt_processing_type、空文本 \u200b、示例名字前缀 | 无条件合并 | providers/lib.rs |
+| D15 | WI insertion group 语义 | 组过滤在预算前、按 pass 候选 | 已按 pass 过滤，但 useGroupScoring 评分退化为 order 最高 | world_info.rs |
+| D16 | cleanUpMessage 次要项 | 群 cleanGroupMessage、instruct 序列裁剪 | 未实现（无群/无 instruct 路径时无行为差异） | generate.rs |
+| D17 | reasoning 再注入 | reasoning.add_to_prompts（prefix/suffix/max_additions=1） | 未实现（默认关闭） | generate.rs |
+| D18 | bias/logit bias/CFG | assistant bias 注入 | ID_BIAS 恒空 | prompt.rs |
 
-## 三、缺失
+## 三、缺失（前端为主）
 
-**WI**：per-entry scanDepth、matchCreatorNotes、characterFilter、delayUntilRecursion 多级、include_names、persona/global lorebooks（WiBooks 恒空）。
+- 群聊前端（后端 M4 就绪）：建群/成员/talkativeness/策略/触发/静音/auto-mode（M3）
+- 预设 + Prompt Manager + 正则脚本编辑器 UI（M4；引擎已消费 prompts/prompt_order/regex_scripts）
+- 聊天管理 UI：重命名/删除聊天（RPC 已有）、导出未接线、聊天搜索
+- token 上下文计量条；侧栏角色头像图/新建/复制/收藏筛选；主题切换；移动端 inspector
+- WS 指数退避重连 + 生成中断线恢复（M6）
+- 测试：tests/ 硬编码 D:/temp 路径；continue/quiet/断线覆盖
 
-**Prompt**：injectToMain 相对注入（authorsNote/summary start/end）；bias/logit bias/CFG；COMPLETION names_behavior；工具调用；媒体内联。
+## 四、明确范围外
 
-**管线**：stopping strings 剥离；cleanUpMessage 引号/代码块平衡；reasoning 落盘；time_to_first_token；power_user 杂项。
+文本补全路径（instruct/context 模板）、Claude/Gemini 原生源 UI 暴露（D11 一并顺延）、
+向量/RAG、TTS、翻译、图像生成、多用户账号、浏览器端插件。
 
-**前端**：角色编辑 UI；头像 PNG 显示（全为首字母）；新聊天开场白（当前空白页！）；消息删除；checkpoints/分支；Prompt Manager UI；正则编辑器；聊天导出/重命名 UI（chats.rename 后端有但无 UI）；历史聊天点击 bug（恒选最新）；群聊前端；背景；persona 管理（名字固定 User）；instruct/context 模板；API key 配置 UI；markdown 渲染；**流式订阅（P1）**。
+## 里程碑
 
-## 修复顺序
-
-P1 流式订阅 → P2 AN 链路 → P3 问候消息 → P4 头像 → P5 消息删除+聊天管理 → P6 显示正则+markdown → P7 插件机制 → P8 WI 四连 → P9 示例解析 → P10 卡导入/字段/tokenizer。
-
-**全部已完成**（b2a5852 + abc59ad + 本轮提交）。剩余偏差：D5（预算 >= 边界）、D7（WI 内容/key 预处理）、D8（EM 锚点下游）、D11（Claude 次级）随后续里程碑消化。
+- M0 连接闭环 ✅（secrets/models.list/custom_url；tests/m0_connection_smoke.js 10/10）
+- M1 聊天链路对齐 ✅（tests/m1_pipeline_smoke.js 20/20；WI/AN/persona/reasoning/停止串/清理/编辑/COMPLETION）
+- M2 前端修复与组件化（进行中）
+- M3 群聊前端 → M4 预设/PM/正则 → M5 插件强化 → M6 健壮性

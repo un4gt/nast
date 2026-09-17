@@ -37,6 +37,9 @@ pub struct MacroEnv {
     /// {{original}}：首次替换返回原文，其后为空
     pub original: Option<String>,
 
+    /// WI outlet 条目（{{outlet::key}}；generate 侧从扫描结果注入）
+    pub outlets: Map<String, Value>,
+
     /// 附加动态宏（additionalMacro / group override 等）
     pub dynamic: Vec<(String, String)>,
 }
@@ -601,10 +604,20 @@ pub fn evaluate_macros(content: &str, env: &MacroEnv, ctx: &mut MacroContext) ->
             }
         }),
         rule(r"\{\{outlet::(.+?)\}\}", {
+            let env_outlets = env.outlets.clone();
             let outlets = ctx.outlets.clone();
             move |caps| {
                 let key = cap(caps, 1);
-                match outlets.get(key.trim()) { Some(Value::String(s)) => s.clone(), Some(Value::Number(n)) => n.to_string(), _ => String::new() }
+                let key = key.trim();
+                env_outlets
+                    .get(key)
+                    .or_else(|| outlets.get(key))
+                    .map(|v| match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        _ => String::new(),
+                    })
+                    .unwrap_or_default()
             }
         }),
         {

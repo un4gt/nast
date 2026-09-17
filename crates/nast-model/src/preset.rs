@@ -128,6 +128,10 @@ pub struct OaiSettings {
     pub google_model: String,
     pub custom_url: String,
     pub custom_model: String,
+    /// custom 源附加请求头："Header-Name: value" 每行一对（ST custom_include_headers）
+    pub custom_include_headers: String,
+    /// custom 源附加请求体：JSON 对象（ST custom_include_body）
+    pub custom_include_body: String,
     pub stream_openai: bool,
     pub temperature: f64,
     pub frequency_penalty: f64,
@@ -184,6 +188,8 @@ impl Default for OaiSettings {
             google_model: String::new(),
             custom_url: String::new(),
             custom_model: String::new(),
+            custom_include_headers: String::new(),
+            custom_include_body: String::new(),
             stream_openai: true,
             temperature: 1.0,
             frequency_penalty: 0.0,

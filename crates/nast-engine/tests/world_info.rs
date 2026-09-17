@@ -42,17 +42,16 @@ fn run(
     chat_length: i64,
     max_context: i64,
 ) -> nast_engine::world_info::WiResult {
-    let empty: Vec<WorldInfoBook> = vec![];
     let books = WiBooks {
-        chat_lore: chat_book.iter().collect(),
-        persona_lore: empty.iter().collect(),
-        global_lore: empty.iter().collect(),
-        character_lore: empty.iter().collect(),
+        chat_lore: chat_book.iter().map(|b| ("chat", b)).collect(),
+        persona_lore: vec![],
+        global_lore: vec![],
+        character_lore: vec![],
     };
     let source = scan(chat);
     let mut state = WiState { timed, chat_length };
     let env = MacroEnv::default();
-    check_world_info(&books, settings, &source, &mut state, &env, max_context)
+    check_world_info(&books, settings, &source, &mut state, &env, &[], max_context)
 }
 
 #[test]
@@ -216,8 +215,8 @@ fn sticky_last_one_turn() {
     // 第 1 轮：key 命中激活，记录 sticky {start:1, end:3, protected}
     let r = run(Some(book(b.entries["0"].clone())), &["alpha"], &s, &mut timed, 1, 4096);
     assert_eq!(r.activated_count, 1);
-    assert!(timed.sticky.contains_key("0.0"));
-    assert_eq!(timed.sticky["0.0"].end, 3);
+    assert!(timed.sticky.contains_key("chat.0"));
+    assert_eq!(timed.sticky["chat.0"].end, 3);
 
     // 第 2 轮：chat.length=2 < end=3 → 聊天里无关键词也持续激活（entry 不变，hash 一致）
     let r = run(Some(book(b.entries["0"].clone())), &["nothing relevant"], &s, &mut timed, 2, 4096);
@@ -245,7 +244,7 @@ fn cooldown_suppresses_reentry() {
     // 首次激活（记录 cooldown）
     let r = run(Some(book_of(b.entries["0"].clone())), &["alpha"], &settings, &mut timed, 1, 4096);
     assert_eq!(r.activated_count, 1);
-    assert!(timed.cooldown.contains_key("0.0"));
+    assert!(timed.cooldown.contains_key("chat.0"));
     // cooldown 窗口内（chat.length < end）即使 key 命中也抑制
     let r = run(Some(book_of(b.entries["0"].clone())), &["alpha again"], &settings, &mut timed, 2, 4096);
     assert_eq!(r.activated_count, 0);
@@ -336,17 +335,16 @@ fn macros_substituted_at_activation() {
         group: "Seraphina".into(),
         ..Default::default()
     };
-    let empty: Vec<WorldInfoBook> = vec![];
     let b = book(entry(0, &["alpha"], "Hello {{char}}, welcome {{user}}"));
     let books = WiBooks {
-        chat_lore: std::iter::once(&b).collect(),
-        persona_lore: empty.iter().collect(),
-        global_lore: empty.iter().collect(),
-        character_lore: empty.iter().collect(),
+        chat_lore: vec![("chat", &b)],
+        persona_lore: vec![],
+        global_lore: vec![],
+        character_lore: vec![],
     };
     let source = scan(&["alpha"]);
     let mut state = WiState { timed: &mut timed, chat_length: 1 };
-    let r = check_world_info(&books, &settings, &source, &mut state, &env, 4096);
+    let r = check_world_info(&books, &settings, &source, &mut state, &env, &[], 4096);
     assert!(r.world_info_before.contains("Hello Seraphina, welcome User"));
 }
 
@@ -374,16 +372,15 @@ fn match_character_description_source() {
     // chat 里没有 desckey，但 char_description 有
     let mut source = scan(&["no key here"]);
     source.char_description = "her name has desckey inside".into();
-    let empty: Vec<WorldInfoBook> = vec![];
     let books = WiBooks {
-        chat_lore: std::iter::once(&b).collect(),
-        persona_lore: empty.iter().collect(),
-        global_lore: empty.iter().collect(),
-        character_lore: empty.iter().collect(),
+        chat_lore: vec![("chat", &b)],
+        persona_lore: vec![],
+        global_lore: vec![],
+        character_lore: vec![],
     };
     let mut state = WiState { timed: &mut timed, chat_length: 1 };
     let env = MacroEnv::default();
-    let r = check_world_info(&books, &settings, &source, &mut state, &env, 4096);
+    let r = check_world_info(&books, &settings, &source, &mut state, &env, &[], 4096);
     assert_eq!(r.activated_count, 1);
 }
 

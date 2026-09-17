@@ -95,6 +95,9 @@ pub struct AssembleInput<'a> {
     /// extension IN_CHAT 注入（AN/depth prompt/WI depth entries）
     /// 每项: (content, depth, role: 0/1/2, injection_order)
     pub in_chat_injections: Vec<InChatInjection>,
+    /// AN 相对注入（position 0 = 主提示后 / 2 = 主提示前；AN.js getPromptPosition 'end'/'start'）。
+    /// 聊天内深度（position 1）由调用方走 in_chat_injections。
+    pub authors_note: Option<AuthorsNote>,
     pub continue_prefill_assistant: bool, // source==claude 且 continue_prefill
     pub assistant_prefill: String,
     /// continue 模式：被续消息原文（nudge 替换 {{lastChatMessage}} / prefill 拼接）
@@ -125,6 +128,14 @@ pub struct InChatInjection {
     pub depth: i64,
     pub role: i64, // 0 system / 1 user / 2 assistant
     pub injection_order: i64,
+}
+
+/// AN 相对注入（仅 position 0/2 走此路径）。
+#[derive(Debug, Clone)]
+pub struct AuthorsNote {
+    pub text: String,
+    /// 0 = 主提示后（IN_PROMPT，'end'）/ 2 = 主提示前（BEFORE_PROMPT，'start'）
+    pub position: i64,
 }
 
 /// 拼装结果。
@@ -410,7 +421,8 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     // 历史填充：倒序（新→旧），首条塞不下即 break；insertAtStart → 最终旧→新
     let mut history: Vec<PromptMessage> = Vec::new();
     for m in messages.iter().rev() {
-        let msg = PromptMessage::new(&m.role, m.content.clone(), "chatHistory", false);
+        let mut msg = PromptMessage::new(&m.role, m.content.clone(), "chatHistory", false);
+        msg.name = m.name.clone(); // COMPLETION names_behavior
         if reserved + msg.tokens > budget {
             break;
         }
@@ -456,6 +468,24 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         } else {
             break;
         }
+    }
+
+    // AN 相对注入（position 0/2）：预留预算，order 放置后相对 main 插入
+    let an_msg: Option<PromptMessage> = input.authors_note.as_ref().and_then(|an| {
+        if an.text.trim().is_empty() {
+            return None;
+        }
+        Some(PromptMessage::new_with_tok(
+            "system",
+            an.text.clone(),
+            "authorsNote",
+            false,
+            &oai.chat_completion_source,
+            &oai.openai_model,
+        ))
+    });
+    if let Some(m) = &an_msg {
+        reserved += m.tokens;
     }
 
     // ---------- 按 prompt_order 顺序放置（= JS add(collection, index) flatten） ----------
@@ -520,6 +550,25 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
                 chat.push(msg);
             }
         }
+    }
+
+    // AN 相对插入：2 = main 之前 / 0 = main 之后（PM 'start'/'end'）
+    if let Some(an) = an_msg {
+        let main_idx = chat
+            .iter()
+            .position(|m| m.identifier == ID_MAIN)
+            .unwrap_or(0);
+        let insert_at = if input
+            .authors_note
+            .as_ref()
+            .map(|a| a.position == 2)
+            .unwrap_or(false)
+        {
+            main_idx
+        } else {
+            main_idx + 1
+        };
+        chat.insert(insert_at.min(chat.len()), an);
     }
 
     // controlPrompts 末尾（freeBudget 后 add）

@@ -34,6 +34,9 @@ pub struct ChatMetadata {
     /// 聊天级世界书名
     #[serde(skip_serializing_if = "Option::is_none")]
     pub world: Option<String>,
+    /// 本聊天绑定的 persona（头像 id；personas.js:934-940）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
     /// Author's Note
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_prompt: Option<String>,

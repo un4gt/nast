@@ -1,5 +1,6 @@
 //! nast 单端口服务入口：静态资源 + /ws + /upload。
 
+mod connection;
 mod events;
 mod generate;
 mod group_gen;
@@ -98,7 +99,10 @@ async fn main() -> std::io::Result<()> {
     let settings = user
         .read_settings()
         .unwrap_or_else(|_| serde_json::json!({}));
-    let state: SharedState = std::sync::Arc::new(AppState::new(user, settings));
+    let secrets = user
+        .read_secrets()
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let state: SharedState = std::sync::Arc::new(AppState::new(user, settings, secrets));
 
     tracing::info!("nast listening on http://127.0.0.1:{port}");
 

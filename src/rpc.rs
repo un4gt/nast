@@ -41,6 +41,9 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
     match method {
         "settings.get" => settings_get(state).await,
         "settings.save" => settings_save(state, params).await,
+        "secrets.get" => secrets_get(state).await,
+        "secrets.set" => secrets_set(state, params).await,
+        "models.list" => models_list(state, params).await,
         "characters.all" => characters_all(state),
         "characters.get" => characters_get(state, params),
         "characters.import" => characters_import(state, params),
@@ -53,6 +56,9 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "chats.rename" => chats_rename(state, params),
         "chats.delete_message" => chats_delete_message(state, params),
         "chats.export" => chats_export(state, params),
+        "chats.set_note" => chats_set_note(state, params),
+        "chats.set_persona" => chats_set_persona(state, params),
+        "chats.update_message" => chats_update_message(state, params),
         "plugins.list" => plugins_list(state),
         "plugins.reload" => plugins_reload(state),
         "generate.run" => generate_run(state, params).await,
@@ -88,6 +94,109 @@ async fn settings_save(state: SharedState, params: Value) -> RpcResult {
     *state.settings.write().await = settings.clone();
     state.hub.emit(events::SETTINGS_UPDATED, json!({}));
     Ok(json!({"ok": true}))
+}
+
+// ---------- secrets / models ----------
+
+/// 掩码：仅保留尾 4 位，其余打码（UI 显示用；值本身永不下发）。
+fn mask_secret(v: &str) -> String {
+    let trimmed = v.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let tail: String = trimmed.chars().skip(trimmed.chars().count().saturating_sub(4)).collect();
+    format!("••••{tail}")
+}
+
+/// 密钥清单（掩码视图）。ST secrets.json 形态：{key: [{id, value, label, active}]}。
+async fn secrets_get(state: SharedState) -> RpcResult {
+    let secrets = state.secrets.read().await;
+    let mut out = serde_json::Map::new();
+    if let Some(map) = secrets.as_object() {
+        for (k, v) in map {
+            let entries: Vec<Value> = v
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|e| {
+                            json!({
+                                "id": e.get("id").cloned().unwrap_or(Value::Null),
+                                "label": e.get("label").and_then(|l| l.as_str()).unwrap_or(""),
+                                "active": e.get("active").and_then(|a| a.as_bool()).unwrap_or(false),
+                                "masked": mask_secret(e.get("value").and_then(|s| s.as_str()).unwrap_or("")),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.insert(k.clone(), Value::Array(entries));
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// 写入单密钥（单条目形态，保持 ST 数组兼容）。value 为空 = 清除。
+async fn secrets_set(state: SharedState, params: Value) -> RpcResult {
+    let key = param_str(&params, "key")?.to_string();
+    let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+    if !key.starts_with("api_key_") {
+        return Err(RpcError::BadRequest("key must be an api_key_* name".into()));
+    }
+    let mut secrets = state.secrets.write().await;
+    if value.trim().is_empty() {
+        if let Some(map) = secrets.as_object_mut() {
+            map.remove(&key);
+        }
+    } else {
+        let entry = json!({
+            "id": Uuid::new_v4().to_string(),
+            "value": value.trim(),
+            "label": "",
+            "active": true,
+        });
+        secrets[key] = json!([entry]);
+    }
+    state.user.save_secrets(&secrets)?;
+    Ok(json!({"ok": true, "masked": mask_secret(value)}))
+}
+
+/// 模型列表：默认用已保存配置；连接测试可传 url/key 覆盖（不必先保存）。
+async fn models_list(state: SharedState, params: Value) -> RpcResult {
+    let oai: nast_model::preset::OaiSettings = serde_json::from_value(
+        state.settings.read().await.get("oai_settings").cloned().unwrap_or(json!({})),
+    )
+    .unwrap_or_default();
+    let saved_key = {
+        let secrets = state.secrets.read().await;
+        crate::connection::active_secret(&secrets, crate::connection::SECRET_CUSTOM)
+            .or_else(|| {
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+            })
+            .unwrap_or_default()
+    };
+    let base_url = params
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| crate::connection::custom_base_url(&oai));
+    let api_key = params
+        .get("key")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(saved_key);
+    let provider = nast_providers::Provider::new(nast_providers::ProviderKind::OpenAiCompat {
+        base_url,
+        api_key,
+    });
+    let models = provider
+        .list_models()
+        .await
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    Ok(json!({"data": models}))
 }
 
 // ---------- characters ----------
@@ -391,6 +500,160 @@ fn chats_export(state: SharedState, params: Value) -> RpcResult {
     Ok(json!({"content": raw}))
 }
 
+/// 设置聊天级 Author's Note（AN.js metadata_keys：prompt/interval/depth/position/role）。
+/// note.prompt 为 null/缺失 = 清除。
+fn chats_set_note(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let note = params
+        .get("note")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut chat = state.user.read_chat(&avatar, &file_name)?;
+    if let Some(header) = chat.0.first_mut() {
+        let metadata = header
+            .get_mut("chat_metadata")
+            .ok_or_else(|| RpcError::BadRequest("missing chat_metadata".into()))?;
+        let prompt = note.get("prompt").cloned().unwrap_or(Value::Null);
+        if prompt.is_null() || prompt.as_str() == Some("") {
+            metadata.as_object_mut().map(|m| {
+                m.remove("note_prompt");
+                m.remove("note_interval");
+                m.remove("note_depth");
+                m.remove("note_position");
+                m.remove("note_role");
+            });
+        } else {
+            let set_i64 = |m: &mut serde_json::Map<String, Value>, k: &str, v: Option<i64>| {
+                if let Some(v) = v {
+                    m.insert(k.into(), json!(v));
+                }
+            };
+            if let Some(m) = metadata.as_object_mut() {
+                m.insert("note_prompt".into(), prompt);
+                set_i64(m, "note_interval", note.get("interval").and_then(|v| v.as_i64()));
+                set_i64(m, "note_depth", note.get("depth").and_then(|v| v.as_i64()));
+                set_i64(m, "note_position", note.get("position").and_then(|v| v.as_i64()));
+                set_i64(m, "note_role", note.get("role").and_then(|v| v.as_i64()));
+            }
+        }
+        state.user.save_chat(&avatar, &file_name, &chat, false)?;
+        return Ok(json!({"ok": true}));
+    }
+    Err(RpcError::BadRequest("empty chat".into()))
+}
+
+/// 绑定/解绑聊天 persona（chat_metadata.persona）。
+fn chats_set_persona(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let persona = params.get("persona").cloned().unwrap_or(Value::Null);
+    let mut chat = state.user.read_chat(&avatar, &file_name)?;
+    if let Some(header) = chat.0.first_mut() {
+        let metadata = header
+            .get_mut("chat_metadata")
+            .ok_or_else(|| RpcError::BadRequest("missing chat_metadata".into()))?;
+        if let Some(m) = metadata.as_object_mut() {
+            if persona.is_null() || persona.as_str() == Some("") {
+                m.remove("persona");
+            } else {
+                m.insert("persona".into(), persona);
+            }
+        }
+        state.user.save_chat(&avatar, &file_name, &chat, false)?;
+        return Ok(json!({"ok": true}));
+    }
+    Err(RpcError::BadRequest("empty chat".into()))
+}
+
+/// 编辑指定消息（script.js updateMessage 8080-8136 语义）：
+/// - 按 index 定位（不按内容匹配）；只更新当前 swipe（mes + swipes[swipe_id]）
+/// - 编辑后重跑正则（runOnEdit 开关生效，USER_INPUT/AI_OUTPUT placement）
+/// - chat_metadata.tainted = true
+fn chats_update_message(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?.to_string();
+    let file_name = param_str(&params, "file_name")?.to_string();
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| RpcError::BadRequest("missing index".into()))? as usize;
+    let text = param_str(&params, "text")?.to_string();
+    let reasoning = params.get("reasoning").and_then(|v| v.as_str()).map(String::from);
+
+    let mut chat = state.user.read_chat(&avatar, &file_name)?;
+    let pos = index + 1;
+    if pos >= chat.0.len() {
+        return Err(RpcError::BadRequest("index out of range".into()));
+    }
+    let mut msg: nast_model::chat::ChatMessage = serde_json::from_value(chat.0[pos].clone())
+        .map_err(|e| RpcError::BadRequest(format!("invalid message: {e}")))?;
+
+    // 正则 runOnEdit pass
+    let character = read_character(&state, &avatar)?;
+    let metadata = chat.metadata();
+    let settings_snapshot = state.settings.try_read().map(|s| s.clone()).unwrap_or_default();
+    let scripts = crate::generate::collect_regex_scripts_for(&settings_snapshot, &character, &metadata);
+    let placement = if msg.is_user {
+        nast_model::regex_script::RP_USER_INPUT
+    } else {
+        nast_model::regex_script::RP_AI_OUTPUT
+    };
+    let macro_fn = move |s: &str| {
+        crate::prompt_bridge::substitute_basic(s, "User", &character.name)
+    };
+    let edited = nast_engine::regex_engine::get_regexed_string(
+        &text,
+        placement,
+        &scripts,
+        &nast_engine::regex_engine::RegexParams { is_edit: true, ..Default::default() },
+        &macro_fn,
+    );
+
+    msg.mes = edited.clone();
+    if let Some(swipe_id) = msg.swipe_id {
+        if let Some(swipes) = msg.swipes.as_mut() {
+            let sid = (swipe_id.max(0) as usize).min(swipes.len().saturating_sub(1));
+            if sid < swipes.len() {
+                swipes[sid] = edited.clone();
+            }
+        }
+    }
+    if let Some(r) = reasoning {
+        msg.extra.reasoning = if r.is_empty() { None } else { Some(r) };
+    }
+    // display_text 过期：编辑后重算（display pass）
+    {
+        let params = nast_engine::regex_engine::RegexParams {
+            is_markdown: true,
+            ..Default::default()
+        };
+        let display = nast_engine::regex_engine::get_regexed_string(
+            &edited,
+            nast_model::regex_script::RP_AI_OUTPUT,
+            &scripts,
+            &params,
+            &macro_fn,
+        );
+        if display != edited {
+            msg.extra.display_text = Some(display);
+        } else {
+            msg.extra.display_text = None;
+        }
+    }
+    chat.0[pos] = serde_json::to_value(&msg).map_err(|e| RpcError::Internal(e.to_string()))?;
+    // tainted 标记
+    if let Some(header) = chat.0.first_mut() {
+        if let Some(m) = header
+            .get_mut("chat_metadata")
+            .and_then(|m| m.as_object_mut())
+        {
+            m.insert("tainted".into(), json!(true));
+        }
+    }
+    state.user.save_chat(&avatar, &file_name, &chat, false)?;
+    Ok(json!({"ok": true, "mes": edited}))
+}
+
 fn plugins_list(state: SharedState) -> RpcResult {
     let host = state.plugins.lock().unwrap();
     Ok(json!({ "plugins": host.list(), "lua": host.lua_names() }))
@@ -572,19 +835,8 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
     let oai: nast_model::preset::OaiSettings =
         serde_json::from_value(state.settings.read().await.get("oai_settings").cloned().unwrap_or(json!({})))
             .unwrap_or_default();
-    let provider = nast_providers::Provider::new(match oai.chat_completion_source.as_str() {
-        "claude" => nast_providers::ProviderKind::Anthropic {
-            api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        },
-        "makersuite" => nast_providers::ProviderKind::Gemini {
-            api_key: std::env::var("GOOGLE_API_KEY").unwrap_or_default(),
-        },
-        _ => nast_providers::ProviderKind::OpenAiCompat {
-            base_url: std::env::var("NAST_OPENAI_BASE")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-        },
-    });
+    let secrets_snapshot = state.secrets.read().await.clone();
+    let provider = crate::connection::provider(&oai, &secrets_snapshot);
 
     let settings_snapshot = state.settings.read().await.clone();
     let session = GenerateSession {
@@ -606,32 +858,7 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
             .unwrap_or("")
             .to_string(),
         character,
-        persona_description: params
-            .get("persona_description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        persona_position_in_prompt: params
-            .get("persona_position_in_prompt")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
         is_group: false,
-        extra_injections: params
-            .get("in_chat_injections")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|inj| {
-                        Some((
-                            inj.get("content")?.as_str()?.to_string(),
-                            inj.get("depth").and_then(|d| d.as_i64()).unwrap_or(4),
-                            inj.get("role").and_then(|r| r.as_i64()).unwrap_or(0),
-                            inj.get("injection_order").and_then(|o| o.as_i64()).unwrap_or(100),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
     };
 
     let result = session.run(p).await;

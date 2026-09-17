@@ -1,34 +1,43 @@
 import { useMemo, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { BrainCog, Check, Copy, Pencil, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { rpc } from '../../rpc';
+import {
+  Collapsible, CollapsibleContent, CollapsibleTrigger,
+} from '@/components/ui/collapsible';
+import { fixMarkdownQuotes } from '@/lib/st-display';
 import { useStore } from '../../store';
+import { pushToast } from '../../toasts';
 
 export function MessageBubble({ m, index }: { m: any; index: number }) {
-  const { activeAvatar, activeChatName, reloadChat, characters, deleteMessage } = useStore();
+  const { characters, deleteMessage, editMessage } = useStore();
   const char = characters.find((c) => c.name === m.name);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.mes);
   // display_text 优先（后端正则 display pass 产物），否则 markdown 渲染 mes
   const rendered = useMemo(() => {
-    const raw = m.extra?.display_text ?? m.mes;
+    const raw = fixMarkdownQuotes(String(m.extra?.display_text ?? m.mes));
     const html = marked.parse(raw, { async: false }) as string;
     return DOMPurify.sanitize(html);
   }, [m.extra?.display_text, m.mes]);
 
+  const reasoning = typeof m.extra?.reasoning === 'string' ? m.extra.reasoning : '';
+
   const saveEdit = async () => {
-    if (!activeAvatar || !activeChatName) return;
-    const raw = await rpc.call<any[]>('chats.get', { avatar: activeAvatar, file_name: activeChatName });
-    const idx = raw.findIndex((x, i) => i > 0 && x.mes === m.mes && x.is_user === m.is_user);
-    if (idx > 0) {
-      raw[idx].mes = draft;
-      await rpc.call('chats.save', { avatar: activeAvatar, file_name: activeChatName, chat: raw });
-      await reloadChat();
-    }
+    await editMessage(index, draft);
     setEditing(false);
+  };
+
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(String(m.mes));
+      pushToast('已复制', 'success');
+    } catch {
+      pushToast('复制失败', 'error');
+    }
   };
 
   return (
@@ -48,25 +57,68 @@ export function MessageBubble({ m, index }: { m: any; index: number }) {
           <span className="font-medium text-foreground/80">{m.name}</span>
           <span className="opacity-60">{formatTime(m.send_date)}</span>
         </div>
+
+        {reasoning && !editing && (
+          <Collapsible className="w-full">
+            <CollapsibleTrigger className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted">
+              <BrainCog className="size-3" />
+              思考过程
+              {m.extra?.reasoning_duration ? (
+                <span className="tabular-nums opacity-70">
+                  {(Number(m.extra.reasoning_duration) / 1000).toFixed(1)}s
+                </span>
+              ) : null}
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <pre className="mt-1 max-h-48 w-full overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/20 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                {reasoning}
+              </pre>
+            </CollapsibleContent>
+          </Collapsible>
+        )}
+
         <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-          <button
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            onClick={() => void copyMessage()}
+            title="复制"
+          >
+            <Copy className="size-3" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
             onClick={() => {
-              if (activeAvatar && activeChatName) void deleteMessage(index);
+              setDraft(m.mes);
+              setEditing(true);
             }}
-            className="text-[10px] text-muted-foreground hover:text-destructive"
+            title="编辑（双击消息亦可）"
+          >
+            <Pencil className="size-3" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-destructive"
+            onClick={() => void deleteMessage(index)}
             title="删除此消息"
           >
-            删除
-          </button>
+            <Trash2 className="size-3" />
+          </Button>
         </div>
         {editing ? (
           <div className="flex w-full flex-col gap-2">
             <Textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} className="bg-card" />
             <div className="flex justify-end gap-2">
               <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+                <X className="size-3.5" />
                 取消
               </Button>
               <Button size="sm" onClick={saveEdit}>
+                <Check className="size-3.5" />
                 保存
               </Button>
             </div>

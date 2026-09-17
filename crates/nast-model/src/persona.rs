@@ -4,11 +4,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// persona_description_position
+/// persona_description_position（personas.js:88-97；1 为废弃别名 AFTER_CHAR）
 pub const PDP_IN_PROMPT: i64 = 0;
-pub const PDP_TOP_AN: i64 = 1;
-pub const PDP_BOTTOM_AN: i64 = 2;
-pub const PDP_AT_DEPTH: i64 = 3;
+pub const PDP_AFTER_CHAR: i64 = 1;
+pub const PDP_TOP_AN: i64 = 2;
+pub const PDP_BOTTOM_AN: i64 = 3;
+pub const PDP_AT_DEPTH: i64 = 4;
+pub const PDP_NONE: i64 = 9;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -19,6 +21,8 @@ pub struct PersonaDescription {
     pub depth: i64,
     /// system/user/assistant（0/1/2）
     pub role: i64,
+    /// 该 persona 绑定的世界书
+    pub lorebook: Option<String>,
 }
 
 /// power_user.personas / persona_descriptions 的集合形态。

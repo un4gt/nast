@@ -148,6 +148,55 @@ impl Provider {
 
     // ---------- 协议请求构造 ----------
 
+    /// 拉取模型列表（OpenAI 兼容 GET {base}/models；ST /status 路由同源）。
+    /// 返回模型 id 列表（data[].id，缺失时降级取 id 字符串数组）。
+    pub async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        let ProviderKind::OpenAiCompat { base_url, api_key } = &self.kind else {
+            return Err(ProviderError::Config(
+                "model list is only supported for the OpenAI-compatible source".into(),
+            ));
+        };
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(api_key)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        if !status.is_success() {
+            return Err(ProviderError::Http {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let parsed: Value = serde_json::from_str(&body)
+            .map_err(|e| ProviderError::Http { status: 200, body: format!("invalid json: {e}") })?;
+        let mut out = Vec::new();
+        if let Some(arr) = parsed.get("data").and_then(|d| d.as_array()) {
+            for m in arr {
+                if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
+                    out.push(id.to_string());
+                }
+            }
+        } else if let Some(arr) = parsed.as_array() {
+            // 个别兼容实现直接返回字符串数组
+            for m in arr {
+                if let Some(id) = m.as_str() {
+                    out.push(id.to_string());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     fn openai_request(
         &self,
         req: &GenRequest,

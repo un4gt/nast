@@ -87,11 +87,12 @@ impl BoolOrI64 {
     }
 }
 
-/// @seriesss charLore 条目
+/// charLore 条目（ST WI.js:6039-6053：{name: 角色文件名, extraBooks: [世界书名]}）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharLore {
     pub name: String,
-    pub characters: Vec<String>,
+    #[serde(rename = "extraBooks")]
+    pub extra_books: Vec<String>,
 }
 
 /// power_user 中拼装引擎需要的切片（其余字段走 blob 透传）。

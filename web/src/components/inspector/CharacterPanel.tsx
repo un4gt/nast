@@ -12,8 +12,6 @@ import { rpc } from '../../rpc';
 import { useStore } from '../../store';
 import { pushToast } from '../../toasts';
 
-const LS_KEY = 'nast:persona_draft';
-
 const EDITABLE_FIELDS = [
   { key: 'description', label: '描述（Description）', rows: 6 },
   { key: 'personality', label: '性格（Personality）', rows: 3 },
@@ -25,16 +23,11 @@ const EDITABLE_FIELDS = [
 ] as const;
 
 export function CharacterPanel() {
-  const { characters, activeAvatar, personaDraft, setPersonaDraft, loadAll } = useStore();
+  const { characters, activeAvatar, loadAll } = useStore();
   const ch = characters.find((c) => c.avatar === activeAvatar);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const saved = localStorage.getItem(LS_KEY);
-    if (saved !== null) setPersonaDraft(saved);
-  }, [setPersonaDraft]);
 
   useEffect(() => {
     setDraft({});
@@ -93,23 +86,6 @@ export function CharacterPanel() {
 
       <Separator />
 
-      <div className="flex flex-col gap-2">
-        <Label className="text-xs text-muted-foreground">Persona（你的角色设定）</Label>
-        <Textarea
-          value={personaDraft}
-          onChange={(e) => {
-            setPersonaDraft(e.target.value);
-            localStorage.setItem(LS_KEY, e.target.value);
-          }}
-          placeholder="描述你是谁…随每次生成发送"
-          rows={4}
-          className="min-h-0 resize-y text-xs"
-        />
-        <p className="text-[10px] text-muted-foreground">暂存于浏览器本地，随 generate 参数即时生效</p>
-      </div>
-
-      <Separator />
-
       <div>
         <Label className="mb-2 block text-xs text-muted-foreground">卡片编辑</Label>
         <Accordion type="multiple" className="w-full">
@@ -119,14 +95,14 @@ export function CharacterPanel() {
                 {f.label}
               </AccordionTrigger>
               <AccordionContent>
-                <textarea
+                <Textarea
                   value={draft[f.key] ?? ''}
                   onChange={(e) => {
                     setDraft((d) => ({ ...d, [f.key]: e.target.value }));
                     setDirty(true);
                   }}
                   rows={f.rows}
-                  className="w-full resize-y rounded-md border border-input bg-background px-2.5 py-1.5 text-xs shadow-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  className="min-h-0 resize-y text-xs"
                 />
               </AccordionContent>
             </AccordionItem>

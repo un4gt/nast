@@ -47,6 +47,7 @@ fn base_input(oai: &OaiSettings) -> AssembleInput<'_> {
         message_examples: vec![],
         pin_examples: false,
         in_chat_injections: vec![],
+        authors_note: None,
         continue_prefill_assistant: false,
         assistant_prefill: String::new(),
         cycle_prompt: None,

@@ -264,6 +264,27 @@ impl UserData {
         Ok(())
     }
 
+    // ---------- secrets ----------
+
+    /// secrets.json（ST src/endpoints/secrets.js 同构：{<key>: [{id, value, label, active}]}）。
+    pub fn secrets_path(&self) -> PathBuf {
+        self.root.join("secrets.json")
+    }
+
+    pub fn read_secrets(&self) -> StorageResult<Value> {
+        let p = self.secrets_path();
+        if !p.exists() {
+            return Ok(serde_json::json!({}));
+        }
+        Ok(serde_json::from_str(&fs::read_to_string(&p)?)?)
+    }
+
+    pub fn save_secrets(&self, value: &Value) -> StorageResult<()> {
+        let pretty = serde_json::to_string_pretty(value)?;
+        atomic_write(&self.secrets_path(), pretty.as_bytes())?;
+        Ok(())
+    }
+
     // ---------- worlds ----------
 
     pub fn list_worlds(&self) -> StorageResult<Vec<String>> {
@@ -446,6 +467,19 @@ mod tests {
         let (_d, ud) = temp_user();
         ud.save_settings(&serde_json::json!({"v": 2})).unwrap();
         assert_eq!(ud.read_settings().unwrap()["v"], 2);
+    }
+
+    #[test]
+    fn secrets_roundtrip_and_missing() {
+        let (_d, ud) = temp_user();
+        // 不存在 → 空对象
+        assert_eq!(ud.read_secrets().unwrap(), serde_json::json!({}));
+        // ST 形态写入/读回
+        let secrets = serde_json::json!({
+            "api_key_custom": [{"id": "u1", "value": "sk-test", "label": "", "active": true}]
+        });
+        ud.save_secrets(&secrets).unwrap();
+        assert_eq!(ud.read_secrets().unwrap(), secrets);
     }
 
     #[test]

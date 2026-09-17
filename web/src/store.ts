@@ -26,6 +26,27 @@ export interface ChatMessage {
   extra?: Record<string, unknown>;
 }
 
+export interface ChatMetadata {
+  world?: string;
+  persona?: string;
+  note_prompt?: string;
+  note_interval?: number;
+  note_depth?: number;
+  note_position?: number;
+  note_role?: number;
+  tainted?: boolean;
+  [k: string]: unknown;
+}
+
+/** Author's Note（chats.set_note 参数形状；prompt 为 null = 清除） */
+export interface NotePayload {
+  prompt: string | null;
+  interval?: number;
+  depth?: number;
+  position?: number;
+  role?: number;
+}
+
 export interface Settings {
   oai_settings?: {
     chat_completion_source?: string;
@@ -53,7 +74,9 @@ interface AppState {
   activeChatName: string | null;
   chatList: string[];
   messages: ChatMessage[];
+  chatMetadata: ChatMetadata | null;
   streamingText: string | null;
+  streamingReasoning: string | null;
   generating: boolean;
   settings: Settings | null;
   setConnected: (v: boolean) => void;
@@ -62,6 +85,7 @@ interface AppState {
   importFile: (file: File) => Promise<void>;
   deleteCharacter: (avatar: string) => Promise<void>;
   deleteMessage: (index: number) => Promise<void>;
+  editMessage: (index: number, text: string) => Promise<void>;
   exportChat: () => Promise<void>;
   send: (text: string) => Promise<void>;
   swipe: (direction: 'left' | 'right') => Promise<void>;
@@ -70,29 +94,20 @@ interface AppState {
   continueGen: () => Promise<void>;
   stopGeneration: () => Promise<void>;
   appendStreamToken: (t: string) => void;
+  appendStreamReasoning: (t: string) => void;
   reloadChat: () => Promise<void>;
   saveSettings: (s: Settings) => Promise<void>;
   openChat: (avatar: string, file: string) => Promise<void>;
   newChat: (avatar: string, greetingIndex?: number) => Promise<void>;
-  personaDraft: string;
-  setPersonaDraft: (v: string) => void;
-  anDraft: { prompt: string; depth: number };
-  setAnDraft: (v: { prompt: string; depth: number }) => void;
+  setNote: (note: NotePayload) => Promise<void>;
+  setChatPersona: (persona: string | null) => Promise<void>;
 }
 
-/** generate.run 的 persona/AN 附加参数（第一期：前端草稿，localStorage 持久化）。 */
-function buildGenExtras(get: () => AppState): Record<string, unknown> {
-  const { personaDraft, anDraft } = get();
-  const extras: Record<string, unknown> = {
-    persona_description: personaDraft,
-    persona_position_in_prompt: true,
+function parseChat(raw: any[]): { messages: ChatMessage[]; metadata: ChatMetadata | null } {
+  return {
+    messages: raw.slice(1),
+    metadata: raw[0]?.chat_metadata ?? null,
   };
-  if (anDraft.prompt.trim()) {
-    extras.in_chat_injections = [
-      { content: anDraft.prompt, depth: anDraft.depth, role: 0, injection_order: 100 },
-    ];
-  }
-  return extras;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -102,24 +117,24 @@ export const useStore = create<AppState>((set, get) => ({
   activeChatName: null,
   chatList: [],
   messages: [],
+  chatMetadata: null,
   streamingText: null,
+  streamingReasoning: null,
   generating: false,
   settings: null,
-  personaDraft: '',
-  anDraft: { prompt: '', depth: 4 },
-
-  setPersonaDraft: (v) => set({ personaDraft: v }),
-  setAnDraft: (v) => set({ anDraft: v }),
 
   openChat: async (avatar, file) => {
     const chatList = await rpc.call<string[]>('characters.chats', { avatar });
     const raw = await rpc.call<any[]>('chats.get', { avatar, file_name: file });
+    const { messages, metadata } = parseChat(raw);
     set({
       activeAvatar: avatar,
       chatList,
       activeChatName: file,
-      messages: raw.slice(1),
+      messages,
+      chatMetadata: metadata,
       streamingText: null,
+      streamingReasoning: null,
     });
   },
 
@@ -148,12 +163,15 @@ export const useStore = create<AppState>((set, get) => ({
   selectCharacter: async (avatar) => {
     const chatList = await rpc.call<string[]>('characters.chats', { avatar });
     const activeChatName = chatList.length ? chatList[chatList.length - 1] : null;
-    let messages = [];
+    let messages: ChatMessage[] = [];
+    let chatMetadata: ChatMetadata | null = null;
     if (activeChatName) {
       const raw = await rpc.call<any[]>('chats.get', { avatar, file_name: activeChatName });
-      messages = raw.slice(1);
+      const parsed = parseChat(raw);
+      messages = parsed.messages;
+      chatMetadata = parsed.metadata;
     }
-    set({ activeAvatar: avatar, chatList, activeChatName, messages, streamingText: null });
+    set({ activeAvatar: avatar, chatList, activeChatName, messages, chatMetadata, streamingText: null, streamingReasoning: null });
   },
 
   importFile: async (file) => {
@@ -173,7 +191,7 @@ export const useStore = create<AppState>((set, get) => ({
   deleteCharacter: async (avatar) => {
     await rpc.call('characters.delete', { avatar });
     if (get().activeAvatar === avatar) {
-      set({ activeAvatar: null, activeChatName: null, messages: [] });
+      set({ activeAvatar: null, activeChatName: null, messages: [], chatMetadata: null });
     }
     await get().loadAll();
   },
@@ -182,6 +200,18 @@ export const useStore = create<AppState>((set, get) => ({
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName) return;
     await rpc.call('chats.delete_message', { avatar: activeAvatar, file_name: activeChatName, index });
+    await get().reloadChat();
+  },
+
+  editMessage: async (index, text) => {
+    const { activeAvatar, activeChatName } = get();
+    if (!activeAvatar || !activeChatName) return;
+    await rpc.call('chats.update_message', {
+      avatar: activeAvatar,
+      file_name: activeChatName,
+      index,
+      text,
+    });
     await get().reloadChat();
   },
 
@@ -205,24 +235,24 @@ export const useStore = create<AppState>((set, get) => ({
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName) return;
     const raw = await rpc.call<any[]>('chats.get', { avatar: activeAvatar, file_name: activeChatName });
-    set({ messages: raw.slice(1) });
+    const { messages, metadata } = parseChat(raw);
+    set({ messages, chatMetadata: metadata });
   },
 
   send: async (text) => {
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName || get().generating) return;
-    set({ generating: true, streamingText: '' });
+    set({ generating: true, streamingText: '', streamingReasoning: '' });
     try {
       await rpc.call('generate.run', {
         avatar: activeAvatar,
         chat_file: activeChatName,
         type: 'normal',
         user_message: text,
-        ...buildGenExtras(get),
       });
       await get().reloadChat();
     } finally {
-      set({ generating: false, streamingText: null });
+      set({ generating: false, streamingText: null, streamingReasoning: null });
     }
   },
 
@@ -240,24 +270,24 @@ export const useStore = create<AppState>((set, get) => ({
       await get().reloadChat();
       return;
     }
-    set({ generating: true, streamingText: '' });
+    set({ generating: true, streamingText: '', streamingReasoning: '' });
     try {
       await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'swipe' });
       await get().reloadChat();
     } finally {
-      set({ generating: false, streamingText: null });
+      set({ generating: false, streamingText: null, streamingReasoning: null });
     }
   },
 
   regenerate: async () => {
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName || get().generating) return;
-    set({ generating: true, streamingText: '' });
+    set({ generating: true, streamingText: '', streamingReasoning: '' });
     try {
-      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'regenerate', ...buildGenExtras(get) });
+      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'regenerate' });
       await get().reloadChat();
     } finally {
-      set({ generating: false, streamingText: null });
+      set({ generating: false, streamingText: null, streamingReasoning: null });
     }
   },
 
@@ -280,12 +310,12 @@ export const useStore = create<AppState>((set, get) => ({
   continueGen: async () => {
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName || get().generating) return;
-    set({ generating: true, streamingText: '' });
+    set({ generating: true, streamingText: '', streamingReasoning: '' });
     try {
-      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'continue', ...buildGenExtras(get) });
+      await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'continue' });
       await get().reloadChat();
     } finally {
-      set({ generating: false, streamingText: null });
+      set({ generating: false, streamingText: null, streamingReasoning: null });
     }
   },
 
@@ -295,9 +325,24 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   appendStreamToken: (t) => set((s) => ({ streamingText: (s.streamingText ?? '') + t })),
+  appendStreamReasoning: (t) => set((s) => ({ streamingReasoning: (s.streamingReasoning ?? '') + t })),
 
   saveSettings: async (s) => {
     await rpc.call('settings.save', { settings: s });
     set({ settings: s });
+  },
+
+  setNote: async (note) => {
+    const { activeAvatar, activeChatName } = get();
+    if (!activeAvatar || !activeChatName) return;
+    await rpc.call('chats.set_note', { avatar: activeAvatar, file_name: activeChatName, note });
+    await get().reloadChat();
+  },
+
+  setChatPersona: async (persona) => {
+    const { activeAvatar, activeChatName } = get();
+    if (!activeAvatar || !activeChatName) return;
+    await rpc.call('chats.set_persona', { avatar: activeAvatar, file_name: activeChatName, persona });
+    await get().reloadChat();
   },
 }));

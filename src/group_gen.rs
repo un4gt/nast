@@ -106,7 +106,8 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
             .unwrap_or(json!({})),
     )
     .unwrap_or_default();
-    let provider = make_provider(&oai);
+    let secrets_snapshot = state.secrets.read().await.clone();
+    let provider = crate::connection::provider(&oai, &secrets_snapshot);
     let settings_snapshot = state.settings.read().await.clone();
     let session = GenerateSession {
         user: &state.user,
@@ -136,10 +137,7 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
             chat_file: String::new(),
             user_message: String::new(),
             character: member_ch.clone(),
-            persona_description: String::new(),
-            persona_position_in_prompt: true,
             is_group: true,
-            extra_injections: Vec::new(),
         };
         let history: Vec<nast_model::chat::ChatMessage> = chat
             .0
@@ -289,8 +287,8 @@ fn build_group_input<'a>(
     crate::prompt_bridge::BridgeInput {
         oai: &session.oai,
         generation_type: p.generation_type.as_str(),
-        name1: "User",
-        name2: &selected.name,
+        name1: "User".into(),
+        name2: selected.name.clone(),
         is_group: true,
         char_description: description,
         char_personality: personality,
@@ -303,6 +301,8 @@ fn build_group_input<'a>(
         message_examples: crate::generate::parse_examples(&p.character.data.mes_example, "User", &p.character.name),
         pin_examples: false,
         in_chat_injections: injections,
+        authors_note: None,
+        outlets: serde_json::Map::new(),
         system_prompt_override: {
             let sp = &p.character.data.system_prompt;
             if !sp.is_empty() { Some(sp.clone()) } else { None }
@@ -381,23 +381,6 @@ fn unspoken_since_user(chat: &ChatFile, members: &[(GroupMember, Character)]) ->
         .filter(|(gm, _)| !spoken.contains(&gm.name))
         .map(|(gm, _)| gm.avatar.clone())
         .collect()
-}
-
-fn make_provider(oai: &nast_model::preset::OaiSettings) -> nast_providers::Provider {
-    let kind = match oai.chat_completion_source.as_str() {
-        "claude" => nast_providers::ProviderKind::Anthropic {
-            api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        },
-        "makersuite" => nast_providers::ProviderKind::Gemini {
-            api_key: std::env::var("GOOGLE_API_KEY").unwrap_or_default(),
-        },
-        _ => nast_providers::ProviderKind::OpenAiCompat {
-            base_url: std::env::var("NAST_OPENAI_BASE")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
-            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-        },
-    };
-    nast_providers::Provider::new(kind)
 }
 
 fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {

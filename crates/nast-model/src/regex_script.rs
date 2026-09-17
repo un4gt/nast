@@ -2,12 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-/// regex_placement 枚举数值。
-pub const RP_USER_INPUT: i64 = 0;
-pub const RP_AI_OUTPUT: i64 = 1;
-pub const RP_SLASH_COMMAND: i64 = 2;
-pub const RP_WORLD_INFO: i64 = 3;
-pub const RP_REASONING: i64 = 4;
+/// regex_placement 枚举数值（regex-engine.js:281-293，1.18.0 实值）。
+/// 0 = MD_DISPLAY（废弃），4 = 遗留 sendAs，不再使用。
+pub const RP_MD_DISPLAY: i64 = 0;
+pub const RP_USER_INPUT: i64 = 1;
+pub const RP_AI_OUTPUT: i64 = 2;
+pub const RP_SLASH_COMMAND: i64 = 3;
+pub const RP_WORLD_INFO: i64 = 5;
+pub const RP_REASONING: i64 = 6;
 
 /// substitute_find_regex
 pub const SUB_NONE: i64 = 0;

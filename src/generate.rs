@@ -17,7 +17,7 @@ use nast_model::preset::{OaiSettings, CC_DUMMY_ID};
 use nast_providers::{
     ChatMessage as ProviderMessage, GenRequest, Provider, StreamEvent,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::prompt_bridge::{ExampleBlock, HistoryMessage, InChatInjection};
 use crate::state::EventHub;
@@ -30,11 +30,27 @@ pub struct GenerateParams {
     pub chat_file: String,
     pub user_message: String,
     pub character: nast_model::card::Character,
-    pub persona_description: String,
-    pub persona_position_in_prompt: bool,
     pub is_group: bool,
-    /// 前端透传的 IN_CHAT 注入（Author's Note 等）：content/depth/role/order
-    pub extra_injections: Vec<(String, i64, i64, i64)>,
+}
+
+/// 服务端解析出的 persona（personas.js 语义）。
+struct ResolvedPersona {
+    name: String,
+    description: String,
+    /// PDP_IN_PROMPT/TOP_AN/BOTTOM_AN/AT_DEPTH/NONE（0/2/3/4/9）
+    position: i64,
+    depth: i64,
+    role: i64,
+    lorebook: Option<String>,
+}
+
+/// 服务端构建的 Author's Note（AN.js setFloatingPrompt 语义）。
+struct AnNote {
+    text: String,
+    /// 0 = 主提示后 / 1 = 聊天内深度 / 2 = 主提示前
+    position: i64,
+    depth: i64,
+    role: i64,
 }
 
 pub struct GenerateResult {
@@ -81,6 +97,7 @@ impl<'a> GenerateSession<'a> {
 
     async fn run_message_gen(&self, p: &GenerateParams) -> Result<GenerateResult, String> {
         let gen_started = nast_storage::message_time_stamp();
+        let gen_start_instant = std::time::Instant::now();
         let mut chat = self.user.read_chat(&p.avatar, &p.chat_file).map_err(|e| e.to_string())?;
         ensure_integrity(&mut chat);
 
@@ -97,10 +114,14 @@ impl<'a> GenerateSession<'a> {
 
         // normal：sendMessageAsUser —— 用户消息先落盘（无 swipes）
         if p.generation_type == GenerationType::Normal && !p.user_message.is_empty() {
+            let metadata = self.current_chat_metadata(&p.avatar, &p.chat_file);
+            let user_name = metadata
+                .map(|m| self.resolve_persona(&m).name)
+                .unwrap_or_else(|| "User".into());
             // 插件钩子：user_input 可改写用户消息
             let user_text = self.transform_or(&"user_input", &json!({"text": p.user_message}), &p.user_message);
             let msg = Msg {
-                name: "User".into(),
+                name: user_name,
                 is_user: true,
                 is_system: false,
                 send_date: nast_storage::message_time_stamp(),
@@ -141,20 +162,21 @@ impl<'a> GenerateSession<'a> {
                 name: m.name.clone(),
             })
             .collect();
+        let char_name = p.character.name.clone();
         let gen_req = GenRequest {
             messages: provider_msgs,
-            model: self.oai.openai_model.clone(),
+            model: crate::connection::model_for(&self.oai),
             temperature: self.oai.temperature,
             top_p: self.oai.top_p,
             frequency_penalty: self.oai.frequency_penalty,
             presence_penalty: self.oai.presence_penalty,
             max_tokens: self.oai.openai_max_tokens,
-            stop: vec![],
+            stop: self.stopping_strings(&input.name1, &char_name, 4),
             stream: true,
             assistant_prefill: None,
             use_sysprompt: true,
-            extra_headers: vec![],
-            extra_body: json!({}),
+            extra_headers: crate::connection::extra_headers(&self.oai),
+            extra_body: crate::connection::extra_body(&self.oai),
         };
 
         // 流式接收
@@ -165,8 +187,10 @@ impl<'a> GenerateSession<'a> {
             .map_err(|e| e.to_string())?;
         tokio::pin!(stream);
 
-        let char_name = p.character.name.clone();
         let mut streamed = String::new();
+        let mut reasoning_streamed = String::new();
+        let mut reasoning_started: Option<std::time::Instant> = None;
+        let mut first_token_at: Option<std::time::Instant> = None;
         let mut errored: Option<String> = None;
         while let Some(ev) = stream.next().await {
             if self.abort.is_cancelled() {
@@ -175,8 +199,18 @@ impl<'a> GenerateSession<'a> {
             }
             match ev {
                 Ok(StreamEvent::Token(t)) => {
+                    if first_token_at.is_none() {
+                        first_token_at = Some(std::time::Instant::now());
+                    }
                     streamed.push_str(&t);
                     self.hub.emit("stream_token_received", json!({"text": t}));
+                }
+                Ok(StreamEvent::Reasoning(r)) => {
+                    if reasoning_started.is_none() {
+                        reasoning_started = Some(std::time::Instant::now());
+                    }
+                    reasoning_streamed.push_str(&r);
+                    self.hub.emit("stream_reasoning_received", json!({"text": r}));
                 }
                 Ok(StreamEvent::Error(e)) => {
                     errored = Some(e);
@@ -200,14 +234,50 @@ impl<'a> GenerateSession<'a> {
             }
         }
 
+        // auto_parse：从正文剥离 <think>…</think> 进 reasoning（reasoning.js:1517+）
+        let auto_parse = self.power_bool("reasoning", "auto_parse", true);
+        let mut reasoning = reasoning_streamed;
+        let mut streamed = streamed;
+        if auto_parse {
+            let (text, parsed) = extract_think_blocks(&streamed);
+            if !parsed.is_empty() {
+                streamed = text;
+                reasoning = if reasoning.is_empty() {
+                    parsed
+                } else {
+                    format!("{parsed}\n{reasoning}")
+                };
+            }
+        }
+
         // 插件钩子：ai_output 可改写 AI 回复
         let streamed = self
             .transform_or(&"ai_output", &json!({"text": streamed, "name": char_name}), &streamed);
+
+        // cleanUpMessage 管线（script.js:6383-6533）：停止串剥离/正则默认 pass/
+        // 名字清理/endoftext 截断/fixMarkdown
+        let metadata_for_scripts = self
+            .current_chat_metadata(&p.avatar, &p.chat_file)
+            .unwrap_or_default();
+        let scripts_for_cleanup =
+            self.collect_regex_scripts(&p.character, &metadata_for_scripts);
+        let cleaned = self.clean_up_message(
+            &streamed,
+            &input.name1,
+            &char_name,
+            false,
+            false,
+            &self.stopping_strings(&input.name1, &char_name, 0),
+            &scripts_for_cleanup,
+        );
+        let streamed = cleaned;
+
         // 正则 display pass（markdownOnly 脚本生效）→ extra.display_text
         let display_text = {
-            let macro_fn = |s: &str| {
-                crate::prompt_bridge::substitute_basic(s, "User", &char_name)
-            };
+            let user_name = input.name1.clone();
+            let char_name2 = char_name.clone();
+            let macro_fn =
+                move |s: &str| crate::prompt_bridge::substitute_basic(s, &user_name, &char_name2);
             let params = nast_engine::regex_engine::RegexParams {
                 is_markdown: true,
                 ..Default::default()
@@ -224,6 +294,9 @@ impl<'a> GenerateSession<'a> {
                 &macro_fn,
             )
         };
+        let reasoning_duration = reasoning_started.map(|t| t.elapsed().as_millis() as f64);
+        // time_to_first_token：请求发出 → 首个 token 的秒数（extra.time_to_first_token）
+        let time_to_first_token = first_token_at.map(|t| t.duration_since(gen_start_instant).as_secs_f64());
         // 落盘：saveReply 语义
         let now = nast_storage::message_time_stamp();
         match p.generation_type {
@@ -239,10 +312,18 @@ impl<'a> GenerateSession<'a> {
                 swipes.push(streamed.clone());
                 let mut extra = msg.extra.clone();
                 extra.api = Some("openai".into());
-                extra.model = Some(self.oai.openai_model.clone());
+                extra.model = Some(crate::connection::model_for(&self.oai));
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
                 extra.display_text = Some(display_text.clone());
+                if !reasoning.is_empty() {
+                    extra.reasoning = Some(reasoning.clone());
+                    extra.reasoning_duration = reasoning_duration;
+                    extra.reasoning_type = Some("Model".into());
+                }
+                if let Some(ttft) = time_to_first_token {
+                    extra.time_to_first_token = Some(ttft);
+                }
                 let swipe_info = SwipeInfo {
                     send_date: Some(now.clone()),
                     gen_started: Some(gen_started.clone()),
@@ -264,10 +345,18 @@ impl<'a> GenerateSession<'a> {
                 // normal/regenerate：新消息 + setFirstSwipe 镜像
                 let mut extra = MessageExtra::default();
                 extra.api = Some("openai".into());
-                extra.model = Some(self.oai.openai_model.clone());
+                extra.model = Some(crate::connection::model_for(&self.oai));
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
                 extra.display_text = Some(display_text.clone());
+                if !reasoning.is_empty() {
+                    extra.reasoning = Some(reasoning.clone());
+                    extra.reasoning_duration = reasoning_duration;
+                    extra.reasoning_type = Some("Model".into());
+                }
+                if let Some(ttft) = time_to_first_token {
+                    extra.time_to_first_token = Some(ttft);
+                }
                 let msg = Msg {
                     name: char_name.clone(),
                     is_user: false,
@@ -276,7 +365,7 @@ impl<'a> GenerateSession<'a> {
                     mes: streamed.clone(),
                     gen_started: Some(gen_started.clone()),
                     gen_finished: Some(now.clone()),
-                    extra,
+                    extra: extra.clone(),
                     // 每条新 AI 消息都有 swipes 基础设施（setFirstSwipe）
                     swipes: Some(vec![streamed.clone()]),
                     swipe_id: Some(0),
@@ -284,7 +373,7 @@ impl<'a> GenerateSession<'a> {
                         send_date: Some(now.clone()),
                         gen_started: Some(gen_started.clone()),
                         gen_finished: Some(now.clone()),
-                        extra: MessageExtra::default(),
+                        extra,
                     }]),
                     ..Default::default()
                 };
@@ -313,10 +402,22 @@ impl<'a> GenerateSession<'a> {
         let impersonation_prompt = if self.oai.impersonation_prompt.is_empty() {
             String::new()
         } else {
-            crate::prompt_bridge::substitute_basic(&self.oai.impersonation_prompt, "User", &p.character.name)
+            crate::prompt_bridge::substitute_basic(&self.oai.impersonation_prompt, &input.name1, &p.character.name)
         };
         let assembled = crate::prompt_bridge::assemble_impersonate(&self.oai, &input, &impersonation_prompt);
         let text = self.call_provider(&assembled, None).await?;
+        // cleanUpMessage（isImpersonate：USER_INPUT 正则 pass + 停止串剥离）
+        let metadata = chat.metadata();
+        let scripts = self.collect_regex_scripts(&p.character, &metadata);
+        let text = self.clean_up_message(
+            &text,
+            &input.name1,
+            &p.character.name,
+            true,
+            false,
+            &self.stopping_strings(&input.name1, &p.character.name, 0),
+            &scripts,
+        );
         self.hub.emit("impersonate_ready", json!(text));
         Ok(GenerateResult { text, saved: false })
     }
@@ -406,6 +507,11 @@ impl<'a> GenerateSession<'a> {
         let regex_scripts = self.collect_regex_scripts(&p.character, &metadata);
         let total = history.len();
 
+        // persona 解析（服务端；chat 绑定 > 默认）
+        let persona = self.resolve_persona(&metadata);
+        let name1 = persona.name.clone();
+        let name2 = p.character.name.clone();
+
         let messages: Vec<HistoryMessage> = history
             .iter()
             .filter(|m| !m.is_system)
@@ -418,9 +524,10 @@ impl<'a> GenerateSession<'a> {
                 } else {
                     nast_model::regex_script::RP_AI_OUTPUT
                 };
-                let macro_fn = |s: &str| {
-                    crate::prompt_bridge::substitute_basic(s, "User", &p.character.name)
-                };
+                let user_name = name1.clone();
+                let char_name = name2.clone();
+                let macro_fn =
+                    move |s: &str| crate::prompt_bridge::substitute_basic(s, &user_name, &char_name);
                 let params = nast_engine::regex_engine::RegexParams {
                     depth: Some(depth),
                     is_prompt: true,
@@ -434,15 +541,21 @@ impl<'a> GenerateSession<'a> {
                 let names_behavior = self.oai.character_names_behavior;
                 let is_narrator = m.extra.kind.as_deref() == Some("narrator");
                 if (names_behavior == 2 && !is_narrator)
-                    || (names_behavior == 0 && p.is_group && m.name != "User" && !is_narrator)
+                    || (names_behavior == 0 && p.is_group && m.name != name1 && !is_narrator)
                 {
                     content = format!("{}: {}", m.name, content);
                 }
                 content = content.replace(String::from("\r").as_str(), "");
+                // COMPLETION（1）：带 name 字段（openai.js setOpenAIMessages）
+                let msg_name = if names_behavior == 1 {
+                    Some(m.name.clone())
+                } else {
+                    None
+                };
                 HistoryMessage {
                     role: role.into(),
                     content,
-                    name: None, // COMPLETION(1) 才带 name 字段，v1 默认 0
+                    name: msg_name,
                     is_narrator,
                     injected: false,
                 }
@@ -450,71 +563,185 @@ impl<'a> GenerateSession<'a> {
             .collect();
         let _ = CC_DUMMY_ID;
 
-        // 世界书引擎（M3）：聊天书 = chat_metadata.world；角色书 = data.extensions.world
+        // ---------- 世界书四源组装（getSortedEntries：chat→persona→char/global by strategy） ----------
+        let wi_settings = self.wi_settings();
+        let mut chat_books: Vec<(String, nast_model::world::WorldInfoBook)> = Vec::new();
+        let mut persona_books: Vec<(String, nast_model::world::WorldInfoBook)> = Vec::new();
+        let mut char_books: Vec<(String, nast_model::world::WorldInfoBook)> = Vec::new();
+        let mut global_books: Vec<(String, nast_model::world::WorldInfoBook)> = Vec::new();
+        let mut selected: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        if let Some(name) = &metadata.world {
+            if let Ok(b) = self.user.read_world(name) {
+                selected.insert(name.clone());
+                chat_books.push((name.clone(), b));
+            }
+        }
+        if let Some(name) = &persona.lorebook {
+            if !selected.contains(name) {
+                if let Ok(b) = self.user.read_world(name) {
+                    selected.insert(name.clone());
+                    persona_books.push((name.clone(), b));
+                }
+            }
+        }
+        // 角色内嵌书 + charLore 辅助书
+        let mut char_book_names: Vec<String> = Vec::new();
+        if let Some(name) = &p.character.data.extensions.world {
+            char_book_names.push(name.clone());
+        }
+        if let Some(char_lore) = self
+            .settings_json
+            .get("world_info")
+            .and_then(|w| w.get("char_lore"))
+            .and_then(|v| v.as_array())
+        {
+            let avatar_key = p.avatar.trim_end_matches(".png").to_string();
+            for cl in char_lore {
+                if cl.get("name").and_then(|n| n.as_str()) == Some(avatar_key.as_str()) {
+                    if let Some(books) = cl.get("extraBooks").and_then(|b| b.as_array()) {
+                        for b in books {
+                            if let Some(bn) = b.as_str() {
+                                char_book_names.push(bn.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for name in char_book_names {
+            if !selected.contains(&name) {
+                if let Ok(b) = self.user.read_world(&name) {
+                    selected.insert(name.clone());
+                    char_books.push((name.clone(), b));
+                }
+            }
+        }
+        // 全局激活书
+        if let Some(globals) = self
+            .settings_json
+            .get("world_info")
+            .and_then(|w| w.get("global_select"))
+            .or_else(|| {
+                self.settings_json
+                    .get("world_info")
+                    .and_then(|w| w.get("globalSelect"))
+            })
+            .and_then(|v| v.as_array())
+        {
+            for g in globals {
+                if let Some(name) = g.as_str() {
+                    if !selected.contains(name) {
+                        if let Ok(b) = self.user.read_world(name) {
+                            selected.insert(name.to_string());
+                            global_books.push((name.to_string(), b));
+                        }
+                    }
+                }
+            }
+        }
+
+        let any_books = !chat_books.is_empty()
+            || !persona_books.is_empty()
+            || !char_books.is_empty()
+            || !global_books.is_empty();
+
+        // ---------- AN（interval 门控 + 角色卡 note 合并；WI an_top/bottom 稍后并入） ----------
+        let mut an_note = self.build_an_note(p, &metadata, history);
+
         let mut wi_before = String::new();
         let mut wi_after = String::new();
         let mut wi_depth_injections: Vec<InChatInjection> = Vec::new();
+        let mut em_blocks: Vec<(i64, Vec<ExampleBlock>)> = Vec::new();
+        let mut outlets = serde_json::Map::new();
+        let mut an_top = String::new();
+        let mut an_bottom = String::new();
         {
-            let settings = self.wi_settings();
-            // 聊天级世界书
-            let chat_book_name = metadata.world.clone();
-            let mut chat_book = None;
-            if let Some(name) = &chat_book_name {
-                chat_book = self.user.read_world(name).ok();
-            }
-            let mut char_book = None;
-            if let Some(name) = &p.character.data.extensions.world {
-                char_book = self.user.read_world(name).ok();
-            }
-            let empty: Vec<&nast_model::world::WorldInfoBook> = Vec::new();
-            let books = nast_engine::world_info::WiBooks {
-                chat_lore: chat_book.as_ref().map(|b| vec![b]).unwrap_or(empty.clone()),
-                character_lore: char_book.as_ref().map(|b| vec![b]).unwrap_or(empty.clone()),
-                persona_lore: empty.clone(),
-                global_lore: empty,
+            // AN 允许扫描（extension_settings.note.allowWIScan，默认 false）
+            let allow_wi_scan = self
+                .settings_json
+                .get("extension_settings")
+                .and_then(|e| e.get("note"))
+                .and_then(|n| n.get("allowWIScan"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let extra_scan = if allow_wi_scan {
+                an_note.as_ref().map(|a| a.text.clone()).unwrap_or_default()
+            } else {
+                String::new()
             };
-            if chat_book.is_some() || char_book.is_some() {
-                let scan_source = nast_engine::world_info::ScanSource {
-                    chat: history.iter().map(|m| m.mes.clone()).collect(),
-                    persona_description: p.persona_description.clone(),
-                    char_description: p.character.data.description.clone(),
-                    char_personality: p.character.data.personality.clone(),
-                    char_depth_prompt: p
-                        .character
-                        .data
-                        .extensions
-                        .depth_prompt
-                        .as_ref()
-                        .map(|d| d.prompt.clone())
-                        .unwrap_or_default(),
-                    scenario: p.character.data.scenario.clone(),
-                };
+            let env = nast_engine::macros::MacroEnv {
+                user: name1.clone(),
+                char: name2.clone(),
+                group: name2.clone(),
+                description: p.character.data.description.clone(),
+                personality: p.character.data.personality.clone(),
+                scenario: p.character.data.scenario.clone(),
+                persona: persona.description.clone(),
+                creator_notes: p.character.data.creator_notes.clone(),
+                ..Default::default()
+            };
+            let scan_source = nast_engine::world_info::ScanSource {
+                chat: history.iter().map(|m| m.mes.clone()).collect(),
+                persona_description: persona.description.clone(),
+                char_description: p.character.data.description.clone(),
+                char_personality: p.character.data.personality.clone(),
+                char_depth_prompt: p
+                    .character
+                    .data
+                    .extensions
+                    .depth_prompt
+                    .as_ref()
+                    .map(|d| d.prompt.clone())
+                    .unwrap_or_default(),
+                scenario: p.character.data.scenario.clone(),
+                creator_notes: p.character.data.creator_notes.clone(),
+                char_file: p.avatar.trim_end_matches(".png").to_string(),
+                char_tags: p.character.data.tags.clone(),
+                extra_scan,
+            };
+            if any_books {
                 // timedWorldInfo 持久化到聊天元数据
                 let mut timed = metadata.timed_world_info.clone().unwrap_or_default();
                 let chat_length = history.len() as i64;
                 let max_context = self.oai.openai_max_context - self.oai.openai_max_tokens;
-                let env = nast_engine::macros::MacroEnv {
-                    user: "User".into(),
-                    char: p.character.name.clone(),
-                    group: p.character.name.clone(),
-                    description: p.character.data.description.clone(),
-                    personality: p.character.data.personality.clone(),
-                    scenario: p.character.data.scenario.clone(),
-                    persona: p.persona_description.clone(),
-                    ..Default::default()
-                };
                 let mut state = nast_engine::world_info::WiState {
                     timed: &mut timed,
                     chat_length,
                 };
+                let chat_refs: Vec<(&str, &nast_model::world::WorldInfoBook)> = chat_books
+                    .iter()
+                    .map(|(n, b)| (n.as_str(), b))
+                    .collect();
+                let persona_refs: Vec<(&str, &nast_model::world::WorldInfoBook)> = persona_books
+                    .iter()
+                    .map(|(n, b)| (n.as_str(), b))
+                    .collect();
+                let char_refs: Vec<(&str, &nast_model::world::WorldInfoBook)> = char_books
+                    .iter()
+                    .map(|(n, b)| (n.as_str(), b))
+                    .collect();
+                let global_refs: Vec<(&str, &nast_model::world::WorldInfoBook)> = global_books
+                    .iter()
+                    .map(|(n, b)| (n.as_str(), b))
+                    .collect();
+                let books = nast_engine::world_info::WiBooks {
+                    chat_lore: chat_refs,
+                    persona_lore: persona_refs,
+                    character_lore: char_refs,
+                    global_lore: global_refs,
+                };
                 let wi = nast_engine::world_info::check_world_info(
-                    &books, &settings, &scan_source, &mut state, &env, max_context,
+                    &books, &wi_settings, &scan_source, &mut state, &env, &regex_scripts,
+                    max_context,
                 );
                 let mut metadata_to_save = metadata.clone();
                 metadata_to_save.timed_world_info = Some(timed);
                 self.save_chat_metadata(&p.avatar, &p.chat_file, &metadata_to_save);
                 wi_before = wi.world_info_before;
                 wi_after = wi.world_info_after;
+                an_top = wi.an_top;
+                an_bottom = wi.an_bottom;
                 for de in &wi.depth_entries {
                     wi_depth_injections.push(InChatInjection {
                         content: de.content.clone(),
@@ -523,29 +750,133 @@ impl<'a> GenerateSession<'a> {
                         injection_order: de.order,
                     });
                 }
+                // EM 锚点：条目内容按示例对话解析，前后拼接（script.js:4580-4594）
+                for (pos, content) in &wi.em_entries {
+                    if content.trim().is_empty() {
+                        continue;
+                    }
+                    let blocks = parse_examples(content, &name1, &name2);
+                    if !blocks.is_empty() {
+                        em_blocks.push((*pos, blocks));
+                    }
+                }
+                for (name, content) in &wi.outlet_entries {
+                    outlets.insert(name.clone(), serde_json::Value::String(content.clone()));
+                }
             }
         }
 
+        // ---------- AN 最终合并：ANTop + note + ANBottom（world-info.js:5151-5154） ----------
+        if let Some(an) = &mut an_note {
+            let mut parts: Vec<String> = Vec::new();
+            if !an_top.is_empty() {
+                parts.push(an_top.clone());
+            }
+            if !an.text.is_empty() {
+                parts.push(an.text.clone());
+            }
+            if !an_bottom.is_empty() {
+                parts.push(an_bottom.clone());
+            }
+            an.text = parts.join("\n");
+        }
+
+        // ---------- 示例区：EM 块前后拼接（before 逆序 prepend / after append） ----------
+        let mut message_examples =
+            parse_examples(&p.character.data.mes_example, &name1, &name2);
+        for (pos, blocks) in em_blocks {
+            if pos == 0 {
+                for b in blocks.into_iter().rev() {
+                    message_examples.insert(0, b);
+                }
+            } else {
+                message_examples.extend(blocks);
+            }
+        }
+
+        // ---------- 注入集合 ----------
         let mut all_injections = build_injections(p);
         all_injections.extend(wi_depth_injections);
+        // AN 聊天内深度（position 1）
+        if let Some(an) = &an_note {
+            if an.position == 1 && !an.text.is_empty() {
+                all_injections.push(InChatInjection {
+                    content: an.text.clone(),
+                    depth: an.depth,
+                    role: an.role,
+                    injection_order: 100,
+                });
+            }
+        }
+        // persona AT_DEPTH（4）
+        if persona.position == nast_model::persona::PDP_AT_DEPTH && !persona.description.is_empty()
+        {
+            all_injections.push(InChatInjection {
+                content: persona.description.clone(),
+                depth: persona.depth,
+                role: persona.role,
+                injection_order: 100,
+            });
+        }
+
+        // persona 位置分发：IN_PROMPT(0) → marker；TOP_AN(2)/BOTTOM_AN(3) → 并入 AN（仅当 AN 存在）
+        let mut persona_description = persona.description.clone();
+        let mut persona_position_in_prompt = false;
+        match persona.position {
+            nast_model::persona::PDP_IN_PROMPT => {
+                persona_position_in_prompt = !persona_description.is_empty();
+            }
+            nast_model::persona::PDP_TOP_AN => {
+                if let Some(an) = &mut an_note {
+                    an.text = format!("{}\n{}", persona.description, an.text);
+                    persona_description = String::new();
+                }
+            }
+            nast_model::persona::PDP_BOTTOM_AN => {
+                if let Some(an) = &mut an_note {
+                    an.text = format!("{}\n{}", an.text, persona.description);
+                    persona_description = String::new();
+                }
+            }
+            _ => {
+                // AT_DEPTH 走注入；NONE(9) 不进 prompt
+                persona_description = String::new();
+            }
+        }
+
+        // AN 相对注入（position 0/2）
+        let authors_note = an_note.and_then(|an| {
+            if an.text.trim().is_empty() {
+                None
+            } else if an.position == 0 || an.position == 2 {
+                Some(crate::prompt_bridge::AuthorsNote {
+                    text: an.text,
+                    position: an.position,
+                })
+            } else {
+                None
+            }
+        });
 
         crate::prompt_bridge::BridgeInput {
             oai: &self.oai,
             generation_type: p.generation_type.as_str(),
-            name1: "User",
-            name2: &p.character.name,
+            name1: name1,
+            name2: name2,
             is_group: p.is_group,
             char_description: p.character.data.description.clone(),
             char_personality: p.character.data.personality.clone(),
             scenario: p.character.data.scenario.clone(),
-            persona_description: p.persona_description.clone(),
-            persona_position_in_prompt: p.persona_position_in_prompt,
+            persona_description,
+            persona_position_in_prompt,
             world_info_before: wi_before,
             world_info_after: wi_after,
             messages,
-            message_examples: parse_examples(&p.character.data.mes_example, "User", &p.character.name),
+            message_examples,
             pin_examples: false,
             in_chat_injections: all_injections,
+            authors_note,
+            outlets,
             system_prompt_override: {
                 let sp = &p.character.data.system_prompt;
                 if !sp.is_empty() { Some(sp.clone()) } else { None }
@@ -575,7 +906,7 @@ impl<'a> GenerateSession<'a> {
             .collect();
         let gen_req = GenRequest {
             messages: provider_msgs,
-            model: self.oai.openai_model.clone(),
+            model: crate::connection::model_for(&self.oai),
             temperature: self.oai.temperature,
             top_p: self.oai.top_p,
             frequency_penalty: self.oai.frequency_penalty,
@@ -585,8 +916,8 @@ impl<'a> GenerateSession<'a> {
             stream: false,
             assistant_prefill: prefill.map(|s| s.to_string()),
             use_sysprompt: true,
-            extra_headers: vec![],
-            extra_body: json!({}),
+            extra_headers: crate::connection::extra_headers(&self.oai),
+            extra_body: crate::connection::extra_body(&self.oai),
         };
         self.provider.generate(&gen_req).await.map_err(|e| e.to_string())
     }
@@ -638,9 +969,157 @@ impl<'a> GenerateSession<'a> {
         }
     }
 
-    /// 聚合三作用域正则脚本：全局（settings）→ 角色内嵌 → 聊天级。
-    pub fn collect_regex_scripts(
+    /// 解析 persona（personas.js：chat_metadata.persona 绑定 > power_user.default_persona；
+    /// 名字 = personas[pid]，描述/位置/深度/角色/世界书 = persona_descriptions[pid]，
+    /// 缺省回落 power_user 直存字段，最终回落 username/"User"）。
+    fn resolve_persona(&self, metadata: &nast_model::chat::ChatMetadata) -> ResolvedPersona {
+        let power = self.settings_json.get("power_user");
+        let str_of = |k: &str| -> String {
+            power
+                .and_then(|p| p.get(k))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()
+        };
+        let i64_of = |k: &str, d: i64| -> i64 {
+            power
+                .and_then(|p| p.get(k))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(d)
+        };
+        // pid：聊天绑定 > 默认
+        let pid = metadata
+            .persona
+            .clone()
+            .or_else(|| {
+                power
+                    .and_then(|p| p.get("default_persona"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
+
+        let mut name = String::new();
+        let mut description = String::new();
+        let mut position = i64_of("persona_description_position", nast_model::persona::PDP_IN_PROMPT);
+        let mut depth = i64_of("persona_description_depth", 2);
+        let mut role = i64_of("persona_description_role", 0);
+        let lorebook = str_of("persona_description_lorebook");
+        let mut lorebook_opt = (!lorebook.is_empty()).then_some(lorebook.clone());
+
+        if !pid.is_empty() {
+            if let Some(p) = power.and_then(|p| p.get("personas")).and_then(|v| v.as_object()) {
+                if let Some(Value::String(n)) = p.get(&pid) {
+                    name = n.clone();
+                }
+            }
+            if let Some(d) = power
+                .and_then(|p| p.get("persona_descriptions"))
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get(&pid))
+            {
+                if let Some(Value::String(s)) = d.get("description") {
+                    description = s.clone();
+                }
+                if let Some(v) = d.get("position").and_then(|v| v.as_i64()) {
+                    position = v;
+                }
+                if let Some(v) = d.get("depth").and_then(|v| v.as_i64()) {
+                    depth = v;
+                }
+                if let Some(v) = d.get("role").and_then(|v| v.as_i64()) {
+                    role = v;
+                }
+                if let Some(Value::String(s)) = d.get("lorebook") {
+                    lorebook_opt = (!s.is_empty()).then_some(s.clone());
+                }
+            }
+        }
+        // 无 pid 或解析为空：回落 power_user 直存（单 persona 模式）
+        if name.is_empty() {
+            name = str_of("username");
+        }
+        if description.is_empty() {
+            description = str_of("persona_description");
+        }
+        if name.is_empty() {
+            name = "User".into();
+        }
+        ResolvedPersona { name, description, position, depth, role, lorebook: lorebook_opt }
+    }
+
+    /// 构建 Author's Note（AN.js setFloatingPrompt 324-392）：
+    /// - 文本：chat note > extension_settings.note.default；角色卡 note 按 0 替换/1 前置/2 后缀合并
+    /// - interval 门控：用户消息数取模（interval<=1 恒插）
+    /// - 位置/深度/角色：chat_metadata.note_*（缺省 1/4/0）
+    fn build_an_note(
         &self,
+        p: &GenerateParams,
+        metadata: &nast_model::chat::ChatMetadata,
+        history: &[Msg],
+    ) -> Option<AnNote> {
+        let note_ext = self.settings_json.get("extension_settings").and_then(|e| e.get("note"));
+        let default_note = note_ext
+            .and_then(|n| n.get("default"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        let mut text = metadata
+            .note_prompt
+            .clone()
+            .unwrap_or_else(|| default_note.clone());
+        // 位置缺省 = 1（聊天内深度）
+        let position = metadata.note_position.unwrap_or(1);
+        let depth = metadata.note_depth.unwrap_or(4);
+        let role = metadata.note_role.unwrap_or(0);
+        let interval = metadata.note_interval.unwrap_or(1).max(1);
+
+        // 角色卡 note（extension_settings.note.chara[{name, prompt, useChara, position}]）
+        let char_key = p.avatar.trim_end_matches(".png").to_string();
+        if let Some(chara) = note_ext
+            .and_then(|n| n.get("chara"))
+            .and_then(|c| c.as_array())
+        {
+            if let Some(entry) = chara.iter().find(|c| {
+                c.get("name").and_then(|n| n.as_str()) == Some(char_key.as_str())
+                    && c.get("useChara").and_then(|u| u.as_bool()).unwrap_or(false)
+            }) {
+                let chara_prompt = entry
+                    .get("prompt")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !chara_prompt.is_empty() {
+                    match entry.get("position").and_then(|v| v.as_i64()).unwrap_or(0) {
+                        1 => text = format!("{chara_prompt}\n{text}"),
+                        2 => text = format!("{text}\n{chara_prompt}"),
+                        _ => text = chara_prompt.to_string(),
+                    }
+                }
+            }
+        }
+
+        // interval 门控：lastMessageNumber = 用户消息数（AN.js:334-341）
+        let last_message_number = history.iter().filter(|m| m.is_user).count() as i64;
+        let should_add = if interval <= 1 {
+            true
+        } else if last_message_number >= interval {
+            last_message_number % interval == 0
+        } else {
+            interval - last_message_number == 0
+        };
+        if !should_add {
+            return None;
+        }
+        if text.trim().is_empty() {
+            // 无文本时仍返回占位（persona TOP/BOTTOM_AN 可能并入）——由调用方丢弃空文本
+            return Some(AnNote { text: String::new(), position, depth, role });
+        }
+        Some(AnNote { text, position, depth, role })
+    }
+
+    /// 聚合三作用域正则脚本：全局（settings）→ 角色内嵌 → 聊天级。
+    pub fn collect_regex_scripts(        &self,
         character: &nast_model::card::Character,
         metadata: &nast_model::chat::ChatMetadata,
     ) -> Vec<nast_model::regex_script::RegexScript> {
@@ -782,21 +1261,33 @@ pub fn parse_examples(raw: &str, name1: &str, name2: &str) -> Vec<ExampleBlock> 
     blocks
 }
 
-/// 角色卡 @depth 注入 + AN（v1：仅角色 depth_prompt；AN 由聊天元数据传入）。
-pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {
-    let mut out = Vec::new();
-    // 前端透传（Author's Note 等）：P2 修通注入链路
-    for (content, depth, role, order) in &p.extra_injections {
-        if content.trim().is_empty() {
-            continue;
+/// rpc 侧（非生成会话）使用的正则脚本聚合：全局 + 角色内嵌 + 聊天级。
+pub fn collect_regex_scripts_for(
+    settings: &serde_json::Value,
+    character: &nast_model::card::Character,
+    metadata: &nast_model::chat::ChatMetadata,
+) -> Vec<nast_model::regex_script::RegexScript> {
+    let mut out: Vec<nast_model::regex_script::RegexScript> = Vec::new();
+    if let Some(list) = settings
+        .get("extension_settings")
+        .and_then(|e| e.get("regex"))
+        .and_then(|v| v.as_array())
+    {
+        for s in list {
+            if let Ok(script) =
+                serde_json::from_value::<nast_model::regex_script::RegexScript>(s.clone())
+            {
+                out.push(script);
+            }
         }
-        out.push(InChatInjection {
-            content: content.clone(),
-            depth: *depth,
-            role: *role,
-            injection_order: *order,
-        });
     }
+    out.extend(character.data.extensions.regex_scripts.clone());
+    out.extend(metadata.regex_scripts.clone());
+    out
+}
+
+/// 角色卡 @depth 注入（AN/persona 已服务端化，不再从前端透传）。
+pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {    let mut out = Vec::new();
     if let Some(dp) = &p.character.data.extensions.depth_prompt {
         if !dp.prompt.is_empty() {
             let role = match dp.role.as_str() {
@@ -815,9 +1306,300 @@ pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {
     out
 }
 
+// ---------- cleanUpMessage / stopping strings（script.js:6383-6533, power-user.js:3068-3112） ----------
+
+impl<'a> GenerateSession<'a> {
+    /// power_user 嵌套读取（bool）。
+    fn power_bool(&self, section: &str, key: &str, default: bool) -> bool {
+        self.settings_json
+            .get("power_user")
+            .and_then(|p| p.get(section))
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    }
+
+    /// power_user 顶层读取（bool）。
+    fn power_top_bool(&self, key: &str, default: bool) -> bool {
+        self.settings_json
+            .get("power_user")
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(default)
+    }
+
+    /// power_user 顶层读取（String）。
+    fn power_top_str(&self, key: &str) -> String {
+        self.settings_json
+            .get("power_user")
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// 自定义停止串（power-user.js:3068-3112）：JSON 数组字符串 + 宏替换；
+    /// limit > 0 时截断（CC 上限 4；0 = 不限，用于输出侧剥离）。
+    pub fn stopping_strings(&self, name1: &str, name2: &str, limit: usize) -> Vec<String> {
+        let raw = self.power_top_str("custom_stopping_strings");
+        if raw.trim().is_empty() {
+            return vec![];
+        }
+        let subst = self.power_top_bool("custom_stopping_strings_macro", false);
+        let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&raw) else {
+            return vec![];
+        };
+        let mut out: Vec<String> = arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if subst {
+                    crate::prompt_bridge::substitute_basic(&s, name1, name2)
+                } else {
+                    s
+                }
+            })
+            .collect();
+        if limit > 0 && out.len() > limit {
+            out.truncate(limit);
+        }
+        out
+    }
+
+    /// 生成输出清理管线（script.js cleanUpMessage 6383-6533）。
+    /// 仅作用于生成结果（不影响 prompt 构建）；各开关走 power_user，默认值与 ST 一致。
+    pub fn clean_up_message(
+        &self,
+        text: &str,
+        name1: &str,
+        name2: &str,
+        is_impersonate: bool,
+        is_continue: bool,
+        stopping_strings: &[String],
+        regex_scripts: &[nast_model::regex_script::RegexScript],
+    ) -> String {
+        let mut text = text.to_string();
+
+        // 1. user_prompt_bias 前置（非 impersonate/continue）
+        if !is_impersonate && !is_continue {
+            let bias = self.power_top_str("user_prompt_bias");
+            if !bias.is_empty() {
+                text = format!("{bias}{text}");
+            }
+        }
+
+        // 2. 停止串尾部部分前缀剥离（script.js:6418-6428，流式友好）
+        for s in stopping_strings {
+            loop {
+                let mut cut = false;
+                for j in 1..=s.chars().count() {
+                    let prefix: String = s.chars().take(j).collect();
+                    if text.ends_with(&prefix) {
+                        let keep = text.chars().count() - j;
+                        text = text.chars().take(keep).collect();
+                        cut = true;
+                        break;
+                    }
+                }
+                if !cut {
+                    break;
+                }
+            }
+        }
+
+        // 3. 正则默认 pass（AI_OUTPUT / USER_INPUT；script.js:6430）
+        {
+            let user_name = name1.to_string();
+            let char_name = name2.to_string();
+            let macro_fn =
+                move |s: &str| crate::prompt_bridge::substitute_basic(s, &user_name, &char_name);
+            let placement = if is_impersonate {
+                nast_model::regex_script::RP_USER_INPUT
+            } else {
+                nast_model::regex_script::RP_AI_OUTPUT
+            };
+            let params = nast_engine::regex_engine::RegexParams::default();
+            text = nast_engine::regex_engine::get_regexed_string(
+                &text, placement, regex_scripts, &params, &macro_fn,
+            );
+        }
+
+        // 4. collapseNewlines
+        if self.power_top_bool("collapse_newlines", false) {
+            let mut collapsed = String::new();
+            let mut last_nl = false;
+            for c in text.chars() {
+                if c == '\n' {
+                    if !last_nl {
+                        collapsed.push(c);
+                    }
+                    last_nl = true;
+                } else {
+                    collapsed.push(c);
+                    last_nl = false;
+                }
+            }
+            text = collapsed;
+        }
+
+        // 5. 行尾空白剥离（/[^\S\r\n]+$/gm）
+        text = strip_trailing_whitespace_per_line(&text);
+
+        // 6. 错误说话人移除（allow_name1/2_display 默认 false）
+        let allow1 = self.power_top_bool("allow_name1_display", false);
+        let allow2 = self.power_top_bool("allow_name2_display", false);
+        if !allow1 && !text.is_empty() && text.starts_with(&format!("{name1}:")) {
+            return String::new();
+        }
+        if !allow2 {
+            // 尾部 "\nName2:" 块清除
+            loop {
+                let suffix = format!("\n{name2}:");
+                if text.ends_with(&suffix) {
+                    let keep = text.chars().count() - suffix.chars().count();
+                    text = text.chars().take(keep).collect();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 7. <|endoftext|> 截断
+        if let Some(pos) = text.find("<|endoftext|>") {
+            text.truncate(pos);
+        }
+
+        // 8. 角色名前缀剥离（!allow_name2_display 时开头 "Name2:" 去除）
+        if !allow2 {
+            let prefix = format!("{name2}:");
+            if text.starts_with(&prefix) {
+                text = text[prefix.len()..].to_string();
+            }
+        }
+
+        // 9. fixMarkdown(false)：* / _ 间距修正（auto_fix_generated_markdown 默认 true）
+        if self.power_top_bool("auto_fix_generated_markdown", true) {
+            text = fix_markdown(&text, false);
+        }
+
+        // 10. trim_to_end_sentence（trim_sentences 默认 false）
+        if self.power_top_bool("trim_sentences", false) {
+            text = trim_to_end_sentence(&text);
+        }
+
+        // 11. trim_spaces（默认 true）
+        if self.power_top_bool("trim_spaces", true) {
+            text = text.trim().to_string();
+        }
+        text
+    }
+}
+
+/// 行尾空白剥离（保留换行结构）。
+fn strip_trailing_whitespace_per_line(text: &str) -> String {
+    text.lines()
+        .map(|line| line.trim_end_matches([' ', '\t', '\u{a0}']))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 句尾截断（toolops trimToEndSentence 简化：最后一个 . ! ? ？。」」…… 处截断）。
+fn trim_to_end_sentence(text: &str) -> String {
+    let trimmed = text.trim_end();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut last = None;
+    for (i, c) in chars.iter().enumerate() {
+        if ".!?？！。…\"」』)".contains(*c) {
+            last = Some(i);
+        }
+    }
+    match last {
+        Some(i) => chars[..=i].iter().collect::<String>(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// fixMarkdown（power-user.js:429-469）：
+/// - 通用：成对 * / _ 标记内侧空白修正（`* text *` → `*text*`）
+/// - forDisplay：逐行补齐奇数个 * / " 
+pub fn fix_markdown(text: &str, for_display: bool) -> String {
+    use once_cell::sync::Lazy;
+    static SPACE_SIDE_RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(
+            r"(\*|_)[\t \u{a0}\u{1680}\u{2000}-\u{200a}\u{202f}\u{205f}\u{3000}\u{feff}]+|[\t \u{a0}\u{1680}\u{2000}-\u{200a}\u{202f}\u{205f}\u{3000}\u{feff}]+(\*|_)",
+        )
+        .unwrap()
+    });
+
+    // 成对标记扫描（regex crate 无反向引用，手写 /([*_]{1,2})([\s\S]*?)\1/g 语义：
+    // 优先双字符标记，闭合取最近出现 = 非贪婪；匹配后从尾部继续）
+    let bytes = text.as_bytes();
+    let mut new_text = text.to_string();
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'*' || c == b'_' {
+            let len = if i + 1 < bytes.len() && bytes[i + 1] == c { 2 } else { 1 };
+            let marker = &text[i..i + len];
+            if let Some(rel) = text[i + len..].find(marker) {
+                let end = i + len + rel + len;
+                pairs.push((i, end));
+                i = end;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    // 倒序替换标记内侧空白（保持字节索引有效）
+    for (start, end) in pairs.iter().rev() {
+        let matched = &new_text[*start..*end];
+        let replacement = SPACE_SIDE_RE.replace_all(matched, "${1}${2}").to_string();
+        if replacement != matched {
+            new_text.replace_range(*start..*end, &replacement);
+        }
+    }
+
+    if !for_display {
+        return new_text;
+    }
+    // 逐行补齐奇数个 * / "
+    let mut lines: Vec<String> = new_text.split('\n').map(String::from).collect();
+    for line in lines.iter_mut() {
+        for ch in ['*', '"'] {
+            let count = line.matches(ch).count();
+            if count % 2 == 1 {
+                let trimmed_end = line.trim_end().to_string();
+                *line = format!("{trimmed_end}{ch}");
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+/// <think>…</thinking> 块剥离（reasoning auto_parse）。
+/// 返回 (正文, reasoning)。支持 <think> 与 <thinking> 两种标签。
+pub fn extract_think_blocks(text: &str) -> (String, String) {
+    use once_cell::sync::Lazy;
+    static THINK_RE: Lazy<regex::Regex> =
+        Lazy::new(|| regex::Regex::new(r"(?s)<think(?:ing)?>(.*?)</think(?:ing)?>").unwrap());
+    let mut reasoning_parts: Vec<String> = Vec::new();
+    let mut out = String::new();
+    let mut last = 0usize;
+    for caps in THINK_RE.captures_iter(text) {
+        let m = caps.get(0).unwrap();
+        out.push_str(&text[last..m.start()]);
+        reasoning_parts.push(caps.get(1).map(|g| g.as_str().trim().to_string()).unwrap_or_default());
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    (out, reasoning_parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_examples;
+    use super::{extract_think_blocks, fix_markdown, parse_examples};
 
     #[test]
     fn parse_examples_st_semantics() {
@@ -845,5 +1627,26 @@ mod tests {
         let raw = "<start>\nUser: a\nSeraphina: b";
         let blocks = parse_examples(raw, "User", "Seraphina");
         assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn think_block_extraction() {
+        let (text, reasoning) = extract_think_blocks("<think>step one</think>Hello!");
+        assert_eq!(text, "Hello!");
+        assert_eq!(reasoning, "step one");
+        let (text, reasoning) =
+            extract_think_blocks("<thinking>a</thinking>mid<think>b</think>tail");
+        assert_eq!(text, "midtail");
+        assert_eq!(reasoning, "a
+b");
+        let (text, reasoning) = extract_think_blocks("plain");
+        assert_eq!((text.as_str(), reasoning.as_str()), ("plain", ""));
+    }
+
+    #[test]
+    fn fix_markdown_spacing_and_display() {
+        assert_eq!(fix_markdown("* text *", false), "*text*");
+        assert_eq!(fix_markdown("he said \"hi", true), "he said \"hi\"");
+        assert_eq!(fix_markdown("he said \"hi", false), "he said \"hi");
     }
 }

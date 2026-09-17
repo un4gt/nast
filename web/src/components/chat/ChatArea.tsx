@@ -14,18 +14,25 @@ import { StreamingBubble } from './StreamingBubble';
 
 export function ChatArea() {
   const {
-    messages, streamingText, generating, send, swipe, regenerate, continueGen, impersonate,
-    stopGeneration, appendStreamToken,
+    messages, streamingText, streamingReasoning, generating, send, swipe, regenerate, continueGen, impersonate,
+    stopGeneration, appendStreamToken, appendStreamReasoning,
   } = useStore();
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  // P1：接通后端流式事件——逐 token 追加到 streamingText
+  // P1：接通后端流式事件——逐 token 追加到 streamingText / streamingReasoning
   useEffect(() => {
-    return rpc.on('stream_token_received', (data: { text: string }) => {
+    const off1 = rpc.on('stream_token_received', (data: { text: string }) => {
       appendStreamToken(data.text);
     });
-  }, [appendStreamToken]);
+    const off2 = rpc.on('stream_reasoning_received', (data: { text: string }) => {
+      appendStreamReasoning(data.text);
+    });
+    return () => {
+      off1();
+      off2();
+    };
+  }, [appendStreamToken, appendStreamReasoning]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -58,7 +65,11 @@ export function ChatArea() {
             return <MessageBubble key={i} m={m} index={i} />;
           })}
           {generating && streamingText !== null && (
-            <StreamingBubble name={messages[messages.length - 1]?.name ?? ''} text={streamingText} />
+            <StreamingBubble
+              name={messages[messages.length - 1]?.name ?? ''}
+              text={streamingText}
+              reasoning={streamingReasoning}
+            />
           )}
           <div ref={bottomRef} />
         </div>

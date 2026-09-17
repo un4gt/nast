@@ -50,7 +50,8 @@ pub struct WIEntry {
     pub position: WIPosition,
     pub exclude_recursion: bool,
     pub prevent_recursion: bool,
-    pub delay_until_recursion: bool,
+    /// false / true(=1) / N：递归层级 N 起才激活（ST delayUntilRecursion）
+    pub delay_until_recursion: BoolOrNum,
     pub disable: bool,
     pub probability: i64,
     pub use_probability: bool,
@@ -77,6 +78,12 @@ pub struct WIEntry {
     pub match_scenario: bool,
     pub match_creator_notes: bool,
     pub ignore_budget: bool,
+    /// position=7 时的 outlet 名（{{outlet::name}} 宏消费）
+    #[serde(rename = "outletName", skip_serializing_if = "Option::is_none")]
+    pub outlet_name: Option<String>,
+    /// 角色过滤（持久化键 character_filter；内部 camelCase）
+    #[serde(rename = "character_filter", skip_serializing_if = "Option::is_none")]
+    pub character_filter: Option<CharacterFilter>,
     /// 运行时附加：所属书名 / UI 顺序
     pub world: Option<String>,
     pub display_index: i64,
@@ -102,7 +109,7 @@ impl Default for WIEntry {
             position: WIPosition::Num(WI_POS_BEFORE),
             exclude_recursion: false,
             prevent_recursion: false,
-            delay_until_recursion: false,
+            delay_until_recursion: BoolOrNum::Bool(false),
             disable: false,
             probability: 100,
             use_probability: true,
@@ -126,6 +133,8 @@ impl Default for WIEntry {
             match_scenario: false,
             match_creator_notes: false,
             ignore_budget: false,
+            outlet_name: None,
+            character_filter: None,
             world: None,
             display_index: 0,
             extra: BTreeMap::new(),
@@ -139,6 +148,33 @@ impl Default for WIEntry {
 pub enum WIPosition {
     Num(i64),
     Text(String),
+}
+
+/// bool 或数字双型（delayUntilRecursion 等）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BoolOrNum {
+    Bool(bool),
+    Num(i64),
+}
+
+impl BoolOrNum {
+    /// false=0；true=1；N=N。
+    pub fn level(&self) -> i64 {
+        match self {
+            BoolOrNum::Bool(b) => *b as i64,
+            BoolOrNum::Num(n) => *n,
+        }
+    }
+}
+
+/// 条目角色过滤（ST character_filter：{isExclude, names[], tags[]}）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CharacterFilter {
+    pub is_exclude: bool,
+    pub names: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 impl WIPosition {
