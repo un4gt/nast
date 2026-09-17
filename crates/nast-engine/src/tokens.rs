@@ -60,12 +60,6 @@ pub fn resolve_tokenizer(model: &str) -> Tokenizer {
     }
 }
 
-fn bpe(tok: Tokenizer) -> Option<CoreBPE> {
-    match tok {
-        Tokenizer::O200k => tiktoken_rs::o200k_base().ok(),
-        Tokenizer::Cl100k | Tokenizer::Approx => tiktoken_rs::cl100k_base().ok(),
-    }
-}
 
 /// 单次缓存的全局 BPE（避免每次调用重建编码器）。
 use std::sync::OnceLock;

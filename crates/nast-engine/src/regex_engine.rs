@@ -10,7 +10,7 @@
 //!   捕获组值先过 trimStrings 过滤；替换结果末尾再过一遍 substituteParams
 //! - 脚本顺序：全局列表 → 角色脚本 → 聊天脚本，链式应用
 
-use nast_model::regex_script::{RegexScript, RP_SLASH_COMMAND, SUB_ESCAPED, SUB_RAW};
+use nast_model::regex_script::{RegexScript, SUB_ESCAPED, SUB_RAW};
 
 pub struct RegexParams<'a> {
     /// 距底部深度（0 = 最新消息）；None 表示不做深度过滤

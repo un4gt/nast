@@ -21,10 +21,6 @@ fn book_of(e: WIEntry) -> WorldInfoBook {
     book(e)
 }
 
-fn clone_entry(b: &WorldInfoBook, uid: &str) -> WIEntry {
-    b.entries[uid].clone()
-}
-
 fn book(entries: WIEntry) -> WorldInfoBook {
     let mut b = WorldInfoBook::default();
     b.entries.insert(entries.uid.to_string(), entries);

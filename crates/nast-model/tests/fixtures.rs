@@ -54,8 +54,10 @@ fn wi_position_at_d_syntax() {
     assert_eq!(p, world::WI_POS_AT_DEPTH);
     assert_eq!(o, Some((3, None)));
     let (p, o) = WIPosition::Text("@D2[a]".into()).resolve();
+    assert_eq!(p, world::WI_POS_AT_DEPTH);
     assert_eq!(o, Some((2, Some(2)))); // assistant
     let (p, o) = WIPosition::Text("@D2[r]".into()).resolve();
+    assert_eq!(p, world::WI_POS_AT_DEPTH);
     assert_eq!(o, Some((2, Some(1)))); // user
     let (p, _) = WIPosition::Num(1).resolve();
     assert_eq!(p, world::WI_POS_AFTER);

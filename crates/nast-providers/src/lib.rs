@@ -372,7 +372,7 @@ fn sse_events(
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> {
     futures_util::stream::unfold(
         (Box::pin(stream), String::new(), false),
-        |(mut stream, mut buf, mut done)| async move {
+        |(mut stream, mut buf, done)| async move {
             if done {
                 return None;
             }

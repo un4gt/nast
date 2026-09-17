@@ -39,7 +39,7 @@ pub struct WorldInfoSettings {
     pub world_info_use_group_scoring: bool,
     pub world_info_character_strategy: i64,
     pub world_info_budget_cap: i64,
-    pub world_info_max_recursion_steps: bool_or_i64,
+    pub world_info_max_recursion_steps: BoolOrI64,
     /// globalSelect: 全局选中的书
     pub global_select: Vec<String>,
     /// charLore: 角色辅助书
@@ -62,7 +62,7 @@ impl Default for WorldInfoSettings {
             world_info_character_strategy: WI_CHARACTER_STRATEGY_DEFAULT,
             world_info_budget_cap: WI_BUDGET_CAP_DEFAULT,
             // release 里是数值；宽容解析
-            world_info_max_recursion_steps: bool_or_i64::I64(WI_MAX_RECURSION_STEPS_DEFAULT),
+            world_info_max_recursion_steps: BoolOrI64::I64(WI_MAX_RECURSION_STEPS_DEFAULT),
             global_select: vec![],
             char_lore: vec![],
             world_info_overflow_alert: false,
@@ -73,16 +73,16 @@ impl Default for WorldInfoSettings {
 /// 兼容 bool/number 双型的字段。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum bool_or_i64 {
+pub enum BoolOrI64 {
     Bool(bool),
     I64(i64),
 }
 
-impl bool_or_i64 {
+impl BoolOrI64 {
     pub fn as_i64(&self) -> i64 {
         match self {
-            bool_or_i64::Bool(b) => *b as i64,
-            bool_or_i64::I64(n) => *n,
+            BoolOrI64::Bool(b) => *b as i64,
+            BoolOrI64::I64(n) => *n,
         }
     }
 }

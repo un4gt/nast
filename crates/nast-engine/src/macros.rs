@@ -635,7 +635,7 @@ pub fn evaluate_macros(content: &str, env: &MacroEnv, ctx: &mut MacroContext) ->
             }
         }),
     ];
-    let mut content = apply(&content, &post);
+    let content = apply(&content, &post);
 
     // 归还状态
     // 归还状态（规则闭包仍持有 Rc 引用，直接克隆出值）

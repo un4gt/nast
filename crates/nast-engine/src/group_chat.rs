@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn natural_talkativeness_roll() {
-        let mut g = group(0);
+        let g = group(0);
         let members = vec![
             member("a.png", "A", 1.0),  // 必激活
             member("b.png", "B", 0.0),  // 永不激活

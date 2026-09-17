@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use nast_model::chat::{ChatFile, ChatMessage as Msg, GenerationType, MessageExtra, SwipeInfo};
 use nast_model::preset::{OaiSettings, CC_DUMMY_ID};
 use nast_providers::{
-    ChatMessage as ProviderMessage, GenRequest, Provider, ProviderKind, StreamEvent,
+    ChatMessage as ProviderMessage, GenRequest, Provider, StreamEvent,
 };
 use serde_json::json;
 
@@ -158,7 +158,7 @@ impl<'a> GenerateSession<'a> {
         };
 
         // 流式接收
-        let mut stream = self
+        let stream = self
             .provider
             .generate_stream(&gen_req)
             .await
@@ -737,7 +737,7 @@ pub fn parse_examples(raw: &str, name1: &str, name2: &str) -> Vec<ExampleBlock> 
         let mut in_user = false;
         let mut in_bot = false;
 
-        let mut add_msg = |cur: &mut Vec<String>, msgs: &mut Vec<(String, String, String)>, speaker: &str, system_name: &str| {
+        let add_msg = |cur: &mut Vec<String>, msgs: &mut Vec<(String, String, String)>, speaker: &str, system_name: &str| {
             // 剥离 "speaker:" 前缀（取首个出现）并 trim
             let joined = cur.join("
 ");

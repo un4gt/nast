@@ -1,5 +1,10 @@
 //! 事件名常量：对齐 refrence/SillyTavern/public/scripts/events.js 的
 //! event_types 实际字符串值（1.18.0，注意大小写不统一是 ST 原样）。
+//!
+//! 常量按 ST 事件全集声明，是 WS 广播协议的对外契约——前端与 Lua 插件
+//! 按字符串订阅；并非每个常量都在本二进制内发射，未使用属预期。
+
+#![allow(dead_code)]
 
 pub const GENERATION_STARTED: &str = "generation_started";
 pub const GENERATION_AFTER_COMMANDS: &str = "GENERATION_AFTER_COMMANDS"; // 大写原样

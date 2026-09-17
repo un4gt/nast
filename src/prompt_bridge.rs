@@ -9,6 +9,8 @@ pub use nast_engine::prompt::{ExampleBlock, HistoryMessage, InChatInjection};
 
 /// 生成器侧的拼装输入（借用 oai）。
 pub struct BridgeInput<'a> {
+    /// 预留：生成器侧直接访问 oai（当前消费者经 session 持有，保留 API 对称）
+    #[allow(dead_code)]
     pub oai: &'a OaiSettings,
     pub generation_type: &'a str,
     pub name1: &'a str,

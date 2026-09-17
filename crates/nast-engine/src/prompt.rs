@@ -17,11 +17,10 @@
 use crate::macros::{evaluate_macros, MacroContext, MacroEnv};
 use crate::tokens::count_tokens;
 use nast_model::preset::{
-    OaiSettings, CC_DUMMY_ID, ID_BIAS, ID_CHAT_HISTORY, ID_DIALOGUE_EXAMPLES, ID_ENHANCE,
+    OaiSettings, CC_DUMMY_ID, ID_BIAS, ID_CHAT_HISTORY, ID_ENHANCE,
     ID_IMPERSONATE, ID_JAILBREAK, ID_MAIN, ID_NSWF, ID_PERSONA, ID_QUIET, ID_SCENARIO,
     ID_WI_AFTER, ID_WI_BEFORE, INJ_ABSOLUTE, INJ_DEFAULT_ORDER,
 };
-use serde_json::Value;
 
 /// 一条拼装产物消息（getChat 输出形状）。
 #[derive(Debug, Clone, PartialEq)]
@@ -138,7 +137,7 @@ pub struct AssembleOutput {
 /// 主入口：等价 prepareOpenAIMessages。
 pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     let oai = input.oai;
-    let mut budget: i64 = oai.openai_max_context - oai.openai_max_tokens;
+    let budget: i64 = oai.openai_max_context - oai.openai_max_tokens;
     let mut error = None;
 
     // ---------- preparePromptsForChatCompletion：构建 systemPrompts 并合并用户顺序 ----------
@@ -524,7 +523,6 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     }
 
     // controlPrompts 末尾（freeBudget 后 add）
-    reserved -= control_tokens;
     chat.extend(continue_nudge_tail);
     chat.extend(control);
 
@@ -578,14 +576,11 @@ fn role_name(num: i64) -> String {
     }
 }
 
-fn is_injected(_content: &str) -> bool {
-    false // v1 历史中无 injected 标记
-}
 
 /// populationInjectionPrompts：messages 输入为旧→新（人类时序）；深度从末尾数。
 /// 输出仍为旧→新。
 fn inject_prompts(
-    mut prompts: Vec<(i64, i64, i64, String, String)>, // (depth, order, role_num, role, content)
+    prompts: Vec<(i64, i64, i64, String, String)>, // (depth, order, role_num, role, content)
     mut messages: Vec<HistoryMessage>,
 ) -> Vec<HistoryMessage> {
     // JS 契约是"新→旧"输入；这里内部先翻转对齐
@@ -636,7 +631,7 @@ fn inject_prompts(
 fn squash_system_messages(messages: Vec<PromptMessage>) -> Vec<PromptMessage> {
     const EXCLUDE: [&str; 3] = ["newMainChat", "newChat", "groupNudge"];
     let mut out: Vec<PromptMessage> = Vec::new();
-    for mut m in messages {
+    for m in messages {
         if m.role == "system" && m.content.is_empty() {
             continue;
         }
@@ -662,9 +657,6 @@ fn squash_system_messages(messages: Vec<PromptMessage>) -> Vec<PromptMessage> {
     out
 }
 
-fn tok(s: &str) -> i64 {
-    tok_for(s, "openai", "gpt-4o")
-}
 
 /// 按 chat_completion_source/model 解析 tokenizer（TokenHandler 语义）。
 pub fn tok_for(s: &str, source: &str, model: &str) -> i64 {

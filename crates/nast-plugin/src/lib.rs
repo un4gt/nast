@@ -28,13 +28,6 @@ pub enum PluginError {
 
 pub type PluginResult<T> = Result<T, PluginError>;
 
-struct PluginState {
-    name: String,
-    /// 插件 KV 存储
-    vars: HashMap<String, JsonValue>,
-    /// 转换类钩子收集的文本替换（事件 → 新文本）
-    transform: Option<String>,
-}
 
 /// 插件管理器：每个插件一个 Lua 实例（隔离），共享宿主回调。
 pub struct PluginManager {
@@ -45,7 +38,6 @@ pub struct PluginManager {
 struct Plugin {
     name: String,
     lua: Arc<Lua>,
-    vars: Arc<Mutex<HashMap<String, JsonValue>>>,
 }
 
 impl PluginManager {
@@ -100,7 +92,6 @@ impl PluginManager {
         self.plugins.push(Plugin {
             name: name.to_string(),
             lua: Arc::new(lua),
-            vars,
         });
         Ok(())
     }
@@ -307,26 +298,28 @@ end)
             "vars-plugin",
             r#"
 nast.set_var("counter", 42)
-nast.set_var("greeting", "hello")
+nast.result = nast.get_var("counter")
 "#,
         )
         .unwrap();
-
-        let plugin = &pm.plugins[0];
-        let vars = plugin.vars.lock().unwrap();
-        assert_eq!(vars.get("counter"), Some(&serde_json::json!(42)));
-        assert_eq!(vars.get("greeting"), Some(&serde_json::json!("hello")));
+        // get_var 在 set_var 后立即可见（同插件 Lua 闭包共享 vars）
+        let lua = &pm.plugins[0].lua;
+        let v: i64 = lua
+            .load("return nast.get_var('counter')")
+            .eval()
+            .unwrap();
+        assert_eq!(v, 42);
     }
 
     #[test]
     fn plugin_isolation() {
         let mut pm = PluginManager::new();
-        pm.load("p1", "nast.set_var(\"k\", \"from-p1\")").unwrap();
-        pm.load("p2", "nast.set_var(\"k\", \"from-p2\")").unwrap();
-        let v1 = pm.plugins[0].vars.lock().unwrap().get("k").cloned();
-        let v2 = pm.plugins[1].vars.lock().unwrap().get("k").cloned();
-        assert_eq!(v1, Some(serde_json::json!("from-p1")));
-        assert_eq!(v2, Some(serde_json::json!("from-p2")));
+        pm.load("p1", "nast.set_var('k', 'from-p1')").unwrap();
+        pm.load("p2", "nast.set_var('k', 'from-p2')").unwrap();
+        let v1: String = pm.plugins[0].lua.load("return nast.get_var('k')").eval().unwrap();
+        let v2: String = pm.plugins[1].lua.load("return nast.get_var('k')").eval().unwrap();
+        assert_eq!(v1, "from-p1");
+        assert_eq!(v2, "from-p2");
     }
 
     #[test]

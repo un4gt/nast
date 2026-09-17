@@ -152,7 +152,7 @@ pub fn check_world_info(
     }
     // 去重 uid+world
     let mut seen = std::collections::HashSet::new();
-    all.retain(|(w, e)| seen.insert((format!("{w}#{}", e.uid))));
+    all.retain(|(w, e)| seen.insert(format!("{w}#{}", e.uid)));
 
     // ---------- 2. 构建扫描缓冲 ----------
     let scan_depth = settings.depth.min(1000).max(0) as usize;

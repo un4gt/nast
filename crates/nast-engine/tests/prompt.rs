@@ -235,7 +235,7 @@ fn continue_nudge_mode_appends_at_end() {
     assert_eq!(nudge_pos, cs.len() - 1);
     // 被续消息在 nudge 之前的末尾区域（tail 集合内），且历史区不再有它
     assert!(cs[..nudge_pos].iter().any(|c| c == "Hi there!"));
-    let new_chat_pos = new_chat_pos_of(&cs);
+    let _new_chat_pos = new_chat_pos_of(&cs);
     // 历史区从 newMainChat 到 prompt 结束前 tail 部分；被续消息已从中移除，
     // 因此历史区最后一条应是 "hello"
     assert_eq!(cs[nudge_pos - 2], "hello");
@@ -262,8 +262,8 @@ fn in_chat_injection_depth_zero_after_last_message() {
     let note_pos = cs.iter().position(|c| c == "DEPTH0 NOTE").unwrap();
     assert!(note_pos > last_msg_pos, "note@{} last@{}", note_pos, last_msg_pos);
     // 且在 newMainChat 之后（历史区内）
-    let new_chat_pos = new_chat_pos_of(&cs);
-    assert!(note_pos > new_chat_pos);
+    let _new_chat_pos = new_chat_pos_of(&cs);
+    assert!(note_pos > _new_chat_pos);
 }
 
 #[test]

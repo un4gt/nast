@@ -122,7 +122,8 @@ pub struct MessageExtra {
     /// 附加类型: 'narrator' | 'comment' | 'nointer' ...
     #[serde(rename = "type")]
     pub kind: Option<String>,
-    pub isSmallSys: Option<bool>,
+    #[serde(rename = "isSmallSys")]
+    pub is_small_sys: Option<bool>,
     /// 用户消息 prompt bias
     pub bias: Option<String>,
     pub time_to_first_token: Option<f64>,
