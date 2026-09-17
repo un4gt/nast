@@ -19,6 +19,12 @@ use serde_json::{json, Value};
 pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     let group_id = param_str(&params, "id")?;
     let chat_id = param_str(&params, "chat_id")?;
+    // 触发单成员（force_chid 语义）：仅该成员回复
+    let force_member = params
+        .get("member")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let groups = state.user.list_groups()?;
     let group = groups
         .iter()
@@ -52,39 +58,93 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         }
     }
 
-    // 用户消息（可选）先落盘
+    // persona 名（用户消息署名）
+    let user_name = {
+        let metadata: ChatMetadata = chat.metadata();
+        // 复用单人会话的 persona 解析：构造临时 session 不现实，直接读 settings
+        let settings_snapshot = state.settings.read().await.clone();
+        let pid = metadata
+            .persona
+            .clone()
+            .or_else(|| {
+                settings_snapshot
+                    .get("power_user")
+                    .and_then(|p| p.get("default_persona"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
+        let mut name = settings_snapshot
+            .get("power_user")
+            .and_then(|p| p.get("username"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if !pid.is_empty() {
+            if let Some(n) = settings_snapshot
+                .get("power_user")
+                .and_then(|p| p.get("personas"))
+                .and_then(|v| v.as_object())
+                .and_then(|m| m.get(&pid))
+                .and_then(|v| v.as_str())
+            {
+                name = n.to_string();
+            }
+        }
+        if name.is_empty() {
+            name = "User".into();
+        }
+        name
+    };
+
+    // 用户消息（可选）先落盘；插件 user_input 钩子可改写
     let user_message = params
         .get("user_message")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if !user_message.is_empty() {
+    let user_message = if user_message.is_empty() {
+        String::new()
+    } else {
+        let transformed = {
+            let host = state.plugins.lock().unwrap();
+            host.dispatch(
+                "user_input",
+                &json!({"text": user_message, "is_group": true}),
+            )
+            .unwrap_or_else(|| user_message.to_string())
+        };
         let msg = json!({
-            "name": "User",
+            "name": user_name,
             "is_user": true,
             "is_system": false,
             "send_date": nast_storage::message_time_stamp(),
-            "mes": user_message,
+            "mes": transformed,
         });
         chat.0.push(msg);
         state.user.save_group_chat(chat_id, &chat, false)?;
-    }
+        user_message.to_string()
+    };
 
     // 最后发言者 & 自上次用户消息后的未发言成员
     let last_speaker = find_last_speaker(&chat);
     let unspoken = unspoken_since_user(&chat, &members);
 
-    // 激活成员
-    let mut rng = rand::rngs::StdRng::from_seed(rand::random());
-    let member_only: Vec<GroupMember> = members.iter().map(|(gm, _)| gm.clone()).collect();
-    let activated = nast_engine::group_chat::activate_members(
-        &group,
-        &member_only,
-        user_message,
-        last_speaker.as_deref(),
-        &unspoken,
-        !user_message.is_empty(),
-        &mut rng,
-    );
+    // 激活成员（触发单成员时跳过策略）
+    let activated: Vec<String> = if !force_member.is_empty() {
+        vec![force_member.clone()]
+    } else {
+        let mut rng = rand::rngs::StdRng::from_seed(rand::random());
+        let member_only: Vec<GroupMember> = members.iter().map(|(gm, _)| gm.clone()).collect();
+        nast_engine::group_chat::activate_members(
+            &group,
+            &member_only,
+            &user_message,
+            last_speaker.as_deref(),
+            &unspoken,
+            !user_message.is_empty(),
+            &mut rng,
+        )
+    };
     if activated.is_empty() {
         state.user.save_group_chat(chat_id, &chat, false)?;
         return Ok(json!({"activated": [], "chat_id": chat_id}));
@@ -119,6 +179,15 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         plugins: &state.plugins,
     };
 
+    // 插件事件：群生成开始
+    {
+        let host = state.plugins.lock().unwrap();
+        let _ = host.dispatch(
+            "generation_started",
+            &json!({"type": "group", "group": group.name}),
+        );
+    }
+
     // 逐成员生成
     let gen_id = chrono::Utc::now().timestamp_millis();
     let mut replies: Vec<Value> = Vec::new();
@@ -149,10 +218,30 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         let input =
             build_group_input(&session, &p, &history, &group, members.as_slice(), member);
         let assembled = crate::prompt_bridge::assemble_with_macros(&session.oai, &input);
-        let text = session
+        let raw = session
             .call_provider(&assembled, None)
             .await
             .map_err(RpcError::Internal)?;
+        // cleanUpMessage（群分支：名字清理/endoftext/fixMarkdown）+ ai_output 插件钩子
+        let cleaned = {
+            let host = state.plugins.lock().unwrap();
+            let transformed = host
+                .dispatch(
+                    "ai_output",
+                    &json!({"text": raw, "name": member_ch.name, "is_group": true}),
+                )
+                .unwrap_or(raw);
+            session.clean_up_message(
+                &transformed,
+                &user_name,
+                &member_ch.name,
+                false,
+                false,
+                &[],
+                &[],
+            )
+        };
+        let text = cleaned;
 
         // 落盘群消息（gen_id 批次 + 身份字段）
         let msg = json!({
@@ -166,7 +255,7 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
             "extra": {
                 "gen_id": gen_id,
                 "api": session.oai.chat_completion_source,
-                "model": session.oai.openai_model,
+                "model": crate::connection::model_for(&session.oai),
                 "gen_started": nast_storage::message_time_stamp(),
             },
         });
@@ -180,6 +269,11 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     {
         let mut guard = state.generation.write().await;
         guard.abort = None;
+    }
+    // 插件事件：群生成结束
+    {
+        let host = state.plugins.lock().unwrap();
+        let _ = host.dispatch("generation_ended", &json!({"type": "group"}));
     }
     Ok(json!({"activated": activated, "replies": replies, "chat_id": chat_id}))
 }
@@ -316,7 +410,7 @@ fn build_group_input<'a>(
     }
 }
 
-fn init_group_chat(
+pub(crate) fn init_group_chat(
     state: &SharedState,
     group: &Group,
     chat_id: &str,

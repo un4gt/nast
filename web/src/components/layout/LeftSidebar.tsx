@@ -6,6 +6,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -27,14 +29,20 @@ function chatGroup(fileName: string, others: string[]): string {
 }
 
 export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const { characters, activeAvatar, chatList, activeChatName, selectCharacter, openChat, importFile, loadAll } =
-    useStore();
+  const {
+    characters, groups, activeGroupId, activeAvatar, chatList, activeChatName,
+    selectCharacter, openChat, openGroup, createGroup, importFile, loadAll,
+  } = useStore();
   const fileRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [favOnly, setFavOnly] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [groupName, setGroupName] = useState('');
+  const [groupMembers, setGroupMembers] = useState<string[]>([]);
+  const [groupBusy, setGroupBusy] = useState(false);
 
   const filtered = useMemo(() => {
     let list = characters;
@@ -90,6 +98,28 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
     } finally {
       setCreating(false);
     }
+  };
+
+  const doCreateGroup = async () => {
+    if (!groupName.trim() || groupMembers.length === 0) return;
+    setGroupBusy(true);
+    try {
+      await createGroup(groupName.trim(), groupMembers);
+      pushToast('已创建群组', 'success');
+      setGroupOpen(false);
+      setGroupName('');
+      setGroupMembers([]);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setGroupBusy(false);
+    }
+  };
+
+  const toggleGroupMember = (avatar: string, on: boolean) => {
+    setGroupMembers((prev) =>
+      on ? [...prev, avatar] : prev.filter((a) => a !== avatar),
+    );
   };
 
   return (
@@ -163,6 +193,35 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
           </SidebarGroupContent>
         </SidebarGroup>
 
+        {groups.length > 0 && (
+          <SidebarGroup>
+            <SidebarGroupLabel>Groups</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {groups.map((g) => (
+                  <SidebarMenuItem key={g.id}>
+                    <SidebarMenuButton
+                      isActive={activeGroupId === g.id}
+                      onClick={() => openGroup(g.id)}
+                      tooltip={g.name}
+                    >
+                      <Avatar className="size-7">
+                        <AvatarFallback className="bg-secondary text-[10px] text-secondary-foreground">
+                          {g.name.slice(0, 2)}
+                        </AvatarFallback>
+                      </Avatar>
+                      <span className="truncate">{g.name}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground group-data-[collapsible=icon]:hidden">
+                        {g.members.length}
+                      </span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
+
         {activeAvatar && chatList.length > 0 && (
           <SidebarGroup>
             <SidebarGroupLabel>Chats</SidebarGroupLabel>
@@ -205,6 +264,12 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
               </TooltipTrigger>
               <TooltipContent side="right">即将支持</TooltipContent>
             </Tooltip>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={() => setGroupOpen(true)} tooltip="新建群组">
+              <Users />
+              <span>新建群组</span>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton onClick={() => setCreateOpen(true)} tooltip="新建角色">
@@ -257,6 +322,53 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
               <Button variant="ghost" onClick={() => setCreateOpen(false)}>取消</Button>
               <Button onClick={() => void createCharacter()} disabled={creating || !createName.trim()}>
                 {creating ? <Spinner /> : null}
+                创建
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog open={groupOpen} onOpenChange={setGroupOpen}>
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>新建群组</DialogTitle>
+              <DialogDescription>选择 2 名以上成员；激活策略与健谈度稍后在群设置中调整。</DialogDescription>
+            </DialogHeader>
+            <Input
+              value={groupName}
+              onChange={(e) => setGroupName(e.target.value)}
+              placeholder="群名称"
+            />
+            <div className="flex max-h-56 flex-col gap-1 overflow-y-auto rounded-md border p-2">
+              {characters.map((c) => (
+                <label key={c.avatar} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-accent/50">
+                  <Checkbox
+                    checked={groupMembers.includes(c.avatar)}
+                    onCheckedChange={(v) => toggleGroupMember(c.avatar, v === true)}
+                  />
+                  <Avatar className="size-6">
+                    <img src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
+                    <AvatarFallback className="text-[10px]">{c.name.slice(0, 1)}</AvatarFallback>
+                  </Avatar>
+                  <span className="truncate">{c.name}</span>
+                </label>
+              ))}
+              {characters.length === 0 && (
+                <p className="px-1 text-xs text-muted-foreground">先导入角色卡</p>
+              )}
+            </div>
+            {groupMembers.length > 0 && (
+              <Label className="text-[10px] text-muted-foreground">
+                已选 {groupMembers.length} 名成员
+              </Label>
+            )}
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setGroupOpen(false)}>取消</Button>
+              <Button
+                onClick={() => void doCreateGroup()}
+                disabled={groupBusy || !groupName.trim() || groupMembers.length === 0}
+              >
+                {groupBusy ? <Spinner /> : null}
                 创建
               </Button>
             </DialogFooter>

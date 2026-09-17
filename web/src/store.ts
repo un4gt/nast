@@ -67,9 +67,26 @@ export interface Settings {
   [k: string]: unknown;
 }
 
+export interface Group {
+  id: string;
+  name: string;
+  members: string[];
+  allow_self_responses: boolean;
+  activation_strategy: number;
+  generation_mode: number;
+  disabled_members: string[];
+  fav: boolean;
+  chat_id: string;
+  chats: string[];
+  auto_mode_delay: number;
+  [k: string]: unknown;
+}
+
 interface AppState {
   connected: boolean;
   characters: CharacterSummary[];
+  groups: Group[];
+  activeGroupId: string | null;
   activeAvatar: string | null;
   activeChatName: string | null;
   chatList: string[];
@@ -82,6 +99,11 @@ interface AppState {
   setConnected: (v: boolean) => void;
   loadAll: () => Promise<void>;
   selectCharacter: (avatar: string) => Promise<void>;
+  openGroup: (groupId: string) => Promise<void>;
+  createGroup: (name: string, members: string[]) => Promise<void>;
+  saveGroup: (group: Group) => Promise<void>;
+  deleteGroup: (groupId: string) => Promise<void>;
+  sendGroup: (text: string, member?: string) => Promise<void>;
   importFile: (file: File) => Promise<void>;
   deleteCharacter: (avatar: string) => Promise<void>;
   deleteMessage: (index: number) => Promise<void>;
@@ -113,6 +135,8 @@ function parseChat(raw: any[]): { messages: ChatMessage[]; metadata: ChatMetadat
 export const useStore = create<AppState>((set, get) => ({
   connected: false,
   characters: [],
+  groups: [],
+  activeGroupId: null,
   activeAvatar: null,
   activeChatName: null,
   chatList: [],
@@ -128,6 +152,7 @@ export const useStore = create<AppState>((set, get) => ({
     const raw = await rpc.call<any[]>('chats.get', { avatar, file_name: file });
     const { messages, metadata } = parseChat(raw);
     set({
+      activeGroupId: null,
       activeAvatar: avatar,
       chatList,
       activeChatName: file,
@@ -136,6 +161,68 @@ export const useStore = create<AppState>((set, get) => ({
       streamingText: null,
       streamingReasoning: null,
     });
+  },
+
+  openGroup: async (groupId) => {
+    const groups = await rpc.call<Group[]>('groups.all', {});
+    const g = groups.find((x) => x.id === groupId);
+    if (!g) return;
+    const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: g.chat_id });
+    set({
+      activeGroupId: groupId,
+      activeAvatar: null,
+      activeChatName: null,
+      chatList: [],
+      groups,
+      messages: raw.slice(1),
+      chatMetadata: raw[0]?.chat_metadata ?? null,
+      streamingText: null,
+      streamingReasoning: null,
+    });
+  },
+
+  createGroup: async (name, members) => {
+    const g = await rpc.call<Group>('groups.create', {
+      group: { name, members },
+    });
+    await get().loadAll();
+    await get().openGroup(g.id);
+  },
+
+  saveGroup: async (group) => {
+    await rpc.call('groups.edit', { group });
+    const groups = await rpc.call<Group[]>('groups.all', {});
+    set({ groups });
+  },
+
+  deleteGroup: async (groupId) => {
+    await rpc.call('groups.delete', { id: groupId });
+    const groups = await rpc.call<Group[]>('groups.all', {});
+    set({
+      groups,
+      ...(get().activeGroupId === groupId
+        ? { activeGroupId: null, messages: [], chatMetadata: null }
+        : {}),
+    });
+  },
+
+  sendGroup: async (text, member) => {
+    const { activeGroupId, groups, generating } = get();
+    const g = groups.find((x) => x.id === activeGroupId);
+    if (!g || generating) return;
+    set({ generating: true });
+    try {
+      await rpc.call('generate.group', {
+        id: g.id,
+        chat_id: g.chat_id,
+        user_message: text,
+        ...(member ? { member } : {}),
+      });
+      const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: g.chat_id });
+      set({ messages: raw.slice(1), chatMetadata: raw[0]?.chat_metadata ?? null });
+    } finally {
+      set({ generating: false });
+    }
   },
 
   newChat: async (avatar, greetingIndex = -1) => {
@@ -149,15 +236,16 @@ export const useStore = create<AppState>((set, get) => ({
   setConnected: (v) => set({ connected: v }),
 
   loadAll: async () => {
-    const [characters, settings] = await Promise.all([
+    const [characters, settings, groups] = await Promise.all([
       rpc.call<CharacterSummary[]>('characters.all', {}),
       rpc.call<Settings>('settings.get', {}),
+      rpc.call<Group[]>('groups.all', {}),
     ]);
     const withAvatars = characters.map((c) => ({
       ...c,
       avatarUrl: `/thumbnail?file=${encodeURIComponent(c.avatar)}`,
     }));
-    set({ characters: withAvatars, settings });
+    set({ characters: withAvatars, settings, groups });
   },
 
   selectCharacter: async (avatar) => {
@@ -171,7 +259,7 @@ export const useStore = create<AppState>((set, get) => ({
       messages = parsed.messages;
       chatMetadata = parsed.metadata;
     }
-    set({ activeAvatar: avatar, chatList, activeChatName, messages, chatMetadata, streamingText: null, streamingReasoning: null });
+    set({ activeGroupId: null, activeAvatar: avatar, chatList, activeChatName, messages, chatMetadata, streamingText: null, streamingReasoning: null });
   },
 
   importFile: async (file) => {

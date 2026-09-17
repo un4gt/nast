@@ -79,6 +79,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "worlds.save" => worlds_save(state, params),
         "worlds.delete" => worlds_delete(state, params),
         "groups.all" => groups_all(state),
+        "groups.get_chat" => groups_get_chat(state, params),
         _ => Err(RpcError::NotFound(format!("method {method}"))),
     }
 }
@@ -315,6 +316,11 @@ fn characters_edit(state: SharedState, params: Value) -> RpcResult {
     // 收藏开关（顶层 fav，非 data 字段）
     if let Some(fav) = data.get("fav").and_then(|v| v.as_bool()) {
         ch.fav = fav;
+    }
+
+    // talkativeness（群聊健谈度，卡片字段，字符串存储）
+    if let Some(t) = data.get("talkativeness").and_then(|v| v.as_str()) {
+        ch.talkativeness = Some(t.to_string());
     }
 
     for (k, v) in data {
@@ -861,6 +867,24 @@ fn worlds_delete(state: SharedState, params: Value) -> RpcResult {
 fn groups_all(state: SharedState) -> RpcResult {
     let groups = state.user.list_groups()?;
     Ok(serde_json::to_value(groups).map_err(|e| RpcError::Internal(e.to_string()))?)
+}
+
+/// 读取群聊天文件（group chats/<chat_id>.jsonl）；不存在时按成员开场白初始化。
+fn groups_get_chat(state: SharedState, params: Value) -> RpcResult {
+    let chat_id = param_str(&params, "chat_id")?;
+    let chat = match state.user.read_group_chat(chat_id) {
+        Ok(c) => c,
+        Err(_) => {
+            // 找到拥有该 chat_id 的群并初始化
+            let groups = state.user.list_groups()?;
+            let group = groups
+                .into_iter()
+                .find(|g| g.chats.iter().any(|c| c == chat_id))
+                .ok_or_else(|| RpcError::NotFound(format!("group chat {chat_id}")))?;
+            crate::group_gen::init_group_chat(&state, &group, chat_id)?
+        }
+    };
+    Ok(serde_json::to_value(chat.0).map_err(|e| RpcError::Internal(e.to_string()))?)
 }
 
 fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {

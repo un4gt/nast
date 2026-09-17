@@ -6,9 +6,10 @@ import { Toaster } from '@/components/ui/sonner';
 import { LeftSidebar } from './components/layout/LeftSidebar';
 import { RightInspector, InspectorMobileSheet } from './components/inspector/RightInspector';
 import { ChatArea } from './components/chat/ChatArea';
+import { GroupChatArea } from './components/chat/GroupChatArea';
 import { ChatActionsMenu } from './components/chat/ChatActionsMenu';
 import { Button } from '@/components/ui/button';
-import { PanelRight } from 'lucide-react';
+import { PanelRight, Users } from 'lucide-react';
 import { useRpcErrorToast } from './toasts';
 import { rpc } from './rpc';
 import { useStore } from './store';
@@ -16,7 +17,7 @@ import WorldEditor from './WorldEditor';
 import { SettingsSheet } from './components/settings/SettingsSheet';
 
 export default function App() {
-  const { characters, activeAvatar, activeChatName, setConnected, loadAll, importFile } =
+  const { characters, groups, activeGroupId, activeAvatar, activeChatName, setConnected, loadAll, importFile } =
     useStore();
   const [dragOver, setDragOver] = useState(false);
   const [showWorlds, setShowWorlds] = useState(false);
@@ -57,6 +58,7 @@ export default function App() {
   };
 
   const activeChar = characters.find((c) => c.avatar === activeAvatar);
+  const activeGroup = groups.find((g) => g.id === activeGroupId);
 
   return (
     <SidebarProvider>
@@ -78,7 +80,15 @@ export default function App() {
         >
           {/* 极简聊天头 */}
           <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3">
-            {activeChar ? (
+            {activeGroup ? (
+              <>
+                <Users className="size-4 text-muted-foreground" />
+                <span className="text-sm font-medium">{activeGroup.name}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {activeGroup.members.length} 名成员
+                </span>
+              </>
+            ) : activeChar ? (
               <>
                 <span className="text-sm font-medium">{activeChar.name}</span>
                 {activeChatName && (
@@ -91,24 +101,26 @@ export default function App() {
                     {t}
                   </Badge>
                 ))}
-                <div className="flex-1" />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="size-8 md:hidden"
-                  onClick={() => setShowInspectorSheet(true)}
-                  title="Inspector"
-                >
-                  <PanelRight />
-                </Button>
-                <ChatActionsMenu avatar={activeAvatar ?? ""} />
               </>
             ) : (
               <span className="text-sm text-muted-foreground">nast</span>
             )}
+            <div className="flex-1" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 md:hidden"
+              onClick={() => setShowInspectorSheet(true)}
+              title="Inspector"
+            >
+              <PanelRight />
+            </Button>
+            {!activeGroup && activeAvatar && <ChatActionsMenu avatar={activeAvatar ?? ""} />}
           </div>
 
-          {activeAvatar ? (
+          {activeGroup ? (
+            <GroupChatArea />
+          ) : activeAvatar ? (
             <ChatArea />
           ) : (
             <div className={'flex flex-1 items-center justify-center ' + (dragOver ? 'ring-2 ring-inset ring-primary/50' : '')}>
