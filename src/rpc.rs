@@ -80,6 +80,10 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "worlds.delete" => worlds_delete(state, params),
         "groups.all" => groups_all(state),
         "groups.get_chat" => groups_get_chat(state, params),
+        "presets.list" => presets_list(state),
+        "presets.get" => presets_get(state, params),
+        "presets.save" => presets_save(state, params),
+        "presets.delete" => presets_delete(state, params),
         _ => Err(RpcError::NotFound(format!("method {method}"))),
     }
 }
@@ -438,6 +442,33 @@ async fn chats_stats(state: SharedState, params: Value) -> RpcResult {
         "budget": oai.openai_max_context - oai.openai_max_tokens,
         "per_message": per_message,
     }))
+}
+
+// ---------- presets ----------
+
+fn presets_list(state: SharedState) -> RpcResult {
+    Ok(json!(state.user.list_presets()?))
+}
+
+fn presets_get(state: SharedState, params: Value) -> RpcResult {
+    let name = param_str(&params, "name")?;
+    Ok(state.user.read_preset(name)?)
+}
+
+/// 保存预设（params.preset 为 oai_settings 子集 JSON）。
+fn presets_save(state: SharedState, params: Value) -> RpcResult {
+    let name = param_str(&params, "name")?;
+    let preset = params
+        .get("preset")
+        .ok_or_else(|| RpcError::BadRequest("missing preset".into()))?;
+    state.user.save_preset(name, preset)?;
+    Ok(json!({"ok": true}))
+}
+
+fn presets_delete(state: SharedState, params: Value) -> RpcResult {
+    let name = param_str(&params, "name")?;
+    state.user.delete_preset(name)?;
+    Ok(json!({"ok": true}))
 }
 
 // ---------- chats ----------

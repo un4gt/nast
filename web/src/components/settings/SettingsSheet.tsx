@@ -7,6 +7,7 @@ import { useStore } from '../../store';
 import { pushToast } from '../../toasts';
 import {
   Plug, SlidersHorizontal, Sparkles, UserCircle, Palette, BookOpen, Info,
+  ListOrdered, FolderOpen, Regex,
 } from 'lucide-react';
 import { ConnectionPanel } from './sections/ConnectionPanel';
 import { SamplingPanel } from './sections/SamplingPanel';
@@ -15,11 +16,17 @@ import { PersonaPanel } from './sections/PersonaPanel';
 import { AppearancePanel } from './sections/AppearancePanel';
 import { WorldInfoGlobalPanel } from './sections/WorldInfoGlobalPanel';
 import { AboutPanel } from './sections/AboutPanel';
+import { PromptManagerPanel } from './sections/PromptManagerPanel';
+import { PresetPanel } from './sections/PresetPanel';
+import { RegexPanel } from './sections/RegexPanel';
 
 const SECTIONS = [
   { id: 'connection', icon: Plug, label: '连接' },
+  { id: 'preset', icon: FolderOpen, label: '预设' },
+  { id: 'prompts', icon: ListOrdered, label: 'Prompt Manager' },
   { id: 'sampling', icon: SlidersHorizontal, label: '采样参数' },
   { id: 'ai-response', icon: Sparkles, label: 'AI 回复' },
+  { id: 'regex', icon: Regex, label: '正则脚本' },
   { id: 'persona', icon: UserCircle, label: '用户 / Persona' },
   { id: 'appearance', icon: Palette, label: '外观' },
   { id: 'world-info', icon: BookOpen, label: '世界书全局' },
@@ -128,6 +135,9 @@ export function SettingsSheet({
           <ScrollArea className="min-w-0 flex-1">
             <div className="p-6">
               {section === 'connection' && <ConnectionPanel oai={oai} patchOai={patchOai} />}
+              {section === 'preset' && <PresetPanel oai={oai} applyToOai={(m) => patch('oai_settings', m)} />}
+              {section === 'prompts' && <PromptManagerPanel oai={oai} patchOai={patchOai} />}
+              {section === 'regex' && <RegexPanel draft={draft} patch={patch} />}
               {section === 'sampling' && <SamplingPanel oai={oai} patchOai={patchOai} />}
               {section === 'ai-response' && <AiResponsePanel oai={oai} patchOai={patchOai} />}
               {section === 'persona' && <PersonaPanel draft={draft} patch={patch} />}

@@ -285,6 +285,48 @@ impl UserData {
         Ok(())
     }
 
+    // ---------- presets（OpenAI Settings/<name>.json，ST 同构） ----------
+
+    fn preset_dir(&self) -> PathBuf {
+        self.root.join("OpenAI Settings")
+    }
+
+    pub fn list_presets(&self) -> StorageResult<Vec<String>> {
+        let dir = self.preset_dir();
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(dir)? {
+            let name = entry?.file_name().to_string_lossy().to_string();
+            if let Some(stripped) = name.strip_suffix(".json") {
+                out.push(stripped.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    pub fn read_preset(&self, name: &str) -> StorageResult<Value> {
+        let path = self.preset_dir().join(format!("{}.json", sanitize_world_name(name)));
+        let raw = fs::read_to_string(&path)
+            .map_err(|_| StorageError::NotFound(format!("preset {name}")))?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    pub fn save_preset(&self, name: &str, value: &Value) -> StorageResult<()> {
+        fs::create_dir_all(self.preset_dir())?;
+        let path = self.preset_dir().join(format!("{}.json", sanitize_world_name(name)));
+        let pretty = serde_json::to_string_pretty(value)?;
+        atomic_write(&path, pretty.as_bytes())?;
+        Ok(())
+    }
+
+    pub fn delete_preset(&self, name: &str) -> StorageResult<()> {
+        fs::remove_file(self.preset_dir().join(format!("{}.json", sanitize_world_name(name))))
+            .map_err(|_| StorageError::NotFound(format!("preset {name}")))
+    }
+
     // ---------- worlds ----------
 
     pub fn list_worlds(&self) -> StorageResult<Vec<String>> {
