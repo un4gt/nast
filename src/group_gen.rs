@@ -155,7 +155,15 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     {
         let mut guard = state.generation.write().await;
         guard.abort = Some(abort.clone());
+        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        guard.info = Some(crate::state::GenerationInfo {
+            kind: "group".into(),
+            avatar: group.id.clone(),
+            chat_file: chat_id.to_string(),
+            is_group: true,
+        });
     }
+    let progress = state.generation.read().await.text.clone();
     let oai: nast_model::preset::OaiSettings = serde_json::from_value(
         state
             .settings
@@ -177,6 +185,7 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         provider,
         abort,
         plugins: &state.plugins,
+        progress,
     };
 
     // 插件事件：群生成开始
@@ -269,6 +278,8 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     {
         let mut guard = state.generation.write().await;
         guard.abort = None;
+        guard.info = None;
+        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     }
     // 插件事件：群生成结束
     {

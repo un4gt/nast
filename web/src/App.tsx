@@ -42,8 +42,48 @@ export default function App() {
     const onConnect = rpc.on('$connected', () => {
       setConnected(true);
       loadAll();
+      // 断线重连：若服务端生成仍在进行，恢复流式气泡
+      rpc
+        .call<{ running: boolean; text: string; info?: { avatar: string; chat_file: string; is_group: boolean } | null }>(
+          'generate.status',
+          {},
+        )
+        .then((st) => {
+          if (st.running && !useStore.getState().generating) {
+            useStore.setState({
+              generating: true,
+              streamingText: st.text ?? '',
+              streamingReasoning: '',
+            });
+            // 生成实际由旧连接发起；轮询直至结束
+            const poll = setInterval(() => {
+              rpc
+                .call<{ running: boolean; text: string }>('generate.status', {})
+                .then((s) => {
+                  if (!s.running) {
+                    clearInterval(poll);
+                    useStore.setState({
+                      generating: false,
+                      streamingText: null,
+                      streamingReasoning: null,
+                    });
+                    void useStore.getState().reloadChat();
+                    const info = st.info;
+                    if (info?.is_group) {
+                      const g = useStore.getState().groups.find((x) => x.id === info.avatar);
+                      if (g) void useStore.getState().openGroup(g.id);
+                    }
+                  } else {
+                    useStore.setState({ streamingText: s.text ?? '' });
+                  }
+                })
+                .catch(() => {});
+            }, 1000);
+          }
+        })
+        .catch(() => {});
     });
-    const onDisconnect = () => setConnected(false);
+    const onDisconnect = rpc.on('$disconnected', () => setConnected(false));
     return () => {
       onConnect();
       onDisconnect();

@@ -66,6 +66,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "plugins.reload" => plugins_reload(state),
         "generate.run" => generate_run(state, params).await,
         "generate.stop" => generate_stop(state).await,
+        "generate.status" => generate_status(state).await,
         "groups.create" => groups_create(state, params),
         "groups.edit" => groups_edit(state, params),
         "groups.delete" => groups_delete(state, params),
@@ -959,7 +960,15 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
     {
         let mut guard = state.generation.write().await;
         guard.abort = Some(abort.clone());
+        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        guard.info = Some(crate::state::GenerationInfo {
+            kind: params.get("type").and_then(|v| v.as_str()).unwrap_or("normal").to_string(),
+            avatar: avatar.clone(),
+            chat_file: chat_file.clone(),
+            is_group: false,
+        });
     }
+    let progress = state.generation.read().await.text.clone();
 
     let oai: nast_model::preset::OaiSettings =
         serde_json::from_value(state.settings.read().await.get("oai_settings").cloned().unwrap_or(json!({})))
@@ -976,6 +985,7 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         provider,
         abort: abort.clone(),
         plugins: &state.plugins,
+        progress,
     };
     let p = GenerateParams {
         generation_type,
@@ -995,10 +1005,28 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
     {
         let mut guard = state.generation.write().await;
         guard.abort = None;
+        guard.info = None;
+        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     }
     result
         .map(|r| json!({"text": r.text, "saved": r.saved}))
         .map_err(RpcError::Internal)
+}
+
+/// 生成状态（断线重连恢复流式气泡）。
+async fn generate_status(state: SharedState) -> RpcResult {
+    let guard = state.generation.read().await;
+    let running = guard
+        .abort
+        .as_ref()
+        .map(|a| !a.is_cancelled())
+        .unwrap_or(false);
+    let text = guard.text.lock().map(|t| t.clone()).unwrap_or_default();
+    Ok(json!({
+        "running": running,
+        "text": text,
+        "info": guard.info,
+    }))
 }
 
 async fn generate_stop(state: SharedState) -> RpcResult {

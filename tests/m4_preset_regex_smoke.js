@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const WebSocket = require('D:/temp/nast-smoke/node_modules/ws');
+const WebSocket = require(process.env.NAST_WS_MODULE || 'D:/temp/nast-smoke/node_modules/ws');
 
 const MOCK_PORT = 19031;
 const NAST_PORT = 18099;

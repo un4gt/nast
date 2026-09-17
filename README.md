@@ -65,7 +65,8 @@ cd web && npm run dev   # → http://localhost:3000
 | `NAST_PORT` | 8000 | 监听端口 |
 | `NAST_DATA` | ./data | 数据目录（可直接指向现有 ST data/） |
 | `NAST_WEB` | ./web/dist | 前端静态资源 |
-| `NAST_OPENAI_BASE` | https://api.openai.com/v1 | OpenAI 兼容 baseURL（本地 vLLM 等） |
+| `NAST_OPENAI_BASE` | https://api.openai.com/v1 | OpenAI 兼容 baseURL 降级（优先 UI 配置的 custom_url） |
+| `NAST_PLUGIN_TIMEOUT_SECS` | 10 | 插件单次派发超时 |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | — | 各源 API key |
 
 ## 行为兼容性（对照 SillyTavern release 1.18.0）
@@ -91,13 +92,41 @@ cd web && npm run dev   # → http://localhost:3000
 
 ## 已知范围外（对照 ST）
 
-文本补全路径（instruct/context 模板）、向量/RAG、图像生成、TTS、翻译、多用户账号、
-世界书 outlet/EM 锚点注入（引擎已产出数据，拼装端未消费）。
+文本补全路径（instruct/context 模板）、Claude/Gemini 原生源 UI、向量/RAG、图像生成、TTS、
+翻译、多用户账号。当前阶段模型接入仅 OpenAI 兼容 /chat/completions（自定义 baseURL，
+覆盖 OpenRouter/DeepSeek/中转/本地 vLLM）；密钥存服务端 secrets.json（UI 可配）。
+
+## 插件（服务端 Lua）
+
+`plugins/*.lua` 在服务端专用线程运行（限时派发，死循环不阻塞生成），无需样板：
+
+```lua
+nast.on("user_input", function(dataJson) ... end)      -- 事件钩子（可转换文本）
+nast.on("prompt_built", function(dataJson)             -- 整体重写拼装消息
+  local d = nast.json_decode(dataJson)
+  table.insert(d.messages, {role="system", content="..."})
+  return nast.json_encode({messages = d.messages})
+end)
+nast.register_command("hello", function(args) return "你好 " .. args end)
+nast.get_var / nast.set_var     -- 插件级 KV（plugin_vars.json 持久化）
+nast.toast(msg, "info") / nast.log(...) / nast.json_decode / nast.json_encode
+```
+
+事件：generation_started / user_input / prompt_built / ai_output / message_saved / generation_ended。
+设置 → 插件 面板可查看与重载。超时预算 `NAST_PLUGIN_TIMEOUT_SECS`（默认 10）。
 
 ## 测试
 
 ```bash
-cargo test --workspace   # 17 套件 / 100+ 测试
+cargo test --workspace   # 17 套件 / 140+ 测试
+
+# 端到端冒烟（需先 cargo build；ws 模块路径可用 NAST_WS_MODULE 覆盖）
+node tests/m0_connection_smoke.js    # 连接闭环（secrets/models/custom_url）
+node tests/m1_pipeline_smoke.js      # 聊天链路 ST 一致性（WI/AN/persona/reasoning/停止串/编辑）
+node tests/m3_group_smoke.js         # 群聊
+node tests/m4_preset_regex_smoke.js  # 预设/正则/Prompt Manager
+node tests/m5_plugin_smoke.js        # 插件（含死循环超时隔离）
+node tests/m6_reconnect_smoke.js     # 断线重连与生成恢复
 node tests/smoke.js       # RPC 冒烟（需先启动服务 + npm i ws）
 node tests/gen_smoke.js   # 生成链路冒烟（内置 mock provider）
 node tests/group_smoke.js # 群聊冒烟

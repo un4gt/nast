@@ -9,6 +9,7 @@ class RpcClient {
   private pending = new Map<string, Pending>();
   private handlers = new Map<string, Set<Handler>>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retries = 0;
 
   connect() {
     if (this.ws) return;
@@ -16,6 +17,7 @@ class RpcClient {
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws = ws;
     ws.onopen = () => {
+      this.retries = 0;
       this.emit('$connected', null);
     };
     ws.onmessage = (ev) => {
@@ -37,10 +39,14 @@ class RpcClient {
       this.ws = null;
       this.emit('$disconnected', null);
       if (!this.retryTimer) {
+        // 指数退避 + 抖动：0.5s 起、上限 10s
+        const backoff = Math.min(10000, 500 * 2 ** this.retries);
+        const delay = backoff * (0.75 + Math.random() * 0.5);
+        this.retries = Math.min(this.retries + 1, 15);
         this.retryTimer = setTimeout(() => {
           this.retryTimer = null;
           this.connect();
-        }, 1500);
+        }, delay);
       }
     };
   }

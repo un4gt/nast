@@ -104,6 +104,16 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| serde_json::json!({}));
     let state: SharedState = std::sync::Arc::new(AppState::new(user, settings, secrets));
 
+    // 预热 tokenizer（首次构建 o200k/cl100k BPE 约需数秒，避免拖慢首个请求）
+    std::thread::spawn(|| {
+        for model in ["gpt-4o", "gpt-4"] {
+            let _ = nast_engine::tokens::count_tokens(
+                "warmup",
+                nast_engine::tokens::resolve_tokenizer(model),
+            );
+        }
+    });
+
     tracing::info!("nast listening on http://127.0.0.1:{port}");
 
     HttpServer::new(move || {

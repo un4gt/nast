@@ -791,3 +791,34 @@ nast.register_command("ping", function() return "pong" end)
         assert_eq!(infos[0].commands, vec!["ping"]);
     }
 }
+
+#[cfg(test)]
+mod host_tests {
+    use super::*;
+
+    #[test]
+    fn host_dispatch_latency_with_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("no-such-plugins");
+        let host = PluginHost::new(plugins_dir, dir.path().join("kv.json"));
+        let t = std::time::Instant::now();
+        let r = host.dispatch("user_input", &serde_json::json!({"text": "x"}));
+        assert!(r.is_none());
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "took {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn host_loads_plugin_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugins_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(
+            plugins_dir.join("hi.lua"),
+            "nast.on(\"user_input\", function(d) return \"hi!\" end)",
+        )
+        .unwrap();
+        let host = PluginHost::new(plugins_dir, dir.path().join("kv.json"));
+        let r = host.dispatch("user_input", &serde_json::json!({"text": "x"}));
+        assert_eq!(r.as_deref(), Some("hi!"));
+    }
+}

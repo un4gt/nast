@@ -38,10 +38,23 @@ impl Default for EventHub {
     }
 }
 
-/// 生成控制：同一时刻一个生成（ST 语义），stop 触发 abort。
+/// 生成控制：同一时刻一个生成（ST 语义），stop 触发 abort；
+/// progress 跟踪已流出文本（断线重连恢复流式气泡用）。
 #[derive(Default)]
 pub struct GenerationControl {
     pub abort: Option<tokio_util::sync::CancellationToken>,
+    /// 已累积的流式文本
+    pub text: std::sync::Arc<std::sync::Mutex<String>>,
+    /// 本次生成目标（generate.status 展示）
+    pub info: Option<GenerationInfo>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GenerationInfo {
+    pub kind: String,
+    pub avatar: String,
+    pub chat_file: String,
+    pub is_group: bool,
 }
 
 pub struct AppState {

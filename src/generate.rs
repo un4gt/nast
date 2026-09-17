@@ -67,6 +67,8 @@ pub struct GenerateSession<'a> {
     pub abort: tokio_util::sync::CancellationToken,
     /// 插件宿主（Lua + Rust 钩子）
     pub plugins: &'a std::sync::Mutex<nast_plugin::PluginHost>,
+    /// 流式进度镜像（断线重连恢复）
+    pub progress: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl<'a> GenerateSession<'a> {
@@ -221,6 +223,9 @@ impl<'a> GenerateSession<'a> {
                         first_token_at = Some(std::time::Instant::now());
                     }
                     streamed.push_str(&t);
+                    if let Ok(mut p) = self.progress.lock() {
+                        *p = streamed.clone();
+                    }
                     self.hub.emit("stream_token_received", json!({"text": t}));
                 }
                 Ok(StreamEvent::Reasoning(r)) => {
