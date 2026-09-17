@@ -1,15 +1,23 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { BrainCog } from 'lucide-react';
+import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Spinner } from '@/components/ui/spinner';
 import {
   Collapsible, CollapsibleContent, CollapsibleTrigger,
 } from '@/components/ui/collapsible';
+import { fixMarkdownQuotes } from '@/lib/st-display';
 
 export function StreamingBubble({
   name, text, reasoning,
 }: { name: string; text: string; reasoning?: string | null }) {
   const [reasonOpen, setReasonOpen] = useState(true);
+  const rendered = useMemo(() => {
+    if (!text) return '';
+    const html = marked.parse(fixMarkdownQuotes(text), { async: false }) as string;
+    return DOMPurify.sanitize(html);
+  }, [text]);
   return (
     <div className="flex w-full justify-start gap-2">
       <Avatar className="mt-1 size-8 shrink-0">
@@ -35,9 +43,10 @@ export function StreamingBubble({
             </CollapsibleContent>
           </Collapsible>
         ) : null}
-        <div className="msg-content whitespace-pre-wrap break-words rounded-2xl rounded-tl-sm border bg-card px-4 py-2.5 text-sm leading-relaxed">
-          {text || '…'}
-        </div>
+        <div
+          className="msg-content break-words rounded-2xl rounded-tl-sm border bg-card px-4 py-2.5 text-sm leading-relaxed"
+          dangerouslySetInnerHTML={{ __html: rendered || '…' }}
+        />
       </div>
     </div>
   );

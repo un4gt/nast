@@ -2,25 +2,31 @@ import { useEffect, useState } from 'react';
 import { SidebarProvider, SidebarInset } from '@/components/ui/sidebar';
 import { Badge } from '@/components/ui/badge';
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty';
+import { Toaster } from '@/components/ui/sonner';
 import { LeftSidebar } from './components/layout/LeftSidebar';
-import { RightInspector } from './components/inspector/RightInspector';
+import { RightInspector, InspectorMobileSheet } from './components/inspector/RightInspector';
 import { ChatArea } from './components/chat/ChatArea';
 import { ChatActionsMenu } from './components/chat/ChatActionsMenu';
-import { ToastHost } from './toasts';
+import { Button } from '@/components/ui/button';
+import { PanelRight } from 'lucide-react';
+import { useRpcErrorToast } from './toasts';
 import { rpc } from './rpc';
 import { useStore } from './store';
 import WorldEditor from './WorldEditor';
 import { SettingsSheet } from './components/settings/SettingsSheet';
 
 export default function App() {
-  const { connected, characters, activeAvatar, activeChatName, setConnected, loadAll, importFile } =
+  const { characters, activeAvatar, activeChatName, setConnected, loadAll, importFile } =
     useStore();
   const [dragOver, setDragOver] = useState(false);
   const [showWorlds, setShowWorlds] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showInspectorSheet, setShowInspectorSheet] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => {
     return localStorage.getItem('nast:inspector_collapsed') === '1';
   });
+
+  useRpcErrorToast();
 
   useEffect(() => {
     // 外观设置恢复（localStorage → CSS 变量）
@@ -86,6 +92,15 @@ export default function App() {
                   </Badge>
                 ))}
                 <div className="flex-1" />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 md:hidden"
+                  onClick={() => setShowInspectorSheet(true)}
+                  title="Inspector"
+                >
+                  <PanelRight />
+                </Button>
                 <ChatActionsMenu avatar={activeAvatar ?? ""} />
               </>
             ) : (
@@ -114,8 +129,15 @@ export default function App() {
 
       {showWorlds && <WorldEditor onClose={() => setShowWorlds(false)} />}
       <SettingsSheet open={showSettings} onOpenChange={setShowSettings} />
-      <ToastHost />
-      <span className="hidden">{connected}</span>
+      <InspectorMobileSheet
+        open={showInspectorSheet}
+        onOpenChange={setShowInspectorSheet}
+        onOpenWorldEditor={() => {
+          setShowInspectorSheet(false);
+          setShowWorlds(true);
+        }}
+      />
+      <Toaster position="bottom-right" richColors closeButton />
     </SidebarProvider>
   );
 }

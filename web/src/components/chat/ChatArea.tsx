@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Progress } from '@/components/ui/progress';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Spinner } from '@/components/ui/spinner';
@@ -12,13 +14,52 @@ import { useStore } from '../../store';
 import { MessageBubble } from './MessageBubble';
 import { StreamingBubble } from './StreamingBubble';
 
+const draftKey = (avatar: string | null, chat: string | null) =>
+  `nast:draft:${avatar ?? ''}:${chat ?? ''}`;
+
 export function ChatArea() {
   const {
+    activeAvatar, activeChatName,
     messages, streamingText, streamingReasoning, generating, send, swipe, regenerate, continueGen, impersonate,
     stopGeneration, appendStreamToken, appendStreamReasoning,
   } = useStore();
   const [input, setInput] = useState('');
+  const [tokenStats, setTokenStats] = useState<{ total: number; budget: number } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // 草稿按聊天持久化（切聊天/生成不丢）
+  useEffect(() => {
+    setInput(localStorage.getItem(draftKey(activeAvatar, activeChatName)) ?? '');
+  }, [activeAvatar, activeChatName]);
+
+  useEffect(() => {
+    const key = draftKey(activeAvatar, activeChatName);
+    if (input) localStorage.setItem(key, input);
+    else localStorage.removeItem(key);
+  }, [input, activeAvatar, activeChatName]);
+
+  // token 计量（切聊天 / 消息变化时刷新）
+  useEffect(() => {
+    if (!activeAvatar || !activeChatName) {
+      setTokenStats(null);
+      return;
+    }
+    let cancelled = false;
+    rpc
+      .call<{ total: number; budget: number }>('chats.stats', {
+        avatar: activeAvatar,
+        file_name: activeChatName,
+      })
+      .then((s) => {
+        if (!cancelled) setTokenStats(s);
+      })
+      .catch(() => {
+        if (!cancelled) setTokenStats(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAvatar, activeChatName, messages.length]);
 
   // P1：接通后端流式事件——逐 token 追加到 streamingText / streamingReasoning
   useEffect(() => {
@@ -77,6 +118,17 @@ export function ChatArea() {
 
       <footer className="shrink-0 border-t bg-background p-3">
         <div className="mx-auto flex max-w-3xl flex-col gap-2">
+          {tokenStats && tokenStats.budget > 0 && (
+            <div className="flex items-center gap-2">
+              <Progress
+                value={Math.min(100, (tokenStats.total / tokenStats.budget) * 100)}
+                className="h-1 flex-1"
+              />
+              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                {tokenStats.total} / {tokenStats.budget} tok
+              </span>
+            </div>
+          )}
           <div className="flex items-end gap-2">
             <Textarea
               value={input}

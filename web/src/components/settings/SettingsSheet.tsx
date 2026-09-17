@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { useStore } from '../../store';
@@ -84,12 +85,9 @@ export function SettingsSheet({
           <SheetTitle className="flex items-center gap-2">
             设置
             {dirty && (
-              <button
-                onClick={() => void save()}
-                className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
-              >
+              <Button size="sm" className="h-6 px-2.5 text-xs" onClick={() => void save()}>
                 保存
-              </button>
+              </Button>
             )}
           </SheetTitle>
           <SheetDescription className="sr-only">nast 设置中心</SheetDescription>
@@ -99,27 +97,30 @@ export function SettingsSheet({
           {/* 左侧分区导航 */}
           <nav className="flex w-40 shrink-0 flex-col gap-0.5 border-r p-2">
             {SECTIONS.map((s) => (
-              <button
+              <Button
                 key={s.id}
-                onClick={() => setSection(s.id)}
+                variant="ghost"
                 className={cn(
-                  'flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-accent',
+                  'h-auto w-full justify-start px-3 py-2 font-normal',
                   section === s.id && 'bg-accent font-medium text-accent-foreground',
                 )}
+                onClick={() => setSection(s.id)}
               >
                 <s.icon className="size-4 shrink-0" />
                 <span className="truncate">{s.label}</span>
-              </button>
+              </Button>
             ))}
             <div className="flex-1" />
             {dirty && (
-              <button
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-auto w-full justify-start px-3 py-2 text-xs text-primary hover:bg-primary/10"
                 onClick={() => void save()}
-                className="flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-left text-xs text-primary hover:bg-primary/20"
               >
                 <span className="size-1.5 rounded-full bg-primary" />
                 未保存的更改
-              </button>
+              </Button>
             )}
           </nav>
 

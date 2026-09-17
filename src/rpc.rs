@@ -50,6 +50,8 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "characters.delete" => characters_delete(state, params),
         "characters.chats" => characters_chats(state, params),
         "characters.edit" => characters_edit(state, params),
+        "characters.duplicate" => characters_duplicate(state, params),
+        "chats.stats" => chats_stats(state, params).await,
         "chats.get" => chats_get(state, params),
         "chats.save" => chats_save(state, params),
         "chats.delete" => chats_delete(state, params),
@@ -58,6 +60,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "chats.export" => chats_export(state, params),
         "chats.set_note" => chats_set_note(state, params),
         "chats.set_persona" => chats_set_persona(state, params),
+        "chats.set_world" => chats_set_world(state, params),
         "chats.update_message" => chats_update_message(state, params),
         "plugins.list" => plugins_list(state),
         "plugins.reload" => plugins_reload(state),
@@ -309,6 +312,11 @@ fn characters_edit(state: SharedState, params: Value) -> RpcResult {
         .get("data")
         .and_then(|v| v.as_object())
         .ok_or_else(|| RpcError::BadRequest("missing data".into()))?;
+    // 收藏开关（顶层 fav，非 data 字段）
+    if let Some(fav) = data.get("fav").and_then(|v| v.as_bool()) {
+        ch.fav = fav;
+    }
+
     for (k, v) in data {
         // 白名单：仅允许编辑卡内容字段
         if matches!(
@@ -318,8 +326,7 @@ fn characters_edit(state: SharedState, params: Value) -> RpcResult {
                 | "character_version" | "tags" | "alternate_greetings"
         ) {
             if let Ok(v) = serde_json::from_value::<serde_json::Value>(v.clone()) {
-                ch.data.extra.remove(k);
-                // 直接写 typed 字段
+                ch.data.extra.remove(k);                // 直接写 typed 字段
                 match k.as_str() {
                     "description" => ch.data.description = v.as_str().unwrap_or_default().to_string(),
                     "personality" => ch.data.personality = v.as_str().unwrap_or_default().to_string(),
@@ -381,6 +388,50 @@ fn characters_chats(state: SharedState, params: Value) -> RpcResult {
     let avatar = param_str(&params, "avatar")?;
     let chats = state.user.list_chats(&avatar)?;
     Ok(json!(chats))
+}
+
+/// 复制角色（含卡内容；聊天不复制）。
+fn characters_duplicate(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let src = read_character(&state, avatar)?;
+    let mut copy = src.clone();
+    copy.name = format!("{} (copy)", src.name);
+    let file_name = state.user.unique_character_file(&copy.name);
+    let v2_json = serde_json::to_value(&copy).map_err(|e| RpcError::Internal(e.to_string()))?;
+    let png_bytes = std::fs::read(state.user.character_dir().join(avatar))
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    let out = nast_cards::write_card(&png_bytes, &v2_json, None)
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    std::fs::write(state.user.character_dir().join(&file_name), out)
+        .map_err(|e| RpcError::Internal(e.to_string()))?;
+    state.hub.emit(events::CHAT_CHANGED, json!({"avatar": file_name}));
+    Ok(json!({"avatar": file_name, "name": copy.name}))
+}
+
+/// 聊天 token 统计：按当前源 tokenizer 计历史消息与预算。
+async fn chats_stats(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let oai: nast_model::preset::OaiSettings = serde_json::from_value(
+        state.settings.read().await.get("oai_settings").cloned().unwrap_or(json!({})),
+    )
+    .unwrap_or_default();
+    let chat = state.user.read_chat(&avatar, &file_name)?;
+    let model = crate::connection::model_for(&oai);
+    let tok = nast_engine::prompt::tok_for;
+    let mut per_message: Vec<i64> = Vec::new();
+    let mut total: i64 = 0;
+    for v in chat.0.iter().skip(1) {
+        let mes = v.get("mes").and_then(|m| m.as_str()).unwrap_or_default();
+        let t = tok(mes, &oai.chat_completion_source, &model);
+        per_message.push(t);
+        total += t;
+    }
+    Ok(json!({
+        "total": total,
+        "budget": oai.openai_max_context - oai.openai_max_tokens,
+        "per_message": per_message,
+    }))
 }
 
 // ---------- chats ----------
@@ -558,6 +609,29 @@ fn chats_set_persona(state: SharedState, params: Value) -> RpcResult {
                 m.remove("persona");
             } else {
                 m.insert("persona".into(), persona);
+            }
+        }
+        state.user.save_chat(&avatar, &file_name, &chat, false)?;
+        return Ok(json!({"ok": true}));
+    }
+    Err(RpcError::BadRequest("empty chat".into()))
+}
+
+/// 绑定/解绑聊天世界书（chat_metadata.world）。
+fn chats_set_world(state: SharedState, params: Value) -> RpcResult {
+    let avatar = param_str(&params, "avatar")?;
+    let file_name = param_str(&params, "file_name")?;
+    let world = params.get("world").cloned().unwrap_or(Value::Null);
+    let mut chat = state.user.read_chat(&avatar, &file_name)?;
+    if let Some(header) = chat.0.first_mut() {
+        let metadata = header
+            .get_mut("chat_metadata")
+            .ok_or_else(|| RpcError::BadRequest("missing chat_metadata".into()))?;
+        if let Some(m) = metadata.as_object_mut() {
+            if world.is_null() || world.as_str() == Some("") {
+                m.remove("world");
+            } else {
+                m.insert("world".into(), world);
             }
         }
         state.user.save_chat(&avatar, &file_name, &chat, false)?;

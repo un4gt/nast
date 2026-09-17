@@ -22,6 +22,9 @@ export default defineConfig({
       '/upload': {
         target: 'http://127.0.0.1:8000',
       },
+      '/thumbnail': {
+        target: 'http://127.0.0.1:8000',
+      },
     },
   },
   html: {

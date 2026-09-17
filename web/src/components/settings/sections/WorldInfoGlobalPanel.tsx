@@ -1,4 +1,19 @@
+import { useEffect, useState } from 'react';
+import { Globe } from 'lucide-react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
 import { SliderField, SwitchField } from '../fields';
+import { rpc } from '@/rpc';
+
+const STRATEGIES = [
+  { value: '1', label: '角色优先（character first）' },
+  { value: '2', label: '全局优先（global first）' },
+  { value: '0', label: '均匀混排（evenly）' },
+];
 
 export function WorldInfoGlobalPanel({
   wi,
@@ -7,13 +22,67 @@ export function WorldInfoGlobalPanel({
   wi: any;
   patchWi: (k: string, v: unknown) => void;
 }) {
+  const [worlds, setWorlds] = useState<string[]>([]);
+  const globalSelect: string[] = Array.isArray(wi.global_select) ? wi.global_select : [];
+
+  useEffect(() => {
+    rpc.call<string[]>('worlds.list', {}).then(setWorlds).catch(() => {});
+  }, []);
+
+  const toggleWorld = (name: string, on: boolean) => {
+    const next = on
+      ? [...globalSelect, name]
+      : globalSelect.filter((w) => w !== name);
+    patchWi('global_select', next);
+  };
+
   return (
     <div className="flex flex-col gap-5">
       <div>
         <h3 className="mb-1 text-sm font-semibold">世界书全局设置</h3>
         <p className="text-xs text-muted-foreground">
-          扫描与预算参数（world_info.*，与 ST 世界书面板全局区一致）。
+          全局激活书（globalSelect）与扫描/预算参数（world_info.*，与 ST 世界书面板一致）。
         </p>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <Label className="flex items-center gap-1.5">
+          <Globe className="size-3.5" />
+          全局激活（所有聊天生效）
+        </Label>
+        {worlds.length === 0 && (
+          <p className="text-xs text-muted-foreground">暂无世界书；在 Inspector → World Info 打开管理器创建。</p>
+        )}
+        <ScrollArea className="max-h-44 rounded-md border p-2">
+          <div className="flex flex-col gap-1">
+            {worlds.map((w) => (
+              <label key={w} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-accent/50">
+                <Checkbox
+                  checked={globalSelect.includes(w)}
+                  onCheckedChange={(v) => toggleWorld(w, v === true)}
+                />
+                <span className="truncate">{w}</span>
+              </label>
+            ))}
+          </div>
+        </ScrollArea>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>插入策略</Label>
+        <Select
+          value={String(wi.world_info_character_strategy ?? 1)}
+          onValueChange={(v) => patchWi('world_info_character_strategy', Number(v))}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {STRATEGIES.map((s) => (
+              <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <SliderField
