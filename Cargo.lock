@@ -1461,7 +1461,9 @@ version = "0.1.0"
 dependencies = [
  "mlua",
  "nast-model",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

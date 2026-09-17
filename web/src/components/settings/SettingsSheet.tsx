@@ -7,7 +7,7 @@ import { useStore } from '../../store';
 import { pushToast } from '../../toasts';
 import {
   Plug, SlidersHorizontal, Sparkles, UserCircle, Palette, BookOpen, Info,
-  ListOrdered, FolderOpen, Regex,
+  ListOrdered, FolderOpen, Regex, Puzzle,
 } from 'lucide-react';
 import { ConnectionPanel } from './sections/ConnectionPanel';
 import { SamplingPanel } from './sections/SamplingPanel';
@@ -19,6 +19,7 @@ import { AboutPanel } from './sections/AboutPanel';
 import { PromptManagerPanel } from './sections/PromptManagerPanel';
 import { PresetPanel } from './sections/PresetPanel';
 import { RegexPanel } from './sections/RegexPanel';
+import { PluginsPanel } from './sections/PluginsPanel';
 
 const SECTIONS = [
   { id: 'connection', icon: Plug, label: '连接' },
@@ -30,6 +31,7 @@ const SECTIONS = [
   { id: 'persona', icon: UserCircle, label: '用户 / Persona' },
   { id: 'appearance', icon: Palette, label: '外观' },
   { id: 'world-info', icon: BookOpen, label: '世界书全局' },
+  { id: 'plugins', icon: Puzzle, label: '插件' },
   { id: 'about', icon: Info, label: '关于' },
 ] as const;
 
@@ -138,6 +140,7 @@ export function SettingsSheet({
               {section === 'preset' && <PresetPanel oai={oai} applyToOai={(m) => patch('oai_settings', m)} />}
               {section === 'prompts' && <PromptManagerPanel oai={oai} patchOai={patchOai} />}
               {section === 'regex' && <RegexPanel draft={draft} patch={patch} />}
+              {section === 'plugins' && <PluginsPanel />}
               {section === 'sampling' && <SamplingPanel oai={oai} patchOai={patchOai} />}
               {section === 'ai-response' && <AiResponsePanel oai={oai} patchOai={patchOai} />}
               {section === 'persona' && <PersonaPanel draft={draft} patch={patch} />}

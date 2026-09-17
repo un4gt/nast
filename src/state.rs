@@ -60,8 +60,21 @@ pub type SharedState = Arc<AppState>;
 
 impl AppState {
     pub fn new(user: UserData, settings: Value, secrets: Value) -> Self {
-        // 加载 plugins/ 目录
-        let mut host = nast_plugin::PluginHost::new(std::path::PathBuf::from("plugins"));
+        let hub = EventHub::new();
+        // 插件宿主：专用线程 + KV 落盘 + toast 接线到事件总线
+        let host = nast_plugin::PluginHost::new(
+            std::path::PathBuf::from("plugins"),
+            user.plugin_kv_path(),
+        );
+        {
+            let hub_cb = hub.clone();
+            host.set_toast(std::sync::Arc::new(move |message: &str, kind: &str| {
+                hub_cb.emit(
+                    "toast",
+                    serde_json::json!({"message": message, "type": kind}),
+                );
+            }));
+        }
         match host.load_dir() {
             Ok(names) if !names.is_empty() => {
                 tracing::info!("plugins loaded: {:?}", names);
@@ -71,7 +84,7 @@ impl AppState {
         }
         Self {
             user,
-            hub: EventHub::new(),
+            hub,
             plugins: std::sync::Mutex::new(host),
             settings: RwLock::new(settings),
             secrets: RwLock::new(secrets),

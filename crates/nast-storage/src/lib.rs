@@ -266,6 +266,11 @@ impl UserData {
 
     // ---------- secrets ----------
 
+    /// 插件 KV 持久化文件（plugin_vars.json）。
+    pub fn plugin_kv_path(&self) -> PathBuf {
+        self.root.join("plugin_vars.json")
+    }
+
     /// secrets.json（ST src/endpoints/secrets.js 同构：{<key>: [{id, value, label, active}]}）。
     pub fn secrets_path(&self) -> PathBuf {
         self.root.join("secrets.json")

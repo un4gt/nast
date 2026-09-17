@@ -118,8 +118,24 @@ impl<'a> GenerateSession<'a> {
             let user_name = metadata
                 .map(|m| self.resolve_persona(&m).name)
                 .unwrap_or_else(|| "User".into());
+            // 斜杠命令：插件注册的 /cmd 优先于 user_input 钩子；空结果 = 吞掉消息
+            let mut effective = p.user_message.clone();
+            if effective.starts_with('/') {
+                let cmd_result = {
+                    let host = self.plugins.lock().unwrap();
+                    host.run_command(&effective)
+                };
+                if let Some(applied) = cmd_result {
+                    if applied.is_empty() {
+                        self.hub
+                            .emit("toast", json!({"message": "command handled", "type": "info"}));
+                        return Ok(GenerateResult { text: String::new(), saved: false });
+                    }
+                    effective = applied;
+                }
+            }
             // 插件钩子：user_input 可改写用户消息
-            let user_text = self.transform_or(&"user_input", &json!({"text": p.user_message}), &p.user_message);
+            let user_text = self.transform_or(&"user_input", &json!({"text": effective}), &effective);
             let msg = Msg {
                 name: user_name,
                 is_user: true,
@@ -151,6 +167,8 @@ impl<'a> GenerateSession<'a> {
         // 拼装
         let input = self.build_assemble_input(p, &prompt_history);
         let assembled = crate::prompt_bridge::assemble_with_macros(&self.oai, &input);
+        // 插件钩子：prompt_built 可整体重写拼装消息
+        let assembled = apply_prompt_plugin(self.plugins, assembled);
 
         // provider 请求
         let provider_msgs: Vec<ProviderMessage> = assembled
@@ -385,6 +403,7 @@ impl<'a> GenerateSession<'a> {
         let chat_id = chat.0.len() as i64 - 1;
         self.hub.emit("message_received", json!(chat_id));
         self.hub.emit("character_message_rendered", json!(chat_id));
+        self.dispatch_plugin("message_saved", &json!({"index": chat_id}));
         Ok(GenerateResult { text: streamed, saved: true })
     }
 
@@ -1304,6 +1323,55 @@ pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {    let mut
         }
     }
     out
+}
+
+/// prompt_built 插件钩子：{messages=[{role,content},...]} 重写拼装结果。
+fn apply_prompt_plugin(
+    plugins: &std::sync::Mutex<nast_plugin::PluginHost>,
+    assembled: AssembleOutput,
+) -> AssembleOutput {
+    let data = json!({
+        "messages": assembled
+            .chat
+            .iter()
+            .map(|m| json!({"role": m.role, "content": m.content, "name": m.name}))
+            .collect::<Vec<_>>(),
+    });
+    let rewritten = {
+        let host = plugins.lock().unwrap();
+        host.dispatch_json("prompt_built", &data)
+    };
+    let arr = match rewritten {
+        Some(Value::Array(arr)) => arr,
+        // {messages: [...]} 包装形态
+        Some(Value::Object(map)) => match map.get("messages") {
+            Some(Value::Array(arr)) => arr.clone(),
+            _ => return assembled,
+        },
+        _ => return assembled,
+    };
+    let mut chat: Vec<nast_engine::prompt::PromptMessage> = Vec::new();
+    for m in arr {
+        let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("system").to_string();
+        let content = m.get("content").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let name = m.get("name").and_then(|v| v.as_str()).map(String::from);
+        chat.push(nast_engine::prompt::PromptMessage {
+            tokens: nast_engine::tokens::count_tokens(
+                &content,
+                nast_engine::tokens::resolve_tokenizer("gpt-4o"),
+            ) as i64,
+            role,
+            content,
+            name,
+            identifier: "plugin".into(),
+            injected: false,
+        });
+    }
+    if chat.is_empty() {
+        return assembled;
+    }
+    let token_counts = chat.iter().map(|m| m.tokens).collect();
+    AssembleOutput { chat, token_counts, error: assembled.error }
 }
 
 // ---------- cleanUpMessage / stopping strings（script.js:6383-6533, power-user.js:3068-3112） ----------
