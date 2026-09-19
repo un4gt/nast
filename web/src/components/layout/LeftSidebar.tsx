@@ -5,7 +5,7 @@ import {
 } from '@/components/ui/sidebar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import {
@@ -171,7 +171,7 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
                     tooltip={c.name}
                   >
                     <Avatar className="size-7">
-                      <img src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
+                      <AvatarImage src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
                       <AvatarFallback className="bg-primary/20 text-xs text-primary">
                         {c.name.slice(0, 2)}
                       </AvatarFallback>
@@ -333,7 +333,7 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
                     onCheckedChange={(v) => toggleGroupMember(c.avatar, v === true)}
                   />
                   <Avatar className="size-6">
-                    <img src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
+                    <AvatarImage src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
                     <AvatarFallback className="text-[10px]">{c.name.slice(0, 1)}</AvatarFallback>
                   </Avatar>
                   <span className="truncate">{c.name}</span>

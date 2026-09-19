@@ -7,7 +7,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -186,7 +186,7 @@ export function GroupSettingsDialog({
                   return (
                     <div key={m!.avatar} className="flex items-center gap-2">
                       <Avatar className="size-7">
-                        <img src={m!.avatarUrl} alt={m!.name} className="size-full object-cover" />
+                        <AvatarImage src={m!.avatarUrl} alt={m!.name} className="size-full object-cover" />
                         <AvatarFallback className="text-[10px]">{m!.name.slice(0, 1)}</AvatarFallback>
                       </Avatar>
                       <span className="w-16 shrink-0 truncate text-xs">{m!.name}</span>
@@ -247,7 +247,7 @@ export function GroupSettingsDialog({
             {nonMembers.map((c) => (
               <Button key={c.avatar} variant="ghost" className="justify-start" onClick={() => addMember(c.avatar)}>
                 <Avatar className="size-6">
-                  <img src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
+                  <AvatarImage src={c.avatarUrl} alt={c.name} className="size-full object-cover" />
                   <AvatarFallback className="text-[10px]">{c.name.slice(0, 1)}</AvatarFallback>
                 </Avatar>
                 <span className="truncate text-sm">{c.name}</span>

@@ -857,7 +857,7 @@ fn plugins_list(state: SharedState) -> RpcResult {
 }
 
 fn plugins_reload(state: SharedState) -> RpcResult {
-    let mut host = state.plugins.lock().unwrap();
+    let host = state.plugins.lock().unwrap();
     let loaded = host.load_dir().map_err(|e| RpcError::Internal(e.to_string()))?;
     Ok(json!({ "loaded": loaded }))
 }

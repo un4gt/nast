@@ -4,7 +4,7 @@ import DOMPurify from 'dompurify';
 import { BrainCog, Check, Copy, Pencil, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import {
   Collapsible, CollapsibleContent, CollapsibleTrigger,
 } from '@/components/ui/collapsible';
@@ -64,7 +64,7 @@ export function MessageBubble({
       {!m.is_user && (
         <Avatar className="mt-1 size-8 shrink-0">
           {char?.avatarUrl ? (
-            <img src={char.avatarUrl} alt={m.name} className="size-full object-cover" />
+            <AvatarImage src={char.avatarUrl} alt={m.name} className="size-full object-cover" />
           ) : null}
           <AvatarFallback className="bg-primary/20 text-xs text-primary">
             {m.name.slice(0, 2)}

@@ -60,6 +60,8 @@ async fn thumbnail(
         .unwrap_or_default()
         .trim()
         .to_string();
+    // 百分号解码（encodeURIComponent 的中文文件名）
+    let file = percent_decode(&file);
     // 防目录穿越：只允许文件名字符
     if file.is_empty() || file.contains("..") || file.contains('/') || file.contains('\\') {
         return HttpResponse::BadRequest().finish();
@@ -72,6 +74,27 @@ async fn thumbnail(
             .body(bytes),
         Err(_) => HttpResponse::NotFound().finish(),
     }
+}
+
+/// %XX 百分号解码（UTF-8 字节序列重组，兼容 '+' 不处理——encodeURIComponent 不产生 '+'）。
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(hex) = std::str::from_utf8(&b[i + 1..i + 3]) {
+                if let Ok(v) = u8::from_str_radix(hex, 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 #[actix_web::main]
@@ -130,4 +153,21 @@ async fn main() -> std::io::Result<()> {
     .bind((bind_host.as_str(), port))?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn percent_decode_utf8_filenames() {
+        // encodeURIComponent("你的女仆妈妈由美.png")
+        assert_eq!(
+            percent_decode("%E4%BD%A0%E7%9A%84%E5%A5%B3%E4%BB%86%E5%A6%88%E5%A6%88%E7%94%B1%E7%BE%8E.png"),
+            "你的女仆妈妈由美.png"
+        );
+        assert_eq!(percent_decode("plain.png"), "plain.png");
+        assert_eq!(percent_decode("a%2Gb"), "a%2Gb"); // 非法十六进制保持原样
+        assert_eq!(percent_decode("%20space%20"), " space ");
+    }
 }

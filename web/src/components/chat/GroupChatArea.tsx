@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, SendHorizontal, Settings2, Square, VolumeX } from 'lucide-react';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -100,7 +100,7 @@ export function GroupChatArea() {
                     title={`让 ${m!.name} 回复`}
                   >
                     <Avatar className={'size-7 ' + (muted ? 'opacity-40' : '')}>
-                      <img src={m!.avatarUrl} alt={m!.name} className="size-full object-cover" />
+                      <AvatarImage src={m!.avatarUrl} alt={m!.name} className="size-full object-cover" />
                       <AvatarFallback className="bg-primary/20 text-[10px] text-primary">
                         {m!.name.slice(0, 1)}
                       </AvatarFallback>

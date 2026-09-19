@@ -108,17 +108,6 @@ impl PluginManager {
         self
     }
 
-    fn save_kv(&self) {
-        if let Some(path) = &self.kv_path {
-            if let Ok(pretty) = serde_json::to_string_pretty(&*self.kv.lock().unwrap()) {
-                let tmp = path.with_extension("tmp");
-                if std::fs::write(&tmp, pretty).is_ok() {
-                    let _ = std::fs::rename(&tmp, path);
-                }
-            }
-        }
-    }
-
     pub fn set_toast(&mut self, toast: Option<ToastFn>) {
         self.toast = toast;
     }
@@ -740,7 +729,6 @@ nast.register_command("/mute", function() return nil end)
         {
             let mut pm = PluginManager::new().with_kv(Arc::new(Mutex::new(BTreeMap::new())), kv_path.clone());
             pm.load("kv", r#"nast.set_var("counter", 42)"#).unwrap();
-            pm.save_kv();
         }
         {
             let mut pm = PluginManager::new().with_kv(Arc::new(Mutex::new(BTreeMap::new())), kv_path);
