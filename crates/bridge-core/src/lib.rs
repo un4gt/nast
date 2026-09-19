@@ -26,6 +26,8 @@ pub struct Config {
     pub avatar: String,
     /// 回复最大保留字符数
     pub max_chars: usize,
+    /// 生成超时（秒）：超时后主动 generate.stop 解锁并回复错误
+    pub gen_timeout_secs: u64,
     /// 平台附加帮助行（适配器自定义命令说明）
     pub platform_help: String,
 }
@@ -45,6 +47,11 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1500),
+            gen_timeout_secs: std::env::var("BRIDGE_GEN_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v| *v >= 10)
+                .unwrap_or(120),
             platform_help: platform_help.to_string(),
         }
     }
@@ -187,15 +194,19 @@ impl NastClient {
 pub struct BridgeContext {
     pub cfg: Config,
     pub nast: Arc<NastClient>,
+    /// 控制通道（独立连接）：generate.run 占住主连接时仍能发 generate.stop
+    pub ctrl: Arc<NastClient>,
     sessions: Mutex<HashMap<String, Session>>,
 }
 
 impl BridgeContext {
     pub fn new(cfg: Config) -> Arc<Self> {
         let nast = Arc::new(NastClient::new(cfg.nast_server.clone()));
+        let ctrl = Arc::new(NastClient::new(cfg.nast_server.clone()));
         Arc::new(Self {
             cfg,
             nast,
+            ctrl,
             sessions: Mutex::new(HashMap::new()),
         })
     }
@@ -280,20 +291,19 @@ impl BridgeContext {
                 return Some(format!("会话初始化失败：{e}"));
             }
         };
-        match self
-            .nast
-            .call(
-                "generate.run",
-                json!({
-                    "avatar": avatar,
-                    "chat_file": chat_file,
-                    "type": "normal",
-                    "user_message": text,
-                }),
-            )
-            .await
-        {
-            Ok(r) => {
+        // 生成 + 超时守卫：超时则经控制通道 generate.stop 中止（释放 nast 的单生成锁）
+        let timeout = Duration::from_secs(self.cfg.gen_timeout_secs);
+        let gen_fut = self.nast.call(
+            "generate.run",
+            json!({
+                "avatar": avatar,
+                "chat_file": chat_file,
+                "type": "normal",
+                "user_message": text,
+            }),
+        );
+        match tokio::time::timeout(timeout, gen_fut).await {
+            Ok(Ok(r)) => {
                 let out = r.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
                 if out.is_empty() && text.starts_with('/') {
                     None
@@ -301,9 +311,20 @@ impl BridgeContext {
                     Some(out)
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::error!("[{key}] 生成失败：{e}");
                 Some(format!("生成失败：{e}"))
+            }
+            Err(_) => {
+                tracing::error!(
+                    "[{key}] 生成超时（{}s），发送 generate.stop 中止",
+                    self.cfg.gen_timeout_secs
+                );
+                let ctrl = self.ctrl.clone();
+                tokio::spawn(async move {
+                    let _ = ctrl.call("generate.stop", json!({})).await;
+                });
+                Some(format!("生成超时（超过 {} 秒），已中止本次生成，请稍后重试。", self.cfg.gen_timeout_secs))
             }
         }
     }

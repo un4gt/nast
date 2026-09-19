@@ -299,14 +299,18 @@ async fn run_gateway(
         return "identify send failed".into();
     }
 
-    // 心跳任务
+    // 心跳任务（d = 最近收到的 seq，服务端以此校验连接健康）
+    let last_seq = Arc::new(AtomicU64::new(0));
     let (hb_tx, mut hb_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     let hb_task = tokio::spawn({
         let interval = heartbeat_interval;
+        let last_seq = last_seq.clone();
         async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(interval)).await;
-                let hb = json!({"op": 1, "d": null});
+                let seq = last_seq.load(Ordering::Relaxed);
+                let d = if seq > 0 { json!(seq) } else { Value::Null };
+                let hb = json!({"op": 1, "d": d});
                 if hb_tx.send(Message::Text(hb.to_string())).is_err() {
                     break;
                 }
@@ -345,6 +349,11 @@ async fn run_gateway(
                 let op = v.get("op").and_then(|o| o.as_u64()).unwrap_or(0);
                 match op {
                     0 => {
+                        if let Some(seq) = v.get("s").and_then(|s| s.as_u64()) {
+                            if seq > 0 {
+                                last_seq.store(seq, Ordering::Relaxed);
+                            }
+                        }
                         let t = v.get("t").and_then(|t| t.as_str()).unwrap_or("");
                         let d = v.get("d").cloned().unwrap_or(Value::Null);
                         if t == "READY" {
@@ -353,8 +362,13 @@ async fn run_gateway(
                                 .and_then(|n| n.as_str())
                                 .unwrap_or("?");
                             tracing::info!("QQ 机器人已上线：@{bot_name}");
+                        } else if t == "RESUMED" {
+                            tracing::info!("会话已恢复");
                         } else if t == "GROUP_AT_MESSAGE_CREATE" || t == "C2C_MESSAGE_CREATE" {
+                            tracing::info!("收到事件 {t}");
                             handle_message(ctx.clone(), token.clone(), msg_seq.clone(), t, d).await;
+                        } else if !t.is_empty() {
+                            tracing::debug!("忽略事件 t={t}");
                         }
                     }
                     7 => break "server reconnect requested".into(),
@@ -413,7 +427,9 @@ async fn handle_message(
         text: clean_qq_content(content),
     };
     if let Some(answer) = ctx.handle_inbound(inbound).await {
-        let _ = reply(token, &target, &answer, &msg_id, msg_seq).await;
+        if let Err(e) = reply(token, &target, &answer, &msg_id, msg_seq).await {
+            tracing::warn!("回复发送失败（{e}）content_len={}", answer.chars().count());
+        }
     }
 }
 
