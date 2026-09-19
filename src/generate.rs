@@ -946,6 +946,79 @@ impl<'a> GenerateSession<'a> {
         self.provider.generate(&gen_req).await.map_err(|e| e.to_string())
     }
 
+    /// 流式调用 provider：逐 token 广播（群聊逐字渲染用）；中止保留半截文本。
+    pub async fn call_provider_stream(
+        &self,
+        assembled: &AssembleOutput,
+    ) -> Result<String, String> {
+        let provider_msgs: Vec<ProviderMessage> = assembled
+            .chat
+            .iter()
+            .map(|m| ProviderMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+                name: m.name.clone(),
+            })
+            .collect();
+        let gen_req = GenRequest {
+            messages: provider_msgs,
+            model: crate::connection::model_for(&self.oai),
+            temperature: self.oai.temperature,
+            top_p: self.oai.top_p,
+            frequency_penalty: self.oai.frequency_penalty,
+            presence_penalty: self.oai.presence_penalty,
+            max_tokens: self.oai.openai_max_tokens,
+            stop: vec![],
+            stream: true,
+            assistant_prefill: None,
+            use_sysprompt: true,
+            extra_headers: crate::connection::extra_headers(&self.oai),
+            extra_body: crate::connection::extra_body(&self.oai),
+        };
+        let stream = self
+            .provider
+            .generate_stream(&gen_req)
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::pin!(stream);
+        let mut streamed = String::new();
+        let mut errored: Option<String> = None;
+        while let Some(ev) = stream.next().await {
+            if self.abort.is_cancelled() {
+                break;
+            }
+            match ev {
+                Ok(StreamEvent::Token(t)) => {
+                    streamed.push_str(&t);
+                    if let Ok(mut p) = self.progress.lock() {
+                        *p = streamed.clone();
+                    }
+                    self.hub.emit("stream_token_received", json!({"text": t}));
+                }
+                Ok(StreamEvent::Reasoning(r)) => {
+                    self.hub.emit("stream_reasoning_received", json!({"text": r}));
+                }
+                Ok(StreamEvent::Error(e)) => {
+                    errored = Some(e);
+                    break;
+                }
+                Ok(StreamEvent::Done) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    errored = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(e) = errored {
+            self.hub.emit("toast", json!({"message": e, "type": "error"}));
+            if streamed.is_empty() {
+                return Err(e);
+            }
+        }
+        Ok(streamed)
+    }
+
     /// 派发插件事件（无转换返回）。
     fn dispatch_plugin(&self, event: &str, data: &serde_json::Value) {
         if let Ok(host) = self.plugins.lock() {

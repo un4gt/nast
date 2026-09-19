@@ -97,7 +97,8 @@ export function ChatArea() {
       }
     }
     setInput('');
-    await send(text);
+    const ok = await send(text);
+    if (!ok) setInput(text); // 失败回填，避免用户文字丢失
   };
 
   const doImpersonate = async () => {

@@ -103,17 +103,17 @@ interface AppState {
   createGroup: (name: string, members: string[]) => Promise<void>;
   saveGroup: (group: Group) => Promise<void>;
   deleteGroup: (groupId: string) => Promise<void>;
-  sendGroup: (text: string, member?: string) => Promise<void>;
+  sendGroup: (text: string, member?: string) => Promise<boolean>;
   importFile: (file: File) => Promise<void>;
   deleteCharacter: (avatar: string) => Promise<void>;
   deleteMessage: (index: number) => Promise<void>;
   editMessage: (index: number, text: string) => Promise<void>;
   exportChat: () => Promise<void>;
-  send: (text: string) => Promise<void>;
-  swipe: (direction: 'left' | 'right') => Promise<void>;
-  regenerate: () => Promise<void>;
+  send: (text: string) => Promise<boolean>;
+  swipe: (direction: 'left' | 'right') => Promise<boolean>;
+  regenerate: () => Promise<boolean>;
   impersonate: () => Promise<string | undefined>;
-  continueGen: () => Promise<void>;
+  continueGen: () => Promise<boolean>;
   stopGeneration: () => Promise<void>;
   appendStreamToken: (t: string) => void;
   appendStreamReasoning: (t: string) => void;
@@ -209,8 +209,9 @@ export const useStore = create<AppState>((set, get) => ({
   sendGroup: async (text, member) => {
     const { activeGroupId, groups, generating } = get();
     const g = groups.find((x) => x.id === activeGroupId);
-    if (!g || generating) return;
-    set({ generating: true });
+    if (!g || generating) return false;
+    set({ generating: true, streamingText: '', streamingReasoning: '' });
+    let ok = true;
     try {
       await rpc.call('generate.group', {
         id: g.id,
@@ -220,9 +221,13 @@ export const useStore = create<AppState>((set, get) => ({
       });
       const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: g.chat_id });
       set({ messages: raw.slice(1), chatMetadata: raw[0]?.chat_metadata ?? null });
+    } catch {
+      ok = false;
+      await get().reloadChat().catch(() => {});
     } finally {
-      set({ generating: false });
+      set({ generating: false, streamingText: null, streamingReasoning: null });
     }
+    return ok;
   },
 
   newChat: async (avatar, greetingIndex = -1) => {
@@ -329,8 +334,9 @@ export const useStore = create<AppState>((set, get) => ({
 
   send: async (text) => {
     const { activeAvatar, activeChatName } = get();
-    if (!activeAvatar || !activeChatName || get().generating) return;
+    if (!activeAvatar || !activeChatName || get().generating) return false;
     set({ generating: true, streamingText: '', streamingReasoning: '' });
+    let ok = true;
     try {
       await rpc.call('generate.run', {
         avatar: activeAvatar,
@@ -339,9 +345,13 @@ export const useStore = create<AppState>((set, get) => ({
         user_message: text,
       });
       await get().reloadChat();
+    } catch {
+      ok = false;
+      await get().reloadChat().catch(() => {});
     } finally {
       set({ generating: false, streamingText: null, streamingReasoning: null });
     }
+    return ok;
   },
 
   swipe: async (direction) => {
@@ -359,24 +369,34 @@ export const useStore = create<AppState>((set, get) => ({
       return;
     }
     set({ generating: true, streamingText: '', streamingReasoning: '' });
+    let ok = true;
     try {
       await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'swipe' });
       await get().reloadChat();
+    } catch {
+      ok = false;
+      await get().reloadChat().catch(() => {});
     } finally {
       set({ generating: false, streamingText: null, streamingReasoning: null });
     }
+    return ok;
   },
 
   regenerate: async () => {
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName || get().generating) return;
     set({ generating: true, streamingText: '', streamingReasoning: '' });
+    let ok = true;
     try {
       await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'regenerate' });
       await get().reloadChat();
+    } catch {
+      ok = false;
+      await get().reloadChat().catch(() => {});
     } finally {
       set({ generating: false, streamingText: null, streamingReasoning: null });
     }
+    return ok;
   },
 
   impersonate: async () => {
@@ -399,12 +419,17 @@ export const useStore = create<AppState>((set, get) => ({
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName || get().generating) return;
     set({ generating: true, streamingText: '', streamingReasoning: '' });
+    let ok = true;
     try {
       await rpc.call('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'continue' });
       await get().reloadChat();
+    } catch {
+      ok = false;
+      await get().reloadChat().catch(() => {});
     } finally {
       set({ generating: false, streamingText: null, streamingReasoning: null });
     }
+    return ok;
   },
 
   stopGeneration: async () => {

@@ -13,13 +13,13 @@ import { useStore } from '../../store';
 import { pushToast } from '../../toasts';
 
 const EDITABLE_FIELDS = [
-  { key: 'description', label: '描述（Description）', rows: 6 },
-  { key: 'personality', label: '性格（Personality）', rows: 3 },
-  { key: 'scenario', label: '场景（Scenario）', rows: 3 },
-  { key: 'first_mes', label: '开场白（First Message）', rows: 4 },
-  { key: 'mes_example', label: '对话示例（Examples）', rows: 6 },
-  { key: 'system_prompt', label: '系统提示覆盖（System Prompt）', rows: 3 },
-  { key: 'post_history_instructions', label: 'PHI / Jailbreak 覆盖', rows: 3 },
+  { key: 'description', label: '描述（Description）', rows: 15 },
+  { key: 'personality', label: '性格（Personality）', rows: 8 },
+  { key: 'scenario', label: '场景（Scenario）', rows: 8 },
+  { key: 'first_mes', label: '开场白（First Message）', rows: 12 },
+  { key: 'mes_example', label: '对话示例（Examples）', rows: 15 },
+  { key: 'system_prompt', label: '系统提示覆盖（System Prompt）', rows: 6 },
+  { key: 'post_history_instructions', label: 'PHI / Jailbreak 覆盖', rows: 6 },
 ] as const;
 
 export function CharacterPanel() {

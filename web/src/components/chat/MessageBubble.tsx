@@ -9,12 +9,22 @@ import {
   Collapsible, CollapsibleContent, CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import { fixMarkdownQuotes } from '@/lib/st-display';
+import { rpc } from '../../rpc';
 import { useStore } from '../../store';
 import { pushToast } from '../../toasts';
 
-export function MessageBubble({ m, index }: { m: any; index: number }) {
-  const { characters, deleteMessage, editMessage } = useStore();
-  const char = characters.find((c) => c.name === m.name);
+/**
+ * 单聊与群聊共用的消息气泡。
+ * group 模式：编辑/删除走 groups.* RPC（按 original_avatar 解析头像）。
+ */
+export function MessageBubble({
+  m, index, group,
+}: { m: any; index: number; group?: { chatId: string } }) {
+  const { characters, deleteMessage, editMessage, reloadChat } = useStore();
+  const char = group
+    ? characters.find((c) => c.avatar === m.original_avatar) ??
+      characters.find((c) => c.name === m.name)
+    : characters.find((c) => c.name === m.name);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(m.mes);
   // display_text 优先（后端正则 display pass 产物），否则 markdown 渲染 mes
@@ -27,7 +37,16 @@ export function MessageBubble({ m, index }: { m: any; index: number }) {
   const reasoning = typeof m.extra?.reasoning === 'string' ? m.extra.reasoning : '';
 
   const saveEdit = async () => {
-    await editMessage(index, draft);
+    if (group) {
+      await rpc.call('groups.update_message', {
+        chat_id: group.chatId,
+        index,
+        text: draft,
+      });
+      await reloadChat();
+    } else {
+      await editMessage(index, draft);
+    }
     setEditing(false);
   };
 
@@ -103,7 +122,13 @@ export function MessageBubble({ m, index }: { m: any; index: number }) {
             variant="ghost"
             size="icon"
             className="size-6 text-muted-foreground hover:text-destructive"
-            onClick={() => void deleteMessage(index)}
+            onClick={() =>
+              group
+                ? void rpc
+                    .call('groups.delete_message', { chat_id: group.chatId, index })
+                    .then(() => reloadChat())
+                : void deleteMessage(index)
+            }
             title="删除此消息"
           >
             <Trash2 className="size-3" />

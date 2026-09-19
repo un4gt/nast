@@ -289,8 +289,8 @@ function PromptEditDialog({
                 <Textarea
                   value={draft.content}
                   onChange={(e) => set({ content: e.target.value })}
-                  rows={6}
-                  className="min-h-0 resize-y text-xs"
+                  rows={12}
+                  className="min-h-0 resize-y text-xs font-mono"
                   placeholder="支持 {{char}}/{{user}} 宏…"
                 />
               </div>

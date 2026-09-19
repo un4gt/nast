@@ -219,7 +219,7 @@ function EntryCard({
         value={e.content}
         onChange={(ev) => onChange({ content: ev.target.value })}
         placeholder="内容（支持宏）"
-        rows={3}
+        rows={8}
         className="min-h-0 resize-y"
       />
       <div className="flex flex-wrap items-end gap-3">

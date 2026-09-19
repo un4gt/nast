@@ -151,6 +151,9 @@ export function ConnectionPanel({
             保存
           </Button>
         </div>
+        <p className="text-xs text-muted-foreground">
+          「获取模型列表」优先使用输入框中的密钥（未保存则仅本次生效）；生成始终使用已保存的密钥。
+        </p>
       </div>
 
       <div className="flex flex-col gap-1.5">

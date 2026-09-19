@@ -227,8 +227,9 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         let input =
             build_group_input(&session, &p, &history, &group, members.as_slice(), member);
         let assembled = crate::prompt_bridge::assemble_with_macros(&session.oai, &input);
+        // 流式：逐 token 广播（前端群聊逐字渲染）
         let raw = session
-            .call_provider(&assembled, None)
+            .call_provider_stream(&assembled)
             .await
             .map_err(RpcError::Internal)?;
         // cleanUpMessage（群分支：名字清理/endoftext/fixMarkdown）+ ai_output 插件钩子

@@ -81,6 +81,8 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "worlds.delete" => worlds_delete(state, params),
         "groups.all" => groups_all(state),
         "groups.get_chat" => groups_get_chat(state, params),
+        "groups.update_message" => groups_update_message(state, params),
+        "groups.delete_message" => groups_delete_message(state, params),
         "presets.list" => presets_list(state),
         "presets.get" => presets_get(state, params),
         "presets.save" => presets_save(state, params),
@@ -479,6 +481,89 @@ fn chats_get(state: SharedState, params: Value) -> RpcResult {
     let file_name = param_str(&params, "file_name")?;
     let chat = state.user.read_chat(&avatar, &file_name)?;
     Ok(serde_json::to_value(chat.0).map_err(|e| RpcError::Internal(e.to_string()))?)
+}
+
+/// 编辑群消息（按索引）：同步 swipes 当前槽，runOnEdit 正则按该成员角色卡执行，置 tainted。
+fn groups_update_message(state: SharedState, params: Value) -> RpcResult {
+    let chat_id = param_str(&params, "chat_id")?.to_string();
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| RpcError::BadRequest("missing index".into()))? as usize;
+    let text = param_str(&params, "text")?.to_string();
+    let reasoning = params.get("reasoning").and_then(|v| v.as_str()).map(String::from);
+
+    let mut chat = state.user.read_group_chat(&chat_id)?;
+    let pos = index + 1;
+    if pos >= chat.0.len() {
+        return Err(RpcError::BadRequest("index out of range".into()));
+    }
+    let mut msg: nast_model::chat::ChatMessage = serde_json::from_value(chat.0[pos].clone())
+        .map_err(|e| RpcError::BadRequest(format!("invalid message: {e}")))?;
+
+    // runOnEdit 正则：按该消息所属成员的角色卡 + 全局/聊天脚本
+    let settings_snapshot = state.settings.try_read().map(|s| s.clone()).unwrap_or_default();
+    if let Some(avatar) = msg.original_avatar.clone() {
+        if let Ok(character) = read_character(&state, &avatar) {
+            let metadata = chat.metadata();
+            let scripts = crate::generate::collect_regex_scripts_for(&settings_snapshot, &character, &metadata);
+            let placement = if msg.is_user {
+                nast_model::regex_script::RP_USER_INPUT
+            } else {
+                nast_model::regex_script::RP_AI_OUTPUT
+            };
+            let ch_name = character.name.clone();
+            let macro_fn = move |s: &str| {
+                crate::prompt_bridge::substitute_basic(s, "User", &ch_name)
+            };
+            let edited = nast_engine::regex_engine::get_regexed_string(
+                &text,
+                placement,
+                &scripts,
+                &nast_engine::regex_engine::RegexParams { is_edit: true, ..Default::default() },
+                &macro_fn,
+            );
+            msg.mes = edited;
+        } else {
+            msg.mes = text.clone();
+        }
+    } else {
+        msg.mes = text.clone();
+    }
+    if let Some(swipe_id) = msg.swipe_id {
+        if let Some(swipes) = msg.swipes.as_mut() {
+            let sid = (swipe_id.max(0) as usize).min(swipes.len().saturating_sub(1));
+            if sid < swipes.len() {
+                swipes[sid] = msg.mes.clone();
+            }
+        }
+    }
+    if let Some(r) = reasoning {
+        msg.extra.reasoning = if r.is_empty() { None } else { Some(r) };
+    }
+    chat.0[pos] = serde_json::to_value(&msg).map_err(|e| RpcError::Internal(e.to_string()))?;
+    if let Some(m) = chat.0.first_mut().and_then(|h| h.get_mut("chat_metadata")).and_then(|m| m.as_object_mut()) {
+        m.insert("tainted".into(), json!(true));
+    }
+    state.user.save_group_chat(&chat_id, &chat, false)?;
+    Ok(json!({"ok": true, "mes": msg.mes}))
+}
+
+/// 删除群消息（按索引）。
+fn groups_delete_message(state: SharedState, params: Value) -> RpcResult {
+    let chat_id = param_str(&params, "chat_id")?.to_string();
+    let index = params
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| RpcError::BadRequest("missing index".into()))? as usize;
+    let mut chat = state.user.read_group_chat(&chat_id)?;
+    let pos = index + 1;
+    if pos >= chat.0.len() {
+        return Err(RpcError::BadRequest("index out of range".into()));
+    }
+    chat.0.remove(pos);
+    state.user.save_group_chat(&chat_id, &chat, false)?;
+    Ok(json!({"ok": true}))
 }
 
 fn chats_save(state: SharedState, params: Value) -> RpcResult {

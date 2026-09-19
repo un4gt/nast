@@ -8,7 +8,6 @@ import { Input } from '@/components/ui/input';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
@@ -253,20 +252,7 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
       <SidebarFooter>
         <SidebarMenu>
           <SidebarMenuItem>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div>
-                  <SidebarMenuButton disabled tooltip="Groups（即将支持）">
-                    <Users />
-                    <span>Groups</span>
-                  </SidebarMenuButton>
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="right">即将支持</TooltipContent>
-            </Tooltip>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton onClick={() => setGroupOpen(true)} tooltip="新建群组">
+            <SidebarMenuButton onClick={() => setGroupOpen(true)} tooltip="群组">
               <Users />
               <span>新建群组</span>
             </SidebarMenuButton>

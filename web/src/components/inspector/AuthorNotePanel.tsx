@@ -90,7 +90,7 @@ export function AuthorNotePanel() {
           value={draft.prompt}
           onChange={(e) => setDraft((d) => ({ ...d, prompt: e.target.value }))}
           placeholder="注入到提示的指导文本…"
-          rows={6}
+          rows={12}
           className="min-h-0 resize-y text-xs"
         />
       </div>

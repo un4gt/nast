@@ -179,7 +179,7 @@ export function PersonaPanel({
               value={power.persona_description ?? ''}
               onChange={(e) => patch('power_user.persona_description', e.target.value)}
               placeholder="描述你是谁——将替换 prompt 中的 {{persona}}"
-              rows={4}
+              rows={12}
               className="min-h-0 resize-y text-xs"
             />
           </div>
@@ -204,7 +204,7 @@ export function PersonaPanel({
                 patch(`power_user.persona_descriptions.${current}.description`, e.target.value)
               }
               placeholder="描述你是谁——将替换 prompt 中的 {{persona}}"
-              rows={6}
+              rows={12}
               className="min-h-0 resize-y text-xs"
             />
           </div>
