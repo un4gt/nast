@@ -1,0 +1,16 @@
+[package]
+name = "bridge-feishu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "飞书适配器（占位：等待接入飞书事件订阅）"
+
+[[bin]]
+name = "bridge-feishu"
+path = "src/main.rs"
+
+[dependencies]
+bridge-core.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true

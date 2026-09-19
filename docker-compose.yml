@@ -1,0 +1,62 @@
+# nast-bridges：nast 的 IM 桥接插件栈。
+#
+# 前置：nast 侧 compose 已把网络命名为 nast-net（external 引用）。
+#
+# 使用：
+#   docker compose up -d                              # 只启动 QQ（默认）
+#   docker compose --profile discord --profile feishu up -d   # 追加启用其他平台
+#   docker compose stop qq                            # 单独停某平台
+#
+# 凭据在各平台独立 volume 中（QQ 扫码缓存重启免扫；Discord/飞书用 env 密钥）。
+
+x-bridge: &bridge
+  image: nast-bridges:local
+  build:
+    context: .
+    dockerfile: Dockerfile
+    additional_contexts:
+      qqbot: ../qqbot-connector
+  restart: unless-stopped
+  networks: [nast-net]
+  environment: &bridge-env
+    BRIDGE_NAST_SERVER: ws://nast:8000/ws
+    BRIDGE_AVATAR: ${BRIDGE_AVATAR:-}
+    BRIDGE_MAX_CHARS: ${BRIDGE_MAX_CHARS:-1500}
+    RUST_LOG: info
+
+services:
+  qq:
+    <<: *bridge
+    container_name: nast-bridge-qq
+    command: ["bridge-qq"]
+    environment:
+      <<: *bridge-env
+      BRIDGE_QQ_CRED_FILE: /data/qqbot-credentials.json
+    volumes:
+      - qq-creds:/data
+
+  discord:
+    <<: *bridge
+    profiles: ["discord"]
+    container_name: nast-bridge-discord
+    command: ["bridge-discord"]
+    environment:
+      <<: *bridge-env
+      BRIDGE_DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+
+  feishu:
+    <<: *bridge
+    profiles: ["feishu"]
+    container_name: nast-bridge-feishu
+    command: ["bridge-feishu"]
+    environment:
+      <<: *bridge-env
+      BRIDGE_FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      BRIDGE_FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+
+networks:
+  nast-net:
+    external: true
+
+volumes:
+  qq-creds:

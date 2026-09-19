@@ -1,0 +1,21 @@
+[package]
+name = "bridge-qq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QQ 机器人适配器：qqbot-connector 扫码凭据 + 官方 WebSocket 网关"
+
+[[bin]]
+name = "bridge-qq"
+path = "src/main.rs"
+
+[dependencies]
+bridge-core.workspace = true
+qqbot-connector = { path = "../../../qqbot-connector" }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "bridge-discord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Discord 适配器（占位：等待接入 Discord Gateway）"
+
+[[bin]]
+name = "bridge-discord"
+path = "src/main.rs"
+
+[dependencies]
+bridge-core.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
