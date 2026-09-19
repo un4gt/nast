@@ -10,6 +10,7 @@ import {
   ChevronLeft, ChevronRight, RefreshCw, Wand2, ArrowRightToLine, Square, SendHorizontal,
 } from 'lucide-react';
 import { rpc } from '../../rpc';
+import { runSlashCommand } from '../../commands';
 import { useStore } from '../../store';
 import { MessageBubble } from './MessageBubble';
 import { StreamingBubble } from './StreamingBubble';
@@ -87,6 +88,14 @@ export function ChatArea() {
   const doSend = async () => {
     const text = input.trim();
     if (!text) return;
+    // ST 语义：斜杠命令在发送前拦截——内置命令本地执行、未知命令拦截、插件命令透传
+    if (text.startsWith('/')) {
+      const result = await runSlashCommand(text, { setInput });
+      if (result !== 'passthrough') {
+        if (result === 'handled') setInput('');
+        return;
+      }
+    }
     setInput('');
     await send(text);
   };
