@@ -7,7 +7,6 @@ members = [
     "crates/nast-engine",
     "crates/nast-providers",
     "crates/nast-plugin",
-    "crates/nast-qqbot",
 ]
 
 [workspace.package]
