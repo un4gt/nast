@@ -93,10 +93,12 @@ impl TokenManager {
                 return Err(format!("token http {status}: {text}"));
             }
             let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            // 腾讯接口已知坑：access_token 可能带尾部 \r\n 等空白，拼进 identify 会 OP9
             let access_token = v
                 .get("access_token")
                 .and_then(|t| t.as_str())
                 .ok_or("token response missing access_token")?
+                .trim()
                 .to_string();
             let expires_in = v
                 .get("expires_in")
@@ -110,6 +112,12 @@ impl TokenManager {
             tracing::info!("access token refreshed (expires in {expires_in}s)");
         }
         Ok(self.token.lock().unwrap().access_token.clone())
+    }
+
+    /// 网关判定会话无效（OP9）时强制下次重新获取 token。
+    fn invalidate(&self) {
+        let mut t = self.token.lock().unwrap();
+        t.expires_in = 0;
     }
 }
 
@@ -400,10 +408,11 @@ async fn run_gateway(
     .await
     .unwrap()
     .unwrap_or_default();
+    // 新版 QQ 开放平台协议：token = "QQBot {access_token}"（不再拼 AppID）
     let identify = json!({
         "op": 2,
         "d": {
-            "token": format!("QQBot {}.{}", token_creds_appid(&token), access_token),
+            "token": format!("QQBot {access_token}"),
             "intents": INTENT_GROUP_C2C,
             "shard": [0, 1],
         }
@@ -488,7 +497,13 @@ async fn run_gateway(
                         }
                     }
                     7 => break "server reconnect requested".into(),
-                    9 => break "invalid session (auth/token expired)".into(),
+                    9 => {
+                        // OP9：鉴权/intent 无效。作废 token 缓存（重连时强制重取）并记录服务端错误详情。
+                        let err = v.get("d").cloned().unwrap_or(Value::Null);
+                        tracing::error!("网关拒绝会话（OP9）：{err}");
+                        token.invalidate();
+                        break "invalid session (OP9)".into();
+                    }
                     11 => {} // 心跳 ACK
                     _ => {}
                 }
@@ -498,13 +513,6 @@ async fn run_gateway(
 
     hb_task.abort();
     result
-}
-
-fn token_creds_appid(token: &TokenManager) -> String {
-    token
-        .creds
-        .app_id
-        .clone()
 }
 
 /// 处理一条入站消息：清理 → 定位/创建聊天 → 生成 → 回复。
