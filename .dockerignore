@@ -1,0 +1,12 @@
+# 构建上下文瘦身（上下文 = nast 仓库根）
+.git
+.zcode
+target
+data
+refrence
+tests
+web/node_modules
+web/dist
+*.md
+run.sh
+run.ps1

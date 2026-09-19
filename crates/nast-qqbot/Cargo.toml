@@ -1,0 +1,23 @@
+[package]
+name = "nast-qqbot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QQ 机器人 ↔ nast 桥接：扫码绑定（qqbot-connector）+ 官方 WebSocket 网关 + nast WS RPC"
+
+[[bin]]
+name = "nast-qqbot"
+path = "src/main.rs"
+
+[dependencies]
+qqbot-connector = { path = "../../../qqbot-connector" }
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util.workspace = true
+serde_json.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

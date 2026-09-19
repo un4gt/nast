@@ -1,0 +1,67 @@
+# nast 本地 Docker 部署 + QQ 机器人桥接。
+#
+# 使用：
+#   1. docker compose up -d --build
+#   2. 首次绑定机器人：docker compose logs -f qqbot   （终端二维码，手机 QQ 扫码）
+#   3. 浏览器打开 http://127.0.0.1:8000 导入角色卡并配置 API 连接
+#   4. QQ 群里 @机器人 或私聊即可对话（生成走 nast 角色）
+#
+# 说明：
+# - 构建需要额外上下文 qqbot = ../qqbot-connector（compose v2.17+ 的 additional_contexts）
+# - 凭据缓存与聊天数据分别在 named volume 中，容器重启免扫码、数据不丢
+
+services:
+  nast:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        qqbot: ../qqbot-connector
+    image: nast:local
+    container_name: nast
+    environment:
+      NAST_BIND: 0.0.0.0
+      NAST_PORT: 8000
+      NAST_PLUGIN_TIMEOUT_SECS: ${NAST_PLUGIN_TIMEOUT_SECS:-10}
+    ports:
+      - "${NAST_PORT:-8000}:8000"
+    volumes:
+      # 数据目录（settings/secrets/角色卡/聊天/世界书/预设/插件 KV）
+      - nast-data:/app/data
+      # 如需本机管理插件可直接挂载：./plugins:/app/plugins
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  qqbot:
+    image: nast:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        qqbot: ../qqbot-connector
+    container_name: nast-qqbot
+    command: ["nast-qqbot"]
+    environment:
+      # 桥接经服务内部网络回连 nast 的 WS RPC
+      NAST_QQBOT_SERVER: ws://nast:8000/ws
+      # 使用的角色卡文件名（留空 = 第一个角色）
+      NAST_QQBOT_AVATAR: ${NAST_QQBOT_AVATAR:-}
+      NAST_QQBOT_CRED_FILE: /data/qqbot-credentials.json
+      NAST_QQBOT_MAX_TOK: ${NAST_QQBOT_MAX_TOK:-1500}
+      RUST_LOG: info
+    volumes:
+      # 扫码得到的 AppID/AppSecret 持久化（重启免扫码）
+      - qqbot-data:/data
+    depends_on:
+      nast:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  nast-data:
+  qqbot-data:

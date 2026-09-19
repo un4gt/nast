@@ -87,6 +87,8 @@ async fn main() -> std::io::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8000);
+    // 容器内需绑定 0.0.0.0；本机默认 127.0.0.1
+    let bind_host: String = std::env::var("NAST_BIND").unwrap_or_else(|_| "127.0.0.1".into());
     let data_root: PathBuf = std::env::var("NAST_DATA")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./data"));
@@ -114,7 +116,7 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    tracing::info!("nast listening on http://127.0.0.1:{port}");
+    tracing::info!("nast listening on http://{bind_host}:{port}");
 
     HttpServer::new(move || {
         let web_dist = web_dist.clone();
@@ -125,7 +127,7 @@ async fn main() -> std::io::Result<()> {
             .route("/thumbnail", web::get().to(thumbnail))
             .service(Files::new("/", &web_dist).index_file("index.html"))
     })
-    .bind(("127.0.0.1", port))?
+    .bind((bind_host.as_str(), port))?
     .run()
     .await
 }

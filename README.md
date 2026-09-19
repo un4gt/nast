@@ -22,7 +22,26 @@ nast/
 └── web/                  # rsbuild + react + tailwind + zustand
 ```
 
-## 运行
+## Docker 部署（含 QQ 机器人）
+
+```bash
+cp .env.example .env        # 可选：改端口/指定角色
+docker compose up -d --build
+```
+
+- **Web UI**：http://127.0.0.1:8000 （导入角色卡、配置 API 连接同上）
+- **QQ 机器人**：`docker compose logs -f qqbot` 查看终端二维码，手机 QQ 扫码完成绑定；
+  凭据持久化在 named volume（`qqbot-data`），重启免扫码。绑定后 QQ 群 @机器人 或私聊即走
+  nast 角色生成回复（每个来源一个聊天文件 `qq-*`，与网页端同一数据目录，可随时接管对话）。
+- 构建依赖同级目录 `../qqbot-connector`（compose `additional_contexts` 注入）；
+  镜像含两个可执行文件：`nast`（服务端）与 `nast-qqbot`（桥接）。
+- 数据：named volume `nast-data`（settings/secrets/角色卡/聊天/世界书/预设）；
+  插件位于镜像内 `/app/plugins`，如需本机管理可挂载 `./plugins:/app/plugins`。
+
+环境变量（`.env`）：`NAST_PORT`、`NAST_QQBOT_AVATAR`（使用的角色卡，空=第一个）、
+`NAST_QQBOT_MAX_TOK`、`NAST_PLUGIN_TIMEOUT_SECS`。
+
+## 运行（本机裸跑）
 
 入口在 `crates/nast-server`（根目录无包，这是 Cargo workspace）。
 
@@ -63,6 +82,7 @@ cd web && npm run dev   # → http://localhost:3000
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `NAST_PORT` | 8000 | 监听端口 |
+| `NAST_BIND` | 127.0.0.1 | 绑定地址（容器内需 0.0.0.0，compose 已设置） |
 | `NAST_DATA` | ./data | 数据目录（可直接指向现有 ST data/） |
 | `NAST_WEB` | ./web/dist | 前端静态资源 |
 | `NAST_OPENAI_BASE` | https://api.openai.com/v1 | OpenAI 兼容 baseURL 降级（优先 UI 配置的 custom_url） |
