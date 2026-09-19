@@ -17,6 +17,7 @@ use futures_util::{SinkExt, StreamExt};
 use qqbot_connector::{ConnectOptions, Credentials, FileStore};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
@@ -145,9 +146,14 @@ impl NastClient {
         }
     }
 
-    /// 调用 RPC（自动重连一次）。返回 result；错误返回 Err(message)。
+    /// 调用 RPC：传输层错误（连接重置/关闭/发送失败）作废连接并整体重试至多 3 次。
+    /// 业务错误（响应里的 error）不重试，直接返回。
     async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        for attempt in 0..2 {
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+            }
             let mut guard = self.inner.lock().await;
             if guard.is_none() {
                 match tokio_tungstenite::connect_async(self.url.as_str()).await {
@@ -156,12 +162,9 @@ impl NastClient {
                         *guard = Some(NastConn { ws });
                     }
                     Err(e) => {
+                        last_err = format!("connect nast: {e}");
                         drop(guard);
-                        if attempt == 0 {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                            continue;
-                        }
-                        return Err(format!("connect nast: {e}"));
+                        continue;
                     }
                 }
             }
@@ -169,11 +172,9 @@ impl NastClient {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
             let req = json!({"id": id, "method": method, "params": params});
             if let Err(e) = conn.ws.send(Message::Text(req.to_string())).await {
+                last_err = format!("send: {e}");
                 *guard = None;
-                if attempt == 0 {
-                    continue;
-                }
-                return Err(format!("send: {e}"));
+                continue;
             }
             // 读到对应 id 的响应（跳过事件帧）
             let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
@@ -186,6 +187,7 @@ impl NastClient {
                     }
                 };
                 let Some(msg) = msg else {
+                    last_err = "stream ended".into();
                     *guard = None;
                     break;
                 };
@@ -195,14 +197,17 @@ impl NastClient {
                         let _ = conn.ws.send(Message::Pong(p)).await;
                         continue;
                     }
+                    // 中途断开/重置：作废连接，外层重试整次调用
                     Ok(Message::Close(_)) => {
+                        last_err = "connection closed".into();
                         *guard = None;
                         break;
                     }
                     Ok(_) => continue,
                     Err(e) => {
+                        last_err = format!("nast RPC read: {e}");
                         *guard = None;
-                        return Err(format!("nast RPC read: {e}"));
+                        break;
                     }
                 };
                 let v: Value = match serde_json::from_str(&text) {
@@ -224,9 +229,9 @@ impl NastClient {
                 }
                 return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
-            // 连接被关闭：重试一次
+            // 连接被作废：重试整次调用
         }
-        Err("nast RPC unreachable".into())
+        Err(format!("nast RPC unreachable: {last_err}"))
     }
 }
 
@@ -304,6 +309,19 @@ enum ReplyTarget {
     C2C(String),
 }
 
+/// 每个来源（群/用户）的会话：绑定的角色 + 当前聊天文件。
+#[derive(Clone)]
+struct Session {
+    avatar: String,
+    chat_file: String,
+}
+
+const QQ_HELP: &str = "命令：
+/help —— 本帮助
+/newchat —— 开一个新聊天（同一角色）
+/char <名字片段> —— 切换到该角色并开新聊天
+其余消息直接与当前角色对话。网页端命令见网页 /help。";
+
 // ---------- main ----------
 
 struct Config {
@@ -361,10 +379,13 @@ async fn main() {
     let token = Arc::new(TokenManager::new(creds));
     let nast = Arc::new(NastClient::new(cfg.server.clone()));
     let msg_seq = Arc::new(AtomicU64::new(1));
+    let sessions: Arc<Mutex<HashMap<String, Session>>> = Arc::new(Mutex::new(HashMap::new()));
 
     // 2. 网关循环（断线自动重连）
     loop {
-        let reason = run_gateway(cfg.clone(), token.clone(), nast.clone(), msg_seq.clone()).await;
+        let reason =
+            run_gateway(cfg.clone(), token.clone(), nast.clone(), sessions.clone(), msg_seq.clone())
+                .await;
         tracing::warn!("网关连接结束（{reason}），5 秒后重连…");
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -375,6 +396,7 @@ async fn run_gateway(
     cfg: Arc<Config>,
     token: Arc<TokenManager>,
     nast: Arc<NastClient>,
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
     msg_seq: Arc<AtomicU64>,
 ) -> String {
     let (ws, _) = match tokio_tungstenite::connect_async(GATEWAY_URL).await {
@@ -489,7 +511,7 @@ async fn run_gateway(
                             "RESUMED" => tracing::info!("会话已恢复"),
                             "GROUP_AT_MESSAGE_CREATE" | "C2C_MESSAGE_CREATE" => {
                                 handle_message(
-                                    cfg.clone(), token.clone(), nast.clone(),
+                                    cfg.clone(), token.clone(), nast.clone(), sessions.clone(),
                                     msg_seq.clone(), t, d,
                                 ).await;
                             }
@@ -520,6 +542,7 @@ async fn handle_message(
     cfg: Arc<Config>,
     token: Arc<TokenManager>,
     nast: Arc<NastClient>,
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
     msg_seq: Arc<AtomicU64>,
     event: &str,
     d: Value,
@@ -548,27 +571,81 @@ async fn handle_message(
     };
     let text = clean_qq_content(content);
     tracing::info!("[{session_key}] 收到：{text:?}");
-    if text.is_empty() {
-        let _ = reply(token.clone(), &target, "（空消息）", &msg_id, msg_seq).await;
-        return;
+
+    // ---- 命令层（不触发生成） ----
+    if text.starts_with('/') {
+        let (cmd, args) = match text[1..].split_once(' ') {
+            Some((c, a)) => (c.to_lowercase(), a.trim().to_string()),
+            None => (text[1..].to_lowercase(), String::new()),
+        };
+        match cmd.as_str() {
+            "help" => {
+                let _ = reply(token, &target, QQ_HELP, &msg_id, msg_seq).await;
+                return;
+            }
+            "newchat" => {
+                match reset_session(&cfg, &nast, &sessions, &session_key, None).await {
+                    Ok(sess) => {
+                        let _ = reply(
+                            token, &target,
+                            &format!("已开新聊天（角色 {}）", sess.avatar),
+                            &msg_id, msg_seq,
+                        ).await;
+                    }
+                    Err(e) => {
+                        tracing::error!("/newchat 失败：{e}");
+                        let _ = reply(token, &target, &format!("开新聊天失败：{e}"), &msg_id, msg_seq).await;
+                    }
+                }
+                return;
+            }
+            "char" => {
+                if args.is_empty() {
+                    let _ = reply(token, &target, "用法：/char <角色名片段>", &msg_id, msg_seq).await;
+                    return;
+                }
+                match reset_session(&cfg, &nast, &sessions, &session_key, Some(&args)).await {
+                    Ok(sess) => {
+                        let _ = reply(
+                            token, &target,
+                            &format!("已切换角色：{}", sess.avatar),
+                            &msg_id, msg_seq,
+                        ).await;
+                    }
+                    Err(e) => {
+                        tracing::error!("/char 失败：{e}");
+                        let _ = reply(token, &target, &format!("切换失败：{e}"), &msg_id, msg_seq).await;
+                    }
+                }
+                return;
+            }
+            _ => {
+                // 插件命令透传（服务端 Lua 执行）；未知命令拦截
+                if !is_plugin_command(&nast, &cmd).await {
+                    tracing::info!("[{session_key}] 拦截未知命令 /{cmd}");
+                    let _ = reply(
+                        token, &target,
+                        &format!("未知命令 /{cmd}，发送 /help 查看可用命令。"),
+                        &msg_id, msg_seq,
+                    ).await;
+                    return;
+                }
+            }
+        }
     }
 
-    // 角色 + 聊天定位
-    let avatar = match ensure_avatar(&nast, &cfg.avatar).await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::error!("{e}");
-            let _ = reply(token, &target, "服务端没有可用的角色卡，请先导入。", &msg_id, msg_seq).await;
-            return;
-        }
-    };
-    let chat_file = match ensure_chat(&nast, &avatar, &session_key).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::error!("聊天定位失败：{e}");
-            let _ = reply(token, &target, "内部错误：聊天会话创建失败。", &msg_id, msg_seq).await;
-            return;
-        }
+    // ---- 会话（已有）或新建 ----
+    let existing = sessions.lock().unwrap().get(&session_key).cloned();
+    let (avatar, chat_file) = match existing {
+        Some(sess) => (sess.avatar, sess.chat_file),
+        None => match reset_session(&cfg, &nast, &sessions, &session_key, None).await {
+            Ok(sess) => (sess.avatar, sess.chat_file),
+            Err(e) => {
+                tracing::error!("会话初始化失败：{e}");
+                let _ = reply(token, &target, &format!("会话初始化失败：{e}"), &msg_id, msg_seq).await;
+                return;
+            }
+        },
     };
 
     // 生成
@@ -590,8 +667,118 @@ async fn handle_message(
             format!("生成失败：{e}")
         }
     };
+    // 插件命令被服务端处理（无文本产出）时不回复
+    if answer.is_empty() && text.starts_with('/') {
+        return;
+    }
     let answer = truncate_chars(&answer, cfg.max_chars);
     let _ = reply(token, &target, &answer, &msg_id, msg_seq).await;
+}
+
+
+/// 建立或重置会话：选定角色（None = 保持当前/默认）并开新聊天文件。
+async fn reset_session(
+    cfg: &Config,
+    nast: &NastClient,
+    sessions: &Arc<Mutex<HashMap<String, Session>>>,
+    key: &str,
+    avatar_hint: Option<&str>,
+) -> Result<Session, String> {
+    let avatar = match avatar_hint {
+        Some(frag) => find_avatar_by_name(nast, frag).await?,
+        None => {
+            // /newchat：沿用当前会话角色；无会话则取配置/默认
+            match sessions.lock().unwrap().get(key).map(|s| s.avatar.clone()) {
+                Some(a) => a,
+                None => ensure_avatar(nast, &cfg.avatar).await?,
+            }
+        }
+    };
+    let chat_file = fresh_chat(nast, &avatar, key).await?;
+    let sess = Session { avatar: avatar.clone(), chat_file: chat_file.clone() };
+    sessions.lock().unwrap().insert(key.to_string(), sess.clone());
+    tracing::info!("[{key}] 会话重置：{avatar} / {chat_file}");
+    Ok(sess)
+}
+
+/// 按名字片段找角色。
+async fn find_avatar_by_name(nast: &NastClient, frag: &str) -> Result<String, String> {
+    let chars = nast
+        .call("characters.all", json!({}))
+        .await
+        .map_err(|e| format!("服务端暂时不可用（{e}）"))?;
+    let arr = chars.as_array().ok_or("角色列表异常")?;
+    let frag_lc = frag.to_lowercase();
+    arr.iter()
+        .filter(|c| c.get("error").is_none())
+        .find(|c| {
+            c.get("name")
+                .and_then(|n| n.as_str())
+                .map(|n| n.to_lowercase().contains(&frag_lc))
+                .unwrap_or(false)
+        })
+        .and_then(|c| c.get("avatar"))
+        .and_then(|a| a.as_str())
+        .map(String::from)
+        .ok_or_else(|| format!("没有名字包含「{frag}」的角色"))
+}
+
+/// 新建（而非复用）qq-<key> 聊天：已存在则顺延 -2/-3…。
+async fn fresh_chat(nast: &NastClient, avatar: &str, key: &str) -> Result<String, String> {
+    let list = nast
+        .call("characters.chats", json!({"avatar": avatar}))
+        .await
+        .map_err(|e| format!("服务端暂时不可用（{e}）"))?;
+    let mut max_n = 0;
+    if let Some(arr) = list.as_array() {
+        for f in arr.iter().filter_map(|f| f.as_str()) {
+            let stem = f.strip_suffix(".jsonl").unwrap_or(f);
+            if let Some(suffix) = stem.strip_prefix(&format!("{key}-")) {
+                if let Ok(n) = suffix.parse::<u32>() {
+                    max_n = max_n.max(n);
+                }
+            } else if stem == key {
+                max_n = max_n.max(1);
+            }
+        }
+    }
+    let name = if max_n == 0 { key.to_string() } else { format!("{key}-{}", max_n + 1) };
+    let created = nast
+        .call("chats.new", json!({"avatar": avatar, "greeting_index": -1}))
+        .await
+        .map_err(|e| format!("chats.new: {e}"))?;
+    let file_name = created
+        .get("file_name")
+        .and_then(|f| f.as_str())
+        .ok_or("chats.new 缺少 file_name")?
+        .to_string();
+    nast.call(
+        "chats.rename",
+        json!({"avatar": avatar, "original_file": file_name, "renamed_file": name}),
+    )
+    .await
+    .map_err(|e| format!("chats.rename: {e}"))?;
+    Ok(format!("{name}.jsonl"))
+}
+
+/// 是否为插件注册的命令（60s 缓存）。
+async fn is_plugin_command(nast: &NastClient, cmd: &str) -> bool {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<tokio::sync::Mutex<(std::time::Instant, Vec<String>)>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| tokio::sync::Mutex::new((std::time::Instant::now(), vec![])));
+    let mut guard = cache.lock().await;
+    if guard.0.elapsed() > Duration::from_secs(60) {
+        if let Ok(r) = nast.call("plugins.list", json!({})).await {
+            let list = (r.get("plugins").and_then(|p| p.as_array()).cloned().unwrap_or_default())
+                .iter()
+                .flat_map(|p| p.get("commands").and_then(|c| c.as_array()).cloned().unwrap_or_default())
+                .filter_map(|c| c.as_str().map(String::from))
+                .collect::<Vec<_>>();
+            *guard = (std::time::Instant::now(), list);
+        }
+    }
+    guard.1.iter().any(|c| c == cmd)
 }
 
 async fn reply(
@@ -639,39 +826,6 @@ async fn ensure_avatar(nast: &NastClient, preferred: &str) -> Result<String, Str
         .and_then(|a| a.as_str())
         .map(String::from)
         .ok_or_else(|| "服务端没有任何角色卡".into())
-}
-
-/// 定位（或创建并改名）桥接聊天 qq-<key>。
-async fn ensure_chat(nast: &NastClient, avatar: &str, key: &str) -> Result<String, String> {
-    let list = nast
-        .call("characters.chats", json!({"avatar": avatar}))
-        .await
-        .map_err(|e| format!("characters.chats: {e}"))?;
-    if let Some(arr) = list.as_array() {
-        if let Some(f) = arr
-            .iter()
-            .filter_map(|f| f.as_str())
-            .find(|f| f == &format!("{key}.jsonl"))
-        {
-            return Ok(f.to_string());
-        }
-    }
-    let created = nast
-        .call("chats.new", json!({"avatar": avatar, "greeting_index": -1}))
-        .await
-        .map_err(|e| format!("chats.new: {e}"))?;
-    let file_name = created
-        .get("file_name")
-        .and_then(|f| f.as_str())
-        .ok_or("chats.new 缺少 file_name")?
-        .to_string();
-    nast.call(
-        "chats.rename",
-        json!({"avatar": avatar, "original_file": file_name, "renamed_file": key}),
-    )
-    .await
-    .map_err(|e| format!("chats.rename: {e}"))?;
-    Ok(format!("{key}.jsonl"))
 }
 
 /// 按字符数截断（QQ 消息长度限制），保留结尾省略号。
