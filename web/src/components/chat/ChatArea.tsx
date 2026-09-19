@@ -88,13 +88,22 @@ export function ChatArea() {
   const doSend = async () => {
     const text = input.trim();
     if (!text) return;
-    // ST 语义：斜杠命令在发送前拦截——内置命令本地执行、未知命令拦截、插件命令透传
+    // ST 语义：斜杠命令在发送前拦截——内置命令本地执行、未知命令拦截、
+    // 自定义命令展开为文本、插件命令透传
     if (text.startsWith('/')) {
-      const result = await runSlashCommand(text, { setInput });
-      if (result !== 'passthrough') {
-        if (result === 'handled') setInput('');
+      const r = await runSlashCommand(text, { setInput });
+      if (r.status === 'handled') {
+        setInput('');
         return;
       }
+      if (r.status === 'unknown') return;
+      if (r.status === 'send') {
+        setInput('');
+        const ok = await send(r.text);
+        if (!ok) setInput(text); // 展开文本发送失败时回填原命令
+        return;
+      }
+      // passthrough：原样发送（服务端插件命令）
     }
     setInput('');
     const ok = await send(text);

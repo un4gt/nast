@@ -318,9 +318,12 @@ struct Session {
 
 const QQ_HELP: &str = "命令：
 /help —— 本帮助
+/chars —— 列出全部角色卡
+/char <名字片段> —— 切换到该角色并开新聊天（/character 同义）
 /newchat —— 开一个新聊天（同一角色）
-/char <名字片段> —— 切换到该角色并开新聊天
-其余消息直接与当前角色对话。网页端命令见网页 /help。";
+/worlds —— 列出全部世界书
+/world <名称|none> —— 绑定/解绑本会话的世界书
+其余消息直接与当前角色对话；自定义命令见网页 /help。";
 
 // ---------- main ----------
 
@@ -583,6 +586,107 @@ async fn handle_message(
                 let _ = reply(token, &target, QQ_HELP, &msg_id, msg_seq).await;
                 return;
             }
+            "chars" | "characters" => {
+                match nast.call("characters.all", json!({})).await {
+                    Ok(list) => {
+                        let names: Vec<String> = list
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter(|c| c.get("error").is_none())
+                                    .map(|c| {
+                                        format!(
+                                            "{} {}",
+                                            if c.get("fav").and_then(|f| f.as_bool()).unwrap_or(false) { "*" } else { "-" },
+                                            c.get("name").and_then(|n| n.as_str()).unwrap_or("?")
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let out = if names.is_empty() { "（无角色卡）".to_string() } else { names.join("
+") };
+                        let _ = reply(token, &target, &out, &msg_id, msg_seq).await;
+                    }
+                    Err(e) => {
+                        let _ = reply(token, &target, &format!("角色列表获取失败：{e}"), &msg_id, msg_seq).await;
+                    }
+                }
+                return;
+            }
+            "worlds" => {
+                match nast.call("worlds.list", json!({})).await {
+                    Ok(list) => {
+                        let names: Vec<String> = list
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|w| w.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        let out = if names.is_empty() { "（无世界书）".to_string() } else { names.join("
+") };
+                        let _ = reply(token, &target, &out, &msg_id, msg_seq).await;
+                    }
+                    Err(e) => {
+                        let _ = reply(token, &target, &format!("世界书列表获取失败：{e}"), &msg_id, msg_seq).await;
+                    }
+                }
+                return;
+            }
+            "world" => {
+                let q = args.trim().to_string();
+                if q.is_empty() {
+                    let cur = sessions
+                        .lock()
+                        .unwrap()
+                        .get(&session_key)
+                        .and_then(|sess| {
+                            // 读取当前会话聊天的 metadata.world（缓存近期值代价高，直接说明用法）
+                            None::<String>
+                        });
+                    let _ = reply(
+                        token, &target,
+                        &format!("用法：/world <名称|none>{}", cur.map(|c| format!("
+当前绑定：{c}")).unwrap_or_default()),
+                        &msg_id, msg_seq,
+                    ).await;
+                    return;
+                }
+                let unbind = q.eq_ignore_ascii_case("none");
+                let valid = if unbind {
+                    true
+                } else {
+                    nast.call("worlds.list", json!({}))
+                        .await
+                        .ok()
+                        .and_then(|l| l.as_array().cloned())
+                        .map(|a| a.iter().any(|w| w.as_str() == Some(q.as_str())))
+                        .unwrap_or(false)
+                };
+                if !valid {
+                    let _ = reply(token, &target, &format!("没有名为「{q}」的世界书（/worlds 查看）"), &msg_id, msg_seq).await;
+                    return;
+                }
+                let sess = sessions.lock().unwrap().get(&session_key).cloned();
+                let Some(sess) = sess else {
+                    let _ = reply(token, &target, "会话尚未初始化，先发一条消息", &msg_id, msg_seq).await;
+                    return;
+                };
+                match nast
+                    .call(
+                        "chats.set_world",
+                        json!({"avatar": sess.avatar, "file_name": sess.chat_file, "world": if unbind { Value::Null } else { json!(q) }}),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let msg = if unbind { "已解绑世界书".to_string() } else { format!("已绑定世界书：{q}") };
+                        let _ = reply(token, &target, &msg, &msg_id, msg_seq).await;
+                    }
+                    Err(e) => {
+                        let _ = reply(token, &target, &format!("绑定失败：{e}"), &msg_id, msg_seq).await;
+                    }
+                }
+                return;
+            }
             "newchat" => {
                 match reset_session(&cfg, &nast, &sessions, &session_key, None).await {
                     Ok(sess) => {
@@ -599,7 +703,7 @@ async fn handle_message(
                 }
                 return;
             }
-            "char" => {
+            "char" | "character" => {
                 if args.is_empty() {
                     let _ = reply(token, &target, "用法：/char <角色名片段>", &msg_id, msg_seq).await;
                     return;
@@ -620,6 +724,28 @@ async fn handle_message(
                 return;
             }
             _ => {
+                // 自定义命令（power_user.custom_commands）：展开为文本走生成
+                if let Some(text) = custom_command_text(&nast, &cmd).await {
+                    if !text.is_empty() {
+                        if let Some(sess) = sessions.lock().unwrap().get(&session_key).cloned() {
+                            match nast.call("generate.run", json!({
+                                "avatar": sess.avatar, "chat_file": sess.chat_file,
+                                "type": "normal", "user_message": text,
+                            })).await {
+                                Ok(r) => {
+                                    let out = r.get("text").and_then(|t| t.as_str()).unwrap_or_default();
+                                    if !out.is_empty() {
+                                        let _ = reply(token, &target, &truncate_chars(out, cfg.max_chars), &msg_id, msg_seq).await;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = reply(token, &target, &format!("生成失败：{e}"), &msg_id, msg_seq).await;
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
                 // 插件命令透传（服务端 Lua 执行）；未知命令拦截
                 if !is_plugin_command(&nast, &cmd).await {
                     tracing::info!("[{session_key}] 拦截未知命令 /{cmd}");
@@ -859,4 +985,38 @@ mod tests {
         assert!(truncate_chars(&s, 10).ends_with('…'));
         assert_eq!(truncate_chars("短", 10), "短");
     }
+}
+
+/// 查询自定义命令（power_user.custom_commands，60s 缓存）：命中返回展开文本。
+async fn custom_command_text(nast: &NastClient, cmd: &str) -> Option<String> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<tokio::sync::Mutex<(std::time::Instant, Vec<(String, String)>)>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        tokio::sync::Mutex::new((std::time::Instant::now(), Vec::new()))
+    });
+    let mut guard = cache.lock().await;
+    if guard.0.elapsed() > Duration::from_secs(60) {
+        if let Ok(settings) = nast.call("settings.get", json!({})).await {
+            let list = settings
+                .pointer("/power_user/custom_commands")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|c| {
+                    Some((
+                        c.get("name")?.as_str()?.to_lowercase(),
+                        c.get("text")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            *guard = (std::time::Instant::now(), list);
+        }
+    }
+    guard
+        .1
+        .iter()
+        .find(|(n, _)| n == cmd)
+        .map(|(_, t)| t.clone())
 }

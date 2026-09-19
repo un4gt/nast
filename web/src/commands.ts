@@ -1,13 +1,16 @@
 // 内置斜杠命令（对齐 ST 的发送前拦截语义）：
-// 命中 → 本地执行，不触发生成；未知命令 → 拦截提示；
-// 插件命令（plugins.list 注册的）→ 透传给服务端执行。
-// 返回值：handled=已处理；passthrough=交由服务端（插件命令）；unknown=未知命令。
+// 命中 → 本地执行，不触发生成；自定义命令 → 展开为文本发送；
+// 插件命令（plugins.list 注册的）→ 透传给服务端执行；未知命令 → 拦截提示。
 
 import { rpc } from './rpc';
 import { pushToast } from './toasts';
 import { useStore } from './store';
 
-export type CommandResult = 'handled' | 'passthrough' | 'unknown';
+export type CommandResult =
+  | { status: 'handled' }
+  | { status: 'passthrough' }
+  | { status: 'unknown' }
+  | { status: 'send'; text: string };
 
 interface Command {
   name: string;
@@ -16,20 +19,28 @@ interface Command {
   run: (args: string) => Promise<void> | void;
 }
 
-const HELP = `
-内置命令（本地执行，不触发生成）：
-  /help                    本帮助
-  /newchat [n]             新聊天（n=开场白序号，缺省随机）
-  /del <n>                 删除第 n 条消息（0 起，最新消息可省略 n）
-  /swipe <left|right>      切换/生成 swipe
-  /regenerate              重新生成最后一条回复
-  /continue                续写最后一条回复
-  /impersonate             以用户身份生成发言（填入输入框）
-  /sys <text>              插入旁白系统消息（落盘，不生成）
-  /name <新名称>            重命名当前聊天
-  /go <片段>                切换到名称包含片段的聊天
-  /persona <名称|none>      绑定/解绑本聊天的 persona
-插件命令（服务端 Lua 注册）将以 /<命令名> 形式生效`.trim();
+const NL = String.fromCharCode(10);
+
+const HELP = [
+  '内置命令（本地执行，不触发生成）：',
+  '  /help                    本帮助',
+  '  /newchat [n]             新聊天（n=开场白序号，缺省随机）',
+  '  /del <n>                 删除第 n 条消息（0 起，最新消息可省略 n）',
+  '  /swipe <left|right>      切换/生成 swipe',
+  '  /regenerate              重新生成最后一条回复',
+  '  /continue                续写最后一条回复',
+  '  /impersonate             以用户身份生成发言（填入输入框）',
+  '  /sys <text>              插入旁白系统消息（落盘，不生成）',
+  '  /name <新名称>            重命名当前聊天',
+  '  /go <片段>                切换到名称包含片段的聊天',
+  '  /persona <名称|none>      绑定/解绑本聊天的 persona',
+  '  /chars                   列出全部角色卡',
+  '  /char <片段>              切换到名称匹配的角色（/character 同义）',
+  '  /worlds                  列出全部世界书',
+  '  /world <名称|none>        绑定/解绑本聊天的世界书',
+  '自定义命令（设置 → 自定义命令）以 /<名称> 展开为预设文本发送；',
+  '插件命令（服务端 Lua 注册）同样以 /<命令名> 生效',
+].join(NL);
 
 export async function runSlashCommand(
   input: string,
@@ -37,7 +48,7 @@ export async function runSlashCommand(
 ): Promise<CommandResult> {
   const store = useStore.getState();
   const { activeAvatar, activeChatName, messages, chatList } = store;
-  if (!activeAvatar || !activeChatName) return 'unknown';
+  if (!activeAvatar || !activeChatName) return { status: 'unknown' };
 
   const body = input.slice(1);
   const [rawName, rest] = splitOnce(body);
@@ -202,19 +213,98 @@ export async function runSlashCommand(
         pushToast(`已绑定 persona：${hit[1]}`, 'success');
       },
     },
+    {
+      name: 'chars',
+      usage: '/chars',
+      desc: '列出角色卡',
+      run: async () => {
+        const list = store.characters
+          .map((c) => `${c.fav ? '★' : '·'} ${c.name}`)
+          .join(NL);
+        pushToast(list || '（无角色卡）', 'info');
+      },
+    },
+    {
+      name: 'character',
+      usage: '/char <片段>',
+      desc: '切换角色',
+      run: async () => {
+        const frag = args.trim().toLowerCase();
+        if (!frag) {
+          pushToast('用法：/char <角色名片段>', 'error');
+          return;
+        }
+        const hit = store.characters.find((c) => c.name.toLowerCase().includes(frag));
+        if (!hit) {
+          pushToast(`没有名字包含「${args.trim()}」的角色`, 'error');
+          return;
+        }
+        await store.selectCharacter(hit.avatar);
+        pushToast(`已切换角色：${hit.name}`, 'success');
+      },
+    },
+    {
+      name: 'worlds',
+      usage: '/worlds',
+      desc: '列出世界书',
+      run: async () => {
+        const list = await rpc.call<string[]>('worlds.list', {}).catch(() => [] as string[]);
+        pushToast(list.length ? list.map((w) => `· ${w}`).join(NL) : '（无世界书）', 'info');
+      },
+    },
+    {
+      name: 'world',
+      usage: '/world <名称|none>',
+      desc: '绑定聊天世界书',
+      run: async () => {
+        const q = args.trim();
+        const cur = store.chatMetadata?.world;
+        if (!q) {
+          pushToast(
+            cur
+              ? `当前绑定：${cur}${NL}用法：/world <名称|none>`
+              : `未绑定${NL}用法：/world <名称|none>`,
+            'info',
+          );
+          return;
+        }
+        if (q.toLowerCase() !== 'none') {
+          const list = await rpc.call<string[]>('worlds.list', {}).catch(() => [] as string[]);
+          if (!list.includes(q)) {
+            pushToast(`没有名为「${q}」的世界书（/worlds 查看）`, 'error');
+            return;
+          }
+        }
+        await rpc.call('chats.set_world', {
+          avatar: activeAvatar,
+          file_name: activeChatName,
+          world: q.toLowerCase() === 'none' ? null : q,
+        });
+        await store.reloadChat();
+        pushToast(q.toLowerCase() === 'none' ? '已解绑世界书' : `已绑定世界书：${q}`, 'success');
+      },
+    },
   ];
 
   const builtin = commands.find((c) => c.name === name || c.name.startsWith(name));
   if (builtin) {
     await builtin.run();
-    return 'handled';
+    return { status: 'handled' };
+  }
+
+  // 自定义命令（power_user.custom_commands）：展开为文本发送
+  const customs: { name: string; text: string }[] =
+    ((store.settings as any)?.power_user?.custom_commands ?? []);
+  const custom = customs.find((c) => String(c.name).toLowerCase() === name);
+  if (custom?.text) {
+    return { status: 'send', text: custom.text };
   }
 
   // 前缀唯一匹配后仍未命中 → 看是否插件命令（透传服务端），否则拦截
   const known = await pluginCommands();
-  if (known.includes(name)) return 'passthrough';
+  if (known.includes(name)) return { status: 'passthrough' };
   pushToast(`未知命令 /${name} —— 输入 /help 查看可用命令`, 'error');
-  return 'unknown';
+  return { status: 'unknown' };
 }
 
 function splitOnce(s: string): [string, string] {
