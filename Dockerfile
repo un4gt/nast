@@ -4,7 +4,7 @@
 
 FROM rust:1-slim AS build
 WORKDIR /build
-COPY qqbot-connector/ /build/qqbot-connector/
+COPY --from=qqbot / /build/qqbot-connector/
 COPY . /build/nast-bridges/
 WORKDIR /build/nast-bridges
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
