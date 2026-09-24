@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "rsbuild dev",
     "build": "rsbuild build",
+    "test:characters": "node --test tests/character-summary.test.cjs",
     "test:tts": "node --test tests/tts-text.test.cjs",
     "preview": "rsbuild preview"
   },

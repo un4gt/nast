@@ -51,6 +51,17 @@
 - 旧镜像保留为 `nast:rollback-20260925`，更新前的数据归档保存在被 Git 忽略的 `.cache/nast-data-before-20260925.tar.gz`，其中包含私有数据与密钥，不应提交或公开。
 - 本次新增验证针对镜像、部署和 mdBook 构建；上文完整差分与浏览器结果沿用此前验收。没有调用真实上游生成，不能将这次更新视为已修复 cun.ai 的间歇性 HTTP 400。
 
+### 旧角色卡导致白屏的修复（同日）
+
+部署后发现一张旧卡片的内嵌书同时包含 `selectiveLogic` / `selective_logic` 和 `useProbability` / `use_probability`。旧 nast 曾把自身默认字段与 ST 扩展字段同时保存，新版 serde 别名解析因此拒绝整张卡片。`characters.all` 返回的 `{avatar, error}` 又被前端当作正常角色，访问缺失的 `name.slice()` 导致整页渲染失败。此前健康检查及仅使用正常角色的 UI 验收没有覆盖此路径。
+
+现在读取内嵌书时先合并这两组别名，以 ST 字段为准；前端在数据入口规范化角色摘要，错误条目保留文件身份和错误说明，显示“读取失败”，禁用聊天/收藏并排除群组成员候选。
+
+- 新增用例先复现旧卡片解析失败，再验证混合字段、旧字段单独存在、未知扩展保留及无效值仍报错；`cargo test --workspace` 通过。
+- `npm --prefix web run test:characters` 的 3 项检查、TypeScript 检查和 Docker 生产构建通过。
+- `tests/character_library_browser.py --live` 验证混合错误条目、仅错误条目、空列表及本机真实数据，4 个场景通过，无浏览器未捕获异常。真实 3 张角色卡均可读取；截图在 `.cache/character-library-browser/`。
+- 修复镜像 `09c57bb61d22` 已替换运行容器，前端主文件为 `index.a4545acf.js`。更新前后 181 个数据文件的 SHA-256 清单一致。
+
 ## 明确保留的差异与未穷举项
 
 1. **定时 hash 的具体值不同**：ST 对原始有序 JSON 计算 hash，nast 对规范化数据计算。差分仅将 hash 映射到 `world.uid` 身份；start/end/protected 严格比较，原始值保留。直接迁移含活动 timedWorldInfo 的 ST 聊天，不能据此认定计时无缝继承。

@@ -1,18 +1,8 @@
 import { create } from 'zustand';
 import { rpc } from './rpc';
 import { pushToast } from './toasts';
-
-export interface CharacterSummary {
-  avatar: string;
-  /** /thumbnail?file=<avatar> 头像 URL */
-  avatarUrl: string;
-  name: string;
-  description: string;
-  tags: string[];
-  fav: boolean;
-  chat: string | null;
-  error?: string;
-}
+import { normalizeCharacterSummary, type CharacterListEntry, type CharacterSummary } from './lib/character-summary';
+export type { CharacterSummary } from './lib/character-summary';
 
 export interface ChatMessage {
   name: string;
@@ -248,14 +238,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   loadAll: async () => {
     const [characters, settings, groups] = await Promise.all([
-      rpc.call<CharacterSummary[]>('characters.all', {}),
+      rpc.call<CharacterListEntry[]>('characters.all', {}),
       rpc.call<Settings>('settings.get', {}),
       rpc.call<Group[]>('groups.all', {}),
     ]);
-    const withAvatars = characters.map((c) => ({
-      ...c,
-      avatarUrl: `/thumbnail?file=${encodeURIComponent(c.avatar)}`,
-    }));
+    const withAvatars = characters.map(normalizeCharacterSummary);
     set({ characters: withAvatars, settings, groups });
   },
 

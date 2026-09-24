@@ -67,7 +67,8 @@ export function WelcomeScreen({ onOpenSettings }: { onOpenSettings: () => void }
                   key={character.avatar}
                   variant="outline"
                   className="h-auto min-w-0 justify-start gap-3 p-3"
-                  disabled={!connected}
+                  disabled={!connected || Boolean(character.error)}
+                  title={character.error}
                   onClick={() => void selectCharacter(character.avatar).catch(() => {})}
                 >
                   <Avatar className="size-10 shrink-0">
@@ -77,7 +78,7 @@ export function WelcomeScreen({ onOpenSettings }: { onOpenSettings: () => void }
                   <span className="flex min-w-0 flex-1 flex-col gap-1 text-left">
                     <span className="truncate">{character.name}</span>
                     <span className="truncate text-xs font-normal text-muted-foreground">
-                      {character.tags.slice(0, 2).join(' · ') || '开始对话'}
+                      {character.error ? '读取失败' : character.tags.slice(0, 2).join(' · ') || '开始对话'}
                     </span>
                   </span>
                   <ArrowUpRight data-icon="inline-end" />

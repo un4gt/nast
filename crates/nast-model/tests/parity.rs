@@ -69,3 +69,42 @@ fn missing_embedded_extensions_use_st_defaults() {
     assert_eq!(entry.extensions.depth, 4);
     assert_eq!(entry.extensions.group_weight, 100);
 }
+
+#[test]
+fn embedded_book_accepts_mixed_legacy_extension_names() {
+    for extensions in [
+        json!({"selective_logic":0,"selectiveLogic":3,"use_probability":true,"useProbability":false,"vendor":"keep"}),
+        json!({"useProbability":false,"use_probability":true,"selectiveLogic":3,"selective_logic":0,"vendor":"keep"}),
+        json!({"selective_logic":3,"use_probability":false,"vendor":"keep"}),
+    ] {
+        let card = Character::from_card_json(&json!({
+            "spec":"chara_card_v2", "spec_version":"2.0", "data":{
+                "name":"Legacy card", "character_book":{"entries":[{
+                    "keys":["castle"], "enabled":true, "extensions":extensions
+                }]}
+            }
+        })).unwrap();
+        let book = card.data.character_book.as_ref().unwrap();
+        let ext = &book.entries[0].extensions;
+        assert_eq!(ext.selective_logic, 3);
+        assert!(!ext.use_probability);
+        assert_eq!(ext.extra["vendor"], "keep");
+        let world = WorldInfoBook::from_embedded(book).unwrap();
+        assert_eq!(world.entries["0"].selective_logic, 3);
+        assert!(!world.entries["0"].use_probability);
+        let output = serde_json::to_value(ext).unwrap();
+        assert_eq!(output["selectiveLogic"], 3);
+        assert_eq!(output["useProbability"], false);
+        assert!(output.get("selective_logic").is_none());
+        assert!(output.get("use_probability").is_none());
+        Character::from_card_json(&serde_json::to_value(&card).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn invalid_canonical_embedded_extension_is_not_hidden_by_legacy_value() {
+    let result = serde_json::from_value::<nast_model::card::CharacterBookEntry>(json!({
+        "keys":[], "extensions":{"selectiveLogic":"invalid", "selective_logic":0}
+    }));
+    assert!(result.is_err());
+}

@@ -73,7 +73,7 @@ export function GroupSettingsDialog({
   const members = group.members
     .map((a) => characters.find((c) => c.avatar === a))
     .filter(Boolean);
-  const nonMembers = characters.filter((c) => !group.members.includes(c.avatar));
+  const nonMembers = characters.filter((c) => !c.error && !group.members.includes(c.avatar));
 
   const save = async () => {
     setBusy(true);

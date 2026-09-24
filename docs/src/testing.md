@@ -39,6 +39,17 @@ nast 和本地 SillyTavern 各自构造请求，再比较完整 JSON、回复及
 管理和 UI 阶段另做 nast 独立断言。基线验收为 239 项通过；范围与限制见
 `docs/ST_PARITY_IMPLEMENTATION.md`，不代表所有 ST 功能均已对齐。
 
+## 角色库异常回归
+
+```powershell
+npm --prefix web run test:characters
+.cache/st-parity-venv/Scripts/python.exe tests/character_library_browser.py --live
+```
+
+浏览器测试复用前述 Playwright 环境，需启动已构建的 nast（默认端口 8000，
+可用 `--base-url` 修改）。测试模拟正常/错误混合、全部错误和空角色列表；
+`--live` 额外只读检查真实角色库与页面，不修改数据或调用模型。
+
 ## TTS 验收
 
 ```bash

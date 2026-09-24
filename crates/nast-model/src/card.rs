@@ -226,7 +226,7 @@ pub struct CharacterBookEntry {
     pub vectorized: bool,
     #[serde(default)]
     pub use_regex: Option<bool>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_book_extensions")]
     pub extensions: BookEntryExtensions,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -234,6 +234,26 @@ pub struct CharacterBookEntry {
 
 fn default_order() -> i64 {
     100
+}
+
+fn deserialize_book_extensions<'de, D>(deserializer: D) -> Result<BookEntryExtensions, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut value = Value::deserialize(deserializer)?;
+    // Older nast saved both its default snake_case fields and the ST keys in
+    // `extra`. Prefer the ST values before serde aliases detect a duplicate.
+    if let Some(fields) = value.as_object_mut() {
+        for (canonical, legacy) in [
+            ("selectiveLogic", "selective_logic"),
+            ("useProbability", "use_probability"),
+        ] {
+            if let Some(value) = fields.remove(legacy) {
+                fields.entry(canonical).or_insert(value);
+            }
+        }
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 /// ST 数值扩展字段全部放在 entry.extensions（导入时映射为 WIEntry 数值字段）。

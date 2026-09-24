@@ -245,11 +245,11 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
             </div>
             <SidebarMenu>
               {filtered.map((c) => (
-                <SidebarMenuItem key={c.avatar}>
+                <SidebarMenuItem key={c.avatar} title={c.error}>
                   <SidebarMenuButton
                     isActive={activeAvatar === c.avatar}
                     onClick={() => void navigate(() => selectCharacter(c.avatar))}
-                    disabled={!connected || generating}
+                    disabled={!connected || generating || Boolean(c.error)}
                     tooltip={c.name}
                     className="h-16 gap-3 rounded-xl pr-8"
                   >
@@ -266,14 +266,14 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
                     <span className="flex min-w-0 flex-1 flex-col gap-1 group-data-[collapsible=icon]:hidden">
                       <span className="truncate font-medium">{c.name}</span>
                       <span className="truncate text-xs text-muted-foreground">
-                        {c.tags.slice(0, 2).join(' · ') || '角色卡'}
+                        {c.error ? '读取失败' : c.tags.slice(0, 2).join(' · ') || '角色卡'}
                       </span>
                     </span>
                   </SidebarMenuButton>
                   <SidebarMenuAction
                     className="top-5"
                     showOnHover={!c.fav}
-                    disabled={!connected}
+                    disabled={!connected || Boolean(c.error)}
                     aria-label={`${c.fav ? '取消收藏' : '收藏'} ${c.name}`}
                     aria-pressed={c.fav}
                     onClick={() => void toggleFav(c.avatar, c.fav)}
@@ -466,7 +466,7 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
               aria-label="群名称"
             />
             <div className="flex max-h-56 flex-col gap-1 overflow-y-auto rounded-md border p-2">
-              {characters.map((c) => (
+              {characters.filter((c) => !c.error).map((c) => (
                 <label
                   key={c.avatar}
                   className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-accent/50"
@@ -486,7 +486,7 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
                   <span className="truncate">{c.name}</span>
                 </label>
               ))}
-              {characters.length === 0 && (
+              {characters.every((c) => c.error) && (
                 <p className="px-1 text-xs text-muted-foreground">先导入角色卡</p>
               )}
             </div>
