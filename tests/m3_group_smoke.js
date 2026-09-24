@@ -175,10 +175,19 @@ async function main() {
     failures++;
     console.error('FAIL 异常:', e.message);
   } finally {
-    rpc.close();
-    child.kill();
-    mock.close();
-    fs.rmSync(tmp, { recursive: true, force: true });
+    rpc?.close();
+    // Windows keeps the child's working directory locked until it exits.
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      child.kill();
+      await exited;
+    }
+    await new Promise((resolve) => mock.close(resolve));
+    const target = path.resolve(tmp);
+    if (path.dirname(target) !== path.resolve(os.tmpdir()) || !path.basename(target).startsWith('nast-m3-')) {
+      throw new Error('Refusing to remove a directory outside the test fixture');
+    }
+    fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 
   console.log(failures === 0 ? '\nM3 群聊冒烟全部通过' : `\n${failures} 项失败`);

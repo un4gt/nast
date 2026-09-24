@@ -9,6 +9,9 @@ pub use nast_engine::prompt::{AuthorsNote, ExampleBlock, HistoryMessage, InChatI
 
 /// 生成器侧的拼装输入（借用 oai）。
 pub struct BridgeInput<'a> {
+    pub metadata: nast_model::chat::ChatMetadata,
+    pub macro_env: MacroEnv,
+    pub macro_context: std::cell::RefCell<MacroContext>,
     /// 预留：生成器侧直接访问 oai（当前消费者经 session 持有，保留 API 对称）
     #[allow(dead_code)]
     pub oai: &'a OaiSettings,
@@ -42,13 +45,13 @@ fn env_for(input: &BridgeInput) -> MacroEnv {
     MacroEnv {
         user: input.name1.clone(),
         char: input.name2.clone(),
-        group: input.name2.clone(),
+        group: input.macro_env.group.clone(),
         description: input.char_description.clone(),
         personality: input.char_personality.clone(),
         scenario: input.scenario.clone(),
         persona: input.persona_description.clone(),
         outlets: input.outlets.clone(),
-        ..Default::default()
+        ..input.macro_env.clone()
     }
 }
 
@@ -74,31 +77,33 @@ pub fn assemble_with_macros(oai: &OaiSettings, input: &BridgeInput) -> AssembleO
     let env = env_for(input);
     let mut messages = input.messages.clone();
     for m in &mut messages {
-        m.content = substitute_text(&m.content, &env);
+        m.content = input.substitute(&m.content, &env);
     }
     let mut examples = input.message_examples.clone();
     for block in &mut examples {
         for msg in &mut block.messages {
-            msg.2 = substitute_text(&msg.2, &env);
+            msg.2 = input.substitute(&msg.2, &env);
         }
     }
     let ai = AssembleInput {
         oai,
+        macro_env: Some(&input.macro_env),
+        macro_context: Some(&input.macro_context),
         generation_type: input.generation_type,
         name1: &input.name1,
         name2: &input.name2,
         is_group: input.is_group,
-        char_description: substitute_text(&input.char_description, &env),
-        char_personality: substitute_text(&input.char_personality, &env),
-        scenario: substitute_text(&input.scenario, &env),
-        persona_description: substitute_text(&input.persona_description, &env),
+        char_description: input.substitute(&input.char_description, &env),
+        char_personality: input.substitute(&input.char_personality, &env),
+        scenario: input.substitute(&input.scenario, &env),
+        persona_description: input.substitute(&input.persona_description, &env),
         persona_position_in_prompt: input.persona_position_in_prompt,
         world_info_before: input.world_info_before.clone(),
         world_info_after: input.world_info_after.clone(),
         quiet_prompt: String::new(),
         bias: String::new(),
-        system_prompt_override: None,
-        jailbreak_prompt_override: None,
+        system_prompt_override: input.system_prompt_override.as_ref().map(|s| input.substitute(s, &env)),
+        jailbreak_prompt_override: input.jailbreak_prompt_override.as_ref().map(|s| input.substitute(s, &env)),
         messages,
         message_examples: examples,
         pin_examples: input.pin_examples,
@@ -106,8 +111,8 @@ pub fn assemble_with_macros(oai: &OaiSettings, input: &BridgeInput) -> AssembleO
         authors_note: input.authors_note.clone(),
         continue_prefill_assistant: false,
         assistant_prefill: String::new(),
-        cycle_prompt: None,
-        last_role: None,
+        cycle_prompt: input.cycle_prompt.clone(),
+        last_role: input.last_role.clone(),
     };
     assemble(&ai)
 }
@@ -169,24 +174,26 @@ fn bridge_to_input<'a>(oai: &'a OaiSettings, input: &'a BridgeInput) -> Assemble
     let env = env_for(input);
     let mut messages = input.messages.clone();
     for m in &mut messages {
-        m.content = substitute_text(&m.content, &env);
+        m.content = input.substitute(&m.content, &env);
     }
     let mut examples = input.message_examples.clone();
     for block in &mut examples {
         for msg in &mut block.messages {
-            msg.2 = substitute_text(&msg.2, &env);
+            msg.2 = input.substitute(&msg.2, &env);
         }
     }
     AssembleInput {
         oai,
+        macro_env: Some(&input.macro_env),
+        macro_context: Some(&input.macro_context),
         generation_type: input.generation_type,
         name1: &input.name1,
         name2: &input.name2,
         is_group: input.is_group,
-        char_description: substitute_text(&input.char_description, &env),
-        char_personality: substitute_text(&input.char_personality, &env),
-        scenario: substitute_text(&input.scenario, &env),
-        persona_description: substitute_text(&input.persona_description, &env),
+        char_description: input.substitute(&input.char_description, &env),
+        char_personality: input.substitute(&input.char_personality, &env),
+        scenario: input.substitute(&input.scenario, &env),
+        persona_description: input.substitute(&input.persona_description, &env),
         persona_position_in_prompt: input.persona_position_in_prompt,
         world_info_before: input.world_info_before.clone(),
         world_info_after: input.world_info_after.clone(),
@@ -203,5 +210,15 @@ fn bridge_to_input<'a>(oai: &'a OaiSettings, input: &'a BridgeInput) -> Assemble
         assistant_prefill: String::new(),
         cycle_prompt: input.cycle_prompt.clone(),
         last_role: input.last_role.clone(),
+    }
+}
+impl BridgeInput<'_> {
+    fn substitute(&self, text: &str, env: &MacroEnv) -> String {
+        evaluate_macros(text, env, &mut self.macro_context.borrow_mut())
+    }
+    pub fn metadata_after_assembly(&self) -> nast_model::chat::ChatMetadata {
+        let mut metadata = self.metadata.clone();
+        metadata.variables = self.macro_context.borrow().vars.local.clone().into_iter().collect();
+        metadata
     }
 }

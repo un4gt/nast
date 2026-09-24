@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 pub const KEY_CHARA: &str = "chara";
 pub const KEY_CCV3: &str = "ccv3";
+pub mod import;
 
 const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 

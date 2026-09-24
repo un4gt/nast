@@ -25,25 +25,35 @@ pub const SCOPE_CHAT: i64 = 2;
 #[serde(default)]
 pub struct RegexScript {
     pub id: String,
+    #[serde(rename = "scriptName", alias = "script_name")]
     pub script_name: String,
     /// JS 正则语法（Rust 端用 regex crate 解析；不支持的 look-around 记录错误跳过）
+    #[serde(rename = "findRegex", alias = "find_regex")]
     pub find_regex: String,
+    #[serde(rename = "replaceString", alias = "replace_string")]
     pub replace_string: String,
     /// 先移除的子串列表（split(t).join('') 语义）
+    #[serde(rename = "trimStrings", alias = "trim_strings")]
     pub trim_strings: Vec<String>,
     /// placement 数组（RP_*）
     pub placement: Vec<i64>,
     pub disabled: bool,
     /// 仅显示 pass
+    #[serde(rename = "markdownOnly", alias = "markdown_only")]
     pub markdown_only: bool,
     /// 仅 prompt pass
+    #[serde(rename = "promptOnly", alias = "prompt_only")]
     pub prompt_only: bool,
     /// 编辑消息时也运行（改动持久化进保存的消息）
+    #[serde(rename = "runOnEdit", alias = "run_on_edit")]
     pub run_on_edit: bool,
     /// 0/1/2
+    #[serde(rename = "substituteRegex", alias = "substitute_regex")]
     pub substitute_regex: i64,
     /// 距底深度过滤；null = 不限
+    #[serde(rename = "minDepth", alias = "min_depth")]
     pub min_depth: Option<i64>,
+    #[serde(rename = "maxDepth", alias = "max_depth")]
     pub max_depth: Option<i64>,
 }
 

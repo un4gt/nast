@@ -33,6 +33,7 @@ pub struct ChatMetadata {
     pub tainted: bool,
     /// 聊天级世界书名
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "world_info", alias = "world")]
     pub world: Option<String>,
     /// 本聊天绑定的 persona（头像 id；personas.js:934-940）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +54,7 @@ pub struct ChatMetadata {
     pub depth_prompt: Option<crate::card::DepthPrompt>,
     /// WI timed effects
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "timedWorldInfo", alias = "timed_world_info")]
     pub timed_world_info: Option<TimedWorldInfo>,
     /// 聊天作用域正则脚本
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -80,6 +82,7 @@ pub struct ChatMessage {
     pub is_user: bool,
     pub is_system: bool,
     /// ISO 8601（getMessageTimeStamp = toISOString()）
+    #[serde(deserialize_with = "crate::compat::timestamp")]
     pub send_date: String,
     pub mes: String,
     pub extra: MessageExtra,

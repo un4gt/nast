@@ -23,7 +23,7 @@
 //!   解析前后拼接；outlet 条目按 outletName 分桶（{{outlet::name}} 宏消费）；
 //!   atDepth 条目按 (depth, role) 合并、桶内 unshift → 升序 join
 //! - 插入组：groupOverride 优先（order 高者胜），否则 groupWeight 加权随机；
-//!   useGroupScoring 按命中数评分取最高（简化为 order 最高）
+//!   useGroupScoring 按关键词命中数筛选，平分后再按优先项或权重选择。
 
 use crate::macros::{evaluate_macros, MacroContext, MacroEnv};
 use crate::rng;
@@ -68,6 +68,7 @@ impl Default for WiSettings {
 /// 扫描所需的上下文文本源。
 #[derive(Debug, Clone, Default)]
 pub struct ScanSource {
+    pub generation_type: String,
     /// 最近的消息（旧→新；引擎取末尾 depth 条）
     pub chat: Vec<String>,
     /// 各可扫描字段（由条目的 match_* 开关决定是否并入）
@@ -152,6 +153,16 @@ pub fn check_world_info(
     regex_scripts: &[RegexScript],
     max_context: i64,
 ) -> WiResult {
+    check_world_info_with_context(books, settings, source, state, env, regex_scripts, max_context,
+        &std::cell::RefCell::new(MacroContext::default()))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn check_world_info_with_context(
+    books: &WiBooks, settings: &WiSettings, source: &ScanSource, state: &mut WiState,
+    env: &MacroEnv, regex_scripts: &[RegexScript], max_context: i64,
+    context: &std::cell::RefCell<MacroContext>,
+) -> WiResult {
     let mut result = WiResult::default();
 
     // ---------- 1. 组装有序条目（getSortedEntries + 策略） ----------
@@ -186,6 +197,8 @@ pub fn check_world_info(
     // 去重 uid+world
     let mut seen = HashSet::new();
     all.retain(|(w, e)| seen.insert(format!("{w}#{}", e.uid)));
+
+    check_timed_effects(state, &all);
 
     // ---------- 2. delay 层级（4646-4656） ----------
     let mut available_delay_levels: Vec<i64> = all
@@ -241,6 +254,12 @@ pub fn check_world_info(
             if entry.disable {
                 continue;
             }
+            if let Some(triggers) = entry.extra.get("triggers").and_then(serde_json::Value::as_array) {
+                if !triggers.is_empty() && !source.generation_type.is_empty()
+                    && !triggers.iter().any(|trigger| trigger.as_str() == Some(source.generation_type.as_str())) {
+                    continue;
+                }
+            }
 
             // characterFilter（4726-4746）：names/tags 分别判定
             if let Some(cf) = &entry.character_filter {
@@ -260,36 +279,7 @@ pub fn check_world_info(
                 }
             }
 
-            // timed effects 状态更新（对齐 #checkTimedEffectOfType）：
-            // 1) 聊天未推进且非 protected → 删记录（swipe/regen 回滚）
-            // 2) chat_len >= end → 到期：删记录；sticky 到期且 cooldown>0 → 武装 cooldown（protected，同 horizon）
             let entry_hash = string_hash_entry(entry);
-            if let Some(rec) = state.timed.sticky.get(&key).cloned() {
-                if chat_len_le(state, rec.start) && !rec.protected {
-                    state.timed.sticky.remove(&key);
-                }
-            }
-            if let Some(rec) = state.timed.cooldown.get(&key).cloned() {
-                if chat_len_le(state, rec.start) && !rec.protected {
-                    state.timed.cooldown.remove(&key);
-                }
-            }
-            if let Some(rec) = state.timed.sticky.get(&key).cloned() {
-                if rec.hash == entry_hash && state.chat_length >= rec.end {
-                    state.timed.sticky.remove(&key);
-                    if entry.cooldown > 0 {
-                        state.timed.cooldown.insert(
-                            key.clone(),
-                            TimedEffect {
-                                hash: entry_hash,
-                                start: state.chat_length,
-                                end: state.chat_length + entry.cooldown,
-                                protected: true,
-                            },
-                        );
-                    }
-                }
-            }
             let cooldown_active = state
                 .timed
                 .cooldown
@@ -342,12 +332,12 @@ pub fn check_world_info(
                 let scan_text = build_scan_text(entry, source, settings.depth + skew, &recurse_buffer);
                 // key 匹配（constant 条目跳过 key 检查）
                 let primary_ok =
-                    entry.constant || match_keys(&entry.key, &scan_text, entry, settings, env);
+                    entry.constant || match_keys(&entry.key, &scan_text, entry, settings, env, context);
                 if !primary_ok {
                     continue;
                 }
                 if entry.selective && !entry.keysecondary.is_empty() {
-                    if !check_secondary(entry, &scan_text, settings, env) {
+                    if !check_secondary(entry, &scan_text, settings, env, context) {
                         continue;
                     }
                 }
@@ -359,7 +349,15 @@ pub fn check_world_info(
         }
 
         // ---------- 插入组过滤（filterByInclusionGroups，仅本 pass 候选） ----------
-        filter_inclusion_groups(&mut new_entries, settings);
+        filter_inclusion_groups(&mut new_entries, settings, &all_activated, state, &|entry| {
+            let scan = build_scan_text(entry, source, settings.depth + skew, &recurse_buffer);
+            let sensitive = entry.case_sensitive.unwrap_or(settings.case_sensitive);
+            let whole = entry.match_whole_words.unwrap_or(settings.match_whole_words);
+            let primary = entry.key.iter().filter(|key| key_matches(key, &scan, sensitive, whole)).count();
+            let secondary = entry.keysecondary.iter().filter(|key| key_matches(key, &scan, sensitive, whole)).count();
+            if entry.key.is_empty() { return 0; }
+            primary + if entry.selective_logic == 0 || (entry.selective_logic == 3 && secondary == entry.keysecondary.len()) { secondary } else { 0 }
+        });
 
         // ---------- probability + 预算 + 激活（4899-4958） ----------
         let text_to_scan_tokens = tok_cost(&all_activated_text);
@@ -387,7 +385,7 @@ pub fn check_world_info(
                 }
             }
             // 内容宏替换（激活期）
-            let content = substitute_entry(env, &entry.content);
+            let content = substitute_entry(env, context, &entry.content);
             new_content.push_str(&content);
             new_content.push('\n');
             // 预算：累计制 >= 溢出（D5）
@@ -465,7 +463,7 @@ pub fn check_world_info(
     let mut depth_map: BTreeMap<(i64, i64), Vec<String>> = BTreeMap::new();
     let mut outlet_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-    let macro_fn = |s: &str| substitute_entry(env, s);
+    let macro_fn = |s: &str| substitute_entry(env, context, s);
     for (_, entry) in &sorted_final {
         let (pos, at_d) = entry.position.resolve();
         let regex_depth = if pos == 4 {
@@ -533,8 +531,28 @@ pub fn check_world_info(
     result
 }
 
-fn chat_len_le(state: &WiState, start: i64) -> bool {
-    state.chat_length <= start
+/// Evaluate once per generation, before filtering disabled/other-character entries.
+fn check_timed_effects(state: &mut WiState, entries: &[(String, WIEntry)]) {
+    for sticky in [true, false] {
+        let records = if sticky { state.timed.sticky.clone() } else { state.timed.cooldown.clone() };
+        for (key, record) in records {
+            let entry = entries.iter().find(|(_, entry)| string_hash_entry(entry) == record.hash);
+            let rewind = state.chat_length <= record.start && !record.protected;
+            let expired = state.chat_length >= record.end;
+            let invalid = entry.is_some_and(|(_, entry)| if sticky { entry.sticky <= 0 } else { entry.cooldown <= 0 });
+            if rewind || expired || invalid {
+                if sticky { state.timed.sticky.remove(&key); } else { state.timed.cooldown.remove(&key); }
+                if sticky && expired && !rewind && !invalid {
+                    if let Some((world, entry)) = entry.filter(|(_, entry)| entry.cooldown > 0) {
+                        state.timed.cooldown.insert(format!("{world}.{}", entry.uid), TimedEffect {
+                            hash: record.hash, start: state.chat_length,
+                            end: state.chat_length + entry.cooldown, protected: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn sticky_active_for(state: &WiState, world: &str, entry: &WIEntry) -> bool {
@@ -570,11 +588,12 @@ fn arm_timed_effects(state: &mut WiState, world: &str, entry: &WIEntry, entry_ha
                     hash: entry_hash,
                     start: chat_len,
                     end: chat_len + entry.sticky,
-                    protected: true,
+                    protected: false,
                 },
             );
         }
-    } else if entry.cooldown > 0 {
+    }
+    if entry.cooldown > 0 {
         let has = state
             .timed
             .cooldown
@@ -638,7 +657,11 @@ fn sorted_entries(
     let mut out: Vec<(String, WIEntry)> = Vec::new();
     for (name, book) in books {
         for (_uid_s, entry) in &book.entries {
-            out.push((name.to_string(), entry.clone()));
+            let mut entry = entry.clone();
+            entry.scan_hash = None;
+            entry.world = Some(name.to_string());
+            entry.scan_hash = Some(string_hash_entry(&entry));
+            out.push((name.to_string(), entry));
         }
     }
     out.sort_by(|a, b| sort_fn(&a.1, &b.1));
@@ -652,9 +675,8 @@ fn shuffle<T>(v: &mut [T]) {
 }
 
 /// 激活期内容宏替换。
-fn substitute_entry(env: &MacroEnv, text: &str) -> String {
-    let mut macro_ctx = MacroContext::default();
-    evaluate_macros(text, env, &mut macro_ctx)
+fn substitute_entry(env: &MacroEnv, context: &std::cell::RefCell<MacroContext>, text: &str) -> String {
+    evaluate_macros(text, env, &mut context.borrow_mut())
 }
 
 fn parse_decorators(content: &str) -> (String, Option<bool>) {
@@ -699,6 +721,7 @@ fn match_keys(
     entry: &WIEntry,
     settings: &WiSettings,
     env: &MacroEnv,
+    context: &std::cell::RefCell<MacroContext>,
 ) -> bool {
     if keys.is_empty() {
         return false;
@@ -706,7 +729,7 @@ fn match_keys(
     let case_sensitive = entry.case_sensitive.unwrap_or(settings.case_sensitive);
     let whole_words = entry.match_whole_words.unwrap_or(settings.match_whole_words);
     for key in keys {
-        let key = substitute_entry(env, key);
+        let key = substitute_entry(env, context, key);
         if key_matches(&key, scan, case_sensitive, whole_words) {
             return true;
         }
@@ -718,15 +741,8 @@ fn key_matches(key: &str, scan: &str, case_sensitive: bool, whole_words: bool) -
     // /pattern/flags → 正则 key（4762-4772 parseRegexFromString 语义）。
     // 正则 key 不受全局/条目大小写设置影响（覆盖语义），大小写只由自身 flags 决定。
     if key.starts_with('/') {
-        if let Some((pattern, flags)) = parse_regex_key(key) {
-            let pattern = if flags.contains('i') {
-                format!("(?i){pattern}")
-            } else {
-                pattern
-            };
-            return regex::Regex::new(&pattern)
-                .map(|re| re.is_match(scan))
-                .unwrap_or(false);
+        if parse_regex_key(key).is_some() {
+            return crate::regex_engine::ecma_is_match(key, scan).unwrap_or(false);
         }
     }
     let _ = case_sensitive;
@@ -760,7 +776,7 @@ fn parse_regex_key(key: &str) -> Option<(String, String)> {
     if pattern.is_empty() {
         return None;
     }
-    if !flags.chars().all(|c| "imsUux".contains(c)) {
+    if !flags.chars().all(|c| "dgimsuvy".contains(c)) {
         return None;
     }
     Some((pattern.to_string(), flags.to_string()))
@@ -772,6 +788,7 @@ fn check_secondary(
     scan: &str,
     settings: &WiSettings,
     env: &MacroEnv,
+    context: &std::cell::RefCell<MacroContext>,
 ) -> bool {
     let case_sensitive = entry.case_sensitive.unwrap_or(settings.case_sensitive);
     let whole_words = entry.match_whole_words.unwrap_or(settings.match_whole_words);
@@ -779,7 +796,7 @@ fn check_secondary(
         .keysecondary
         .iter()
         .map(|k| {
-            let k = substitute_entry(env, k);
+            let k = substitute_entry(env, context, k);
             key_matches(&k, scan, case_sensitive, whole_words)
         })
         .collect();
@@ -793,8 +810,9 @@ fn check_secondary(
 
 /// 插入组过滤（filterByInclusionGroups，本 pass 候选）：
 /// groupOverride 优先（order 高者胜）；否则 groupWeight 加权随机；
-/// useGroupScoring 退化取 order 最高。free 条目直接通过。
-fn filter_inclusion_groups(candidates: &mut Vec<(String, WIEntry)>, settings: &WiSettings) {
+/// useGroupScoring 先移除低分条目；未启用评分的条目保留参与选择。
+fn filter_inclusion_groups(candidates: &mut Vec<(String, WIEntry)>, settings: &WiSettings,
+    activated: &[(String, WIEntry)], state: &WiState, score: &dyn Fn(&WIEntry) -> usize) {
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
     let mut keep = vec![true; candidates.len()];
     for (i, (_, e)) in candidates.iter().enumerate() {
@@ -805,7 +823,17 @@ fn filter_inclusion_groups(candidates: &mut Vec<(String, WIEntry)>, settings: &W
             }
         }
     }
-    for (_, members) in groups {
+    for (group_name, mut members) in groups {
+        let sticky: Vec<usize> = members.iter().copied().filter(|i|
+            sticky_active_for(state, &candidates[*i].0, &candidates[*i].1)).collect();
+        if !sticky.is_empty() {
+            for i in members { if !sticky.contains(&i) { keep[i] = false; } }
+            continue;
+        }
+        if activated.iter().any(|(_, entry)| entry.group == group_name) {
+            for i in members { keep[i] = false; }
+            continue;
+        }
         if members.len() <= 1 {
             continue;
         }
@@ -813,13 +841,17 @@ fn filter_inclusion_groups(candidates: &mut Vec<(String, WIEntry)>, settings: &W
             || members
                 .iter()
                 .any(|i| candidates[*i].1.use_group_scoring.unwrap_or(false));
-        let winner: Option<usize> = if use_scoring {
-            // 简化：order 最高者为胜（keys 命中数已在扫描期过滤）
-            members
-                .iter()
-                .copied()
-                .max_by_key(|i| candidates[*i].1.order)
-        } else {
+        if use_scoring {
+            let max_score = members.iter().map(|i| score(&candidates[*i].1)).max().unwrap_or(0);
+            members.retain(|i| {
+                let entry = &candidates[*i].1;
+                let retain = !entry.use_group_scoring.unwrap_or(settings.use_group_scoring) || score(entry) == max_score;
+                if !retain { keep[*i] = false; }
+                retain
+            });
+        }
+        if members.len() <= 1 { continue; }
+        let winner: Option<usize> = {
             let override_member = members
                 .iter()
                 .copied()
@@ -851,7 +883,7 @@ fn filter_inclusion_groups(candidates: &mut Vec<(String, WIEntry)>, settings: &W
             }
         };
         for i in members {
-            keep[i] = winner.is_some() && i == winner.unwrap();
+            keep[i] &= winner == Some(i);
         }
     }
     let mut out = Vec::new();
@@ -867,8 +899,9 @@ fn tok_cost(s: &str) -> i64 {
     crate::tokens::count_tokens(s, crate::tokens::resolve_tokenizer("gpt-4o")) as i64
 }
 
-/// entry hash：getStringHash(JSON.stringify(entry)) 等价 —— 用稳定序列化。
+/// Stable identity of normalized entry data; ST's raw JSON field order is not retained.
 fn string_hash_entry(entry: &WIEntry) -> i64 {
+    if let Some(hash) = entry.scan_hash { return hash; }
     // serde 序列化（BTreeMap 字段序稳定）；与 JS 的字段序不同但 hash 失效判定
     // 只要求「同 entry 同 hash、entry 变更后 hash 变」，故实现内自洽即可
     let json = serde_json::to_string(entry).unwrap_or_default();

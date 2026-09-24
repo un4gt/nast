@@ -5,3 +5,7 @@ data/
 refrence/
 *.log
 .DS_Store
+/book
+/.cache/
+/tests/parity/artifacts/
+__pycache__/

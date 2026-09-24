@@ -24,7 +24,14 @@ use crate::state::EventHub;
 use nast_engine::prompt::AssembleOutput;
 
 /// 生成参数。
+pub struct GroupContext {
+    pub group: nast_model::group::Group,
+    pub members: Vec<(nast_engine::group_chat::GroupMember, nast_model::card::Character)>,
+    pub generation_id: i64,
+}
+
 pub struct GenerateParams {
+    pub group: Option<GroupContext>,
     pub generation_type: GenerationType,
     pub avatar: String,
     pub chat_file: String,
@@ -62,6 +69,8 @@ pub struct GenerateSession<'a> {
     pub user: &'a nast_storage::UserData,
     pub hub: &'a EventHub,
     pub oai: OaiSettings,
+    pub shared_settings: &'a tokio::sync::RwLock<Value>,
+    pub global_variables: std::cell::RefCell<serde_json::Map<String, Value>>,
     pub settings_json: &'a serde_json::Value,
     pub provider: Provider,
     pub abort: tokio_util::sync::CancellationToken,
@@ -72,6 +81,27 @@ pub struct GenerateSession<'a> {
 }
 
 impl<'a> GenerateSession<'a> {
+    async fn commit_globals(&self, input: &crate::prompt_bridge::BridgeInput<'_>) -> Result<(), String> {
+        let next = input.macro_context.borrow().vars.global.clone();
+        let previous = self.global_variables.borrow().clone();
+        if next == previous { return Ok(()); }
+        let mut settings = self.shared_settings.write().await;
+        let mut updated = settings.clone();
+        if !updated["extension_settings"].is_object() { updated["extension_settings"] = json!({}); }
+        if !updated["extension_settings"]["variables"].is_object() { updated["extension_settings"]["variables"] = json!({}); }
+        if !updated["extension_settings"]["variables"]["global"].is_object() { updated["extension_settings"]["variables"]["global"] = json!({}); }
+        let target = updated["extension_settings"]["variables"]["global"].as_object_mut().unwrap();
+        for key in previous.keys().chain(next.keys()) {
+            if previous.get(key) != next.get(key) {
+                match next.get(key) { Some(value) => { target.insert(key.clone(), value.clone()); }, None => { target.remove(key); } }
+            }
+        }
+        self.user.save_settings(&updated).map_err(|e| e.to_string())?;
+        *settings = updated;
+        *self.global_variables.borrow_mut() = next;
+        Ok(())
+    }
+
     pub async fn run(&self, params: GenerateParams) -> Result<GenerateResult, String> {
         self.hub.emit(
             "generation_started",
@@ -81,18 +111,20 @@ impl<'a> GenerateSession<'a> {
             "generation_started",
             &json!({"type": params.generation_type.as_str()}),
         );
-        let result = match params.generation_type {
-            GenerationType::Normal | GenerationType::Regenerate | GenerationType::Swipe => {
-                self.run_message_gen(&params).await
-            }
-            GenerationType::Impersonate => self.run_impersonate(&params).await,
-            GenerationType::Quiet => self.run_quiet(&params).await,
-            GenerationType::Continue => self.run_continue(&params).await,
-        };
-        // GENERATION_ENDED（ST 由 hideStopButton 发出）
+        let result = self.run_content(&params).await;
         self.hub.emit("generation_ended", json!({}));
         self.dispatch_plugin("generation_ended", &json!({}));
         result
+    }
+
+    pub(crate) async fn run_content(&self, params: &GenerateParams) -> Result<GenerateResult, String> {
+        match params.generation_type {
+            GenerationType::Normal | GenerationType::Regenerate | GenerationType::Swipe | GenerationType::Continue => {
+                self.run_message_gen(params).await
+            }
+            GenerationType::Impersonate => self.run_impersonate(params).await,
+            GenerationType::Quiet => self.run_quiet(params).await,
+        }
     }
 
     // ---------- 主流程：normal/swipe/regenerate ----------
@@ -100,7 +132,7 @@ impl<'a> GenerateSession<'a> {
     async fn run_message_gen(&self, p: &GenerateParams) -> Result<GenerateResult, String> {
         let gen_started = nast_storage::message_time_stamp();
         let gen_start_instant = std::time::Instant::now();
-        let mut chat = self.user.read_chat(&p.avatar, &p.chat_file).map_err(|e| e.to_string())?;
+        let mut chat = self.read_chat_for(p)?;
         ensure_integrity(&mut chat);
 
         // regenerate：先删最后一条 AI 消息（失败不恢复）
@@ -116,7 +148,7 @@ impl<'a> GenerateSession<'a> {
 
         // normal：sendMessageAsUser —— 用户消息先落盘（无 swipes）
         if p.generation_type == GenerationType::Normal && !p.user_message.is_empty() {
-            let metadata = self.current_chat_metadata(&p.avatar, &p.chat_file);
+            let metadata = self.read_chat_for(p).ok().map(|c| c.metadata());
             let user_name = metadata
                 .map(|m| self.resolve_persona(&m).name)
                 .unwrap_or_else(|| "User".into());
@@ -138,6 +170,10 @@ impl<'a> GenerateSession<'a> {
             }
             // 插件钩子：user_input 可改写用户消息
             let user_text = self.transform_or(&"user_input", &json!({"text": effective}), &effective);
+            let scripts = self.collect_regex_scripts(&p.character, &chat.metadata());
+            let user_text = nast_engine::regex_engine::get_regexed_string(&user_text,
+                nast_model::regex_script::RP_USER_INPUT, &scripts, &Default::default(),
+                &|text| crate::prompt_bridge::substitute_basic(text, &user_name, &p.character.name));
             let msg = Msg {
                 name: user_name,
                 is_user: true,
@@ -149,7 +185,7 @@ impl<'a> GenerateSession<'a> {
             };
             let v = serde_json::to_value(&msg).map_err(|e| e.to_string())?;
             chat.0.push(v);
-            self.save_chat(&p.avatar, &p.chat_file, &chat)?;
+            self.save_chat_for(p, &chat)?;
             let chat_id = chat.0.len() as i64 - 1;
             self.hub.emit("message_sent", json!(chat_id));
             self.hub.emit("user_message_rendered", json!(chat_id));
@@ -168,9 +204,19 @@ impl<'a> GenerateSession<'a> {
 
         // 拼装
         let input = self.build_assemble_input(p, &prompt_history);
-        let assembled = crate::prompt_bridge::assemble_with_macros(&self.oai, &input);
+        let continuing = p.generation_type == GenerationType::Continue;
+        let prior = if continuing { Some(prompt_history.last().ok_or("nothing to continue")?) } else { None };
+        let use_prefill = continuing && self.oai.continue_prefill && self.oai.chat_completion_source == "claude";
+        let assembled = if let Some(prior) = prior {
+            if use_prefill { crate::prompt_bridge::assemble_continue_prefill(&self.oai, &input, &prior.mes, "assistant") }
+            else { crate::prompt_bridge::assemble_continue_nudge(&self.oai, &input, &prior.mes) }
+        } else { crate::prompt_bridge::assemble_with_macros(&self.oai, &input) };
+        if let Some(error) = &assembled.error { return Err(error.clone()); }
         // 插件钩子：prompt_built 可整体重写拼装消息
         let assembled = apply_prompt_plugin(self.plugins, assembled);
+        chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
+        self.commit_globals(&input).await?;
+        self.save_chat_for(p, &chat)?;
 
         // provider 请求
         let provider_msgs: Vec<ProviderMessage> = assembled
@@ -192,19 +238,19 @@ impl<'a> GenerateSession<'a> {
             presence_penalty: self.oai.presence_penalty,
             max_tokens: self.oai.openai_max_tokens,
             stop: self.stopping_strings(&input.name1, &char_name, 4),
-            stream: true,
-            assistant_prefill: None,
+            stream: self.oai.stream_openai,
+            assistant_prefill: if use_prefill { prior.map(|message| format!("{}{}", message.mes, self.oai.continue_postfix)) } else { None },
             use_sysprompt: true,
             extra_headers: crate::connection::extra_headers(&self.oai),
             extra_body: crate::connection::extra_body(&self.oai),
         };
 
         // 流式接收
-        let stream = self
-            .provider
-            .generate_stream(&gen_req)
-            .await
-            .map_err(|e| e.to_string())?;
+        let stream = tokio::select! {
+            biased;
+            _ = self.abort.cancelled() => return Ok(GenerateResult { text: String::new(), saved: false }),
+            result = self.provider.generate_stream(&gen_req) => result.map_err(|e| e.to_string())?,
+        };
         tokio::pin!(stream);
 
         let mut streamed = String::new();
@@ -212,11 +258,12 @@ impl<'a> GenerateSession<'a> {
         let mut reasoning_started: Option<std::time::Instant> = None;
         let mut first_token_at: Option<std::time::Instant> = None;
         let mut errored: Option<String> = None;
-        while let Some(ev) = stream.next().await {
-            if self.abort.is_cancelled() {
-                // 停止：保留半截文本并落盘（ST stopGeneration 行为）
-                break;
-            }
+        loop {
+            let ev = tokio::select! {
+                biased;
+                _ = self.abort.cancelled() => break,
+                event = stream.next() => match event { Some(event) => event, None => break },
+            };
             match ev {
                 Ok(StreamEvent::Token(t)) => {
                     if first_token_at.is_none() {
@@ -258,7 +305,7 @@ impl<'a> GenerateSession<'a> {
         }
 
         // auto_parse：从正文剥离 <think>…</think> 进 reasoning（reasoning.js:1517+）
-        let auto_parse = self.power_bool("reasoning", "auto_parse", true);
+        let auto_parse = self.power_bool("reasoning", "auto_parse", false);
         let mut reasoning = reasoning_streamed;
         let mut streamed = streamed;
         if auto_parse {
@@ -280,7 +327,7 @@ impl<'a> GenerateSession<'a> {
         // cleanUpMessage 管线（script.js:6383-6533）：停止串剥离/正则默认 pass/
         // 名字清理/endoftext 截断/fixMarkdown
         let metadata_for_scripts = self
-            .current_chat_metadata(&p.avatar, &p.chat_file)
+            .read_chat_for(p).ok().map(|c| c.metadata())
             .unwrap_or_default();
         let scripts_for_cleanup =
             self.collect_regex_scripts(&p.character, &metadata_for_scripts);
@@ -306,7 +353,7 @@ impl<'a> GenerateSession<'a> {
                 ..Default::default()
             };
             let metadata = self
-                .current_chat_metadata(&p.avatar, &p.chat_file)
+                .read_chat_for(p).ok().map(|c| c.metadata())
                 .unwrap_or_default();
             let scripts = self.collect_regex_scripts(&p.character, &metadata);
             nast_engine::regex_engine::get_regexed_string(
@@ -323,6 +370,27 @@ impl<'a> GenerateSession<'a> {
         // 落盘：saveReply 语义
         let now = nast_storage::message_time_stamp();
         match p.generation_type {
+            GenerationType::Continue => {
+                let last = chat.0.last_mut().ok_or("nothing to continue")?;
+                let mut message: Msg = serde_json::from_value(last.clone()).map_err(|e| e.to_string())?;
+                if !message.mes.ends_with(' ') { message.mes.push_str(&self.oai.continue_postfix); }
+                message.mes.push_str(&streamed);
+                // Render from the full updated text; stale display_text must not hide the continuation.
+                message.extra.display_text = None;
+                if !reasoning.is_empty() {
+                    let previous = message.extra.reasoning.take().unwrap_or_default();
+                    message.extra.reasoning = Some(format!("{previous}{reasoning}"));
+                }
+                message.gen_finished = Some(now.clone());
+                message.extra.gen_finished = Some(now.clone());
+                let swipe = message.swipe_id.unwrap_or(0).max(0) as usize;
+                let swipes = message.swipes.get_or_insert_with(|| vec![message.mes.clone()]);
+                if let Some(text) = swipes.get_mut(swipe) { *text = message.mes.clone(); }
+                if let Some(info) = message.swipe_info.as_mut().and_then(|infos| infos.get_mut(swipe)) {
+                    info.gen_finished = Some(now.clone()); info.extra = message.extra.clone();
+                }
+                *last = json!(message);
+            }
             GenerationType::Swipe => {
                 // ST swipe() 语义：swipe_id 前进到最后（追加新 swipe 槽位），
                 // 生成结果写入该槽位。已有 swipes 时 swipe_id = swipes.len()
@@ -334,11 +402,15 @@ impl<'a> GenerateSession<'a> {
                 let swipe_id = swipes.len(); // 新槽位（追加）
                 swipes.push(streamed.clone());
                 let mut extra = msg.extra.clone();
-                extra.api = Some("openai".into());
+                extra.reasoning = None;
+                extra.reasoning_duration = None;
+                extra.reasoning_type = None;
+                extra.api = Some(self.oai.chat_completion_source.clone());
                 extra.model = Some(crate::connection::model_for(&self.oai));
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
                 extra.display_text = Some(display_text.clone());
+                // A new candidate belongs to the original group batch (ST saveReply).
                 if !reasoning.is_empty() {
                     extra.reasoning = Some(reasoning.clone());
                     extra.reasoning_duration = reasoning_duration;
@@ -355,6 +427,7 @@ impl<'a> GenerateSession<'a> {
                 };
                 infos.push(swipe_info);
                 let mut new_msg = msg;
+                new_msg.extra = extra;
                 new_msg.swipes = Some(swipes);
                 new_msg.swipe_info = Some(infos);
                 new_msg.swipe_id = Some(swipe_id as i64);
@@ -367,11 +440,12 @@ impl<'a> GenerateSession<'a> {
             _ => {
                 // normal/regenerate：新消息 + setFirstSwipe 镜像
                 let mut extra = MessageExtra::default();
-                extra.api = Some("openai".into());
+                extra.api = Some(self.oai.chat_completion_source.clone());
                 extra.model = Some(crate::connection::model_for(&self.oai));
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
                 extra.display_text = Some(display_text.clone());
+                if let Some(group) = &p.group { extra.gen_id = Some(json!(group.generation_id)); }
                 if !reasoning.is_empty() {
                     extra.reasoning = Some(reasoning.clone());
                     extra.reasoning_duration = reasoning_duration;
@@ -382,6 +456,8 @@ impl<'a> GenerateSession<'a> {
                 }
                 let msg = Msg {
                     name: char_name.clone(),
+                    original_avatar: p.is_group.then(|| p.avatar.clone()),
+                    force_avatar: p.is_group.then(|| format!("/thumbnail?file={}", p.avatar)),
                     is_user: false,
                     is_system: false,
                     send_date: now.clone(),
@@ -404,7 +480,7 @@ impl<'a> GenerateSession<'a> {
                 chat.0.push(v);
             }
         }
-        self.save_chat(&p.avatar, &p.chat_file, &chat)?;
+        self.save_chat_for(p, &chat)?;
         let chat_id = chat.0.len() as i64 - 1;
         self.hub.emit("message_received", json!(chat_id));
         self.hub.emit("character_message_rendered", json!(chat_id));
@@ -415,7 +491,7 @@ impl<'a> GenerateSession<'a> {
     // ---------- impersonate：不落消息 ----------
 
     async fn run_impersonate(&self, p: &GenerateParams) -> Result<GenerateResult, String> {
-        let chat = self.user.read_chat(&p.avatar, &p.chat_file).map_err(|e| e.to_string())?;
+        let mut chat = self.read_chat_for(p)?;
         let history: Vec<Msg> = chat
             .0
             .iter()
@@ -429,6 +505,10 @@ impl<'a> GenerateSession<'a> {
             crate::prompt_bridge::substitute_basic(&self.oai.impersonation_prompt, &input.name1, &p.character.name)
         };
         let assembled = crate::prompt_bridge::assemble_impersonate(&self.oai, &input, &impersonation_prompt);
+        if let Some(error) = &assembled.error { return Err(error.clone()); }
+        chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
+        self.commit_globals(&input).await?;
+        self.save_chat_for(p, &chat)?;
         let text = self.call_provider(&assembled, None).await?;
         // cleanUpMessage（isImpersonate：USER_INPUT 正则 pass + 停止串剥离）
         let metadata = chat.metadata();
@@ -449,7 +529,7 @@ impl<'a> GenerateSession<'a> {
     // ---------- quiet：不落消息不流式 ----------
 
     async fn run_quiet(&self, p: &GenerateParams) -> Result<GenerateResult, String> {
-        let chat = self.user.read_chat(&p.avatar, &p.chat_file).map_err(|e| e.to_string())?;
+        let mut chat = self.read_chat_for(p)?;
         let history: Vec<Msg> = chat
             .0
             .iter()
@@ -458,83 +538,88 @@ impl<'a> GenerateSession<'a> {
             .collect();
         let input = self.build_assemble_input(p, &history);
         let assembled = crate::prompt_bridge::assemble_quiet(&self.oai, &input, &p.user_message);
+        if let Some(error) = &assembled.error { return Err(error.clone()); }
+        chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
+        self.commit_globals(&input).await?;
+        self.save_chat_for(p, &chat)?;
         let text = self.call_provider(&assembled, None).await?;
         Ok(GenerateResult { text, saved: false })
     }
 
-    // ---------- continue：nudge / prefill ----------
-
-    async fn run_continue(&self, p: &GenerateParams) -> Result<GenerateResult, String> {
-        let mut chat = self.user.read_chat(&p.avatar, &p.chat_file).map_err(|e| e.to_string())?;
-        ensure_integrity(&mut chat);
-        let history: Vec<Msg> = chat
-            .0
-            .iter()
-            .skip(1)
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-            .collect();
-        let last = history.last().ok_or("nothing to continue")?.clone();
-        let use_prefill = self.oai.continue_prefill && self.oai.chat_completion_source == "claude";
-
-        let input = self.build_assemble_input(p, &history);
-        let assembled = if use_prefill {
-            crate::prompt_bridge::assemble_continue_prefill(
-                &self.oai,
-                &input,
-                &last.mes,
-                "assistant",
-            )
-        } else {
-            crate::prompt_bridge::assemble_continue_nudge(&self.oai, &input, &last.mes)
-        };
-
-        let prefill = if use_prefill {
-            let postfix = &self.oai.continue_postfix;
-            Some(format!("{}{postfix}", last.mes))
-        } else {
-            None
-        };
-        let text = self.call_provider(&assembled, prefill.as_deref()).await?;
-        let full = if use_prefill {
-            // prefill 模式：新文本接在被续消息后
-            format!("{}{}", last.mes, text)
-        } else {
-            last.mes.clone()
-        };
-
-        // 更新最后一条消息（appendFinal）
-        if let Some(last_v) = chat.0.last_mut() {
-            let mut msg: Msg =
-                serde_json::from_value(last_v.clone()).map_err(|e| e.to_string())?;
-            let now = nast_storage::message_time_stamp();
-            msg.mes = full;
-            msg.extra.gen_finished = Some(now);
-            *last_v = serde_json::to_value(&msg).map_err(|e| e.to_string())?;
-        }
-        self.save_chat(&p.avatar, &p.chat_file, &chat)?;
-        self.hub
-            .emit("message_received", json!(chat.0.len() as i64 - 1));
-        Ok(GenerateResult { text, saved: true })
-    }
 
     // ---------- 公共 ----------
 
     fn build_assemble_input<'b>(
-        &'b self,
-        p: &'b GenerateParams,
-        history: &'b [Msg],
+        &'b self, p: &'b GenerateParams, history: &'b [Msg],
     ) -> crate::prompt_bridge::BridgeInput<'b> {
-        // 正则引擎（M3）：脚本来源 = 全局(extension_settings.regex) + 角色内嵌 + 聊天级
-        let metadata = self
-            .current_chat_metadata(&p.avatar, &p.chat_file)
-            .unwrap_or_default();
-        let regex_scripts = self.collect_regex_scripts(&p.character, &metadata);
+        let metadata = self.read_chat_for(p).ok().map(|c| c.metadata()).unwrap_or_default();
+        self.build_with_metadata(p, history, metadata)
+    }
+
+    pub(crate) fn build_with_metadata<'b>(
+        &'b self, p: &'b GenerateParams, history: &'b [Msg],
+        mut metadata: nast_model::chat::ChatMetadata,
+    ) -> crate::prompt_bridge::BridgeInput<'b> {
+        let mut character = p.character.clone();
+        if let Some(context) = &p.group {
+            if context.group.generation_mode != 0 {
+                let join = |field, getter| nast_engine::group_chat::append_field(
+                    &context.group, &context.members, &p.avatar, field, getter);
+                character.data.description = join("Description", |c| &c.data.description);
+                character.data.personality = join("Personality", |c| &c.data.personality);
+                character.data.scenario = join("Scenario", |c| &c.data.scenario);
+                character.data.mes_example = join("Example Messages", |c| &c.data.mes_example);
+                character.data.extensions.depth_prompt = None;
+            }
+        }
+        if let Some(scenario) = metadata.scenario.as_ref().filter(|s| !s.is_empty()) {
+            character.data.scenario = scenario.clone();
+        }
+        if let Some(examples) = metadata.mes_example.as_ref().filter(|s| !s.is_empty()) {
+            character.data.mes_example = examples.clone();
+        }
+        let world_config = nast_model::settings::world_info_view(self.settings_json);
+        let regex_scripts = self.collect_regex_scripts(&character, &metadata);
         let total = history.len();
 
         // persona 解析（服务端；chat 绑定 > 默认）
         let persona = self.resolve_persona(&metadata);
         let name1 = persona.name.clone();
-        let name2 = p.character.name.clone();
+        let name2 = character.name.clone();
+
+        let mut macro_env = nast_engine::macros::MacroEnv {
+            user: name1.clone(), char: name2.clone(),
+            group: p.group.as_ref().map(|g| g.members.iter().map(|(m,_)| m.name.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_else(|| name2.clone()),
+            group_not_muted: p.group.as_ref().map(|g| g.members.iter().filter(|(m,_)| !g.group.disabled_members.contains(&m.avatar))
+                .map(|(m,_)| m.name.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+            not_char: p.group.as_ref().map(|g| g.members.iter().filter(|(m,_)| m.avatar != p.avatar)
+                .map(|(m,_)| m.name.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
+            description: character.data.description.clone(),
+            personality: character.data.personality.clone(), scenario: character.data.scenario.clone(),
+            persona: persona.description.clone(), char_prompt: character.data.system_prompt.clone(),
+            char_instruction: character.data.post_history_instructions.clone(),
+            char_version: character.data.character_version.clone(),
+            creator_notes: character.data.creator_notes.clone(),
+            mes_examples_raw: character.data.mes_example.clone(),
+            model: crate::connection::model_for(&self.oai), outlets: Default::default(),
+            ..Default::default()
+        };
+        let mut macro_context = nast_engine::macros::MacroContext {
+            input: p.user_message.clone(), chat_length: history.len(),
+            max_context_tokens: self.oai.openai_max_context,
+            max_response_tokens: self.oai.openai_max_tokens,
+            max_prompt_tokens: self.oai.openai_max_context - self.oai.openai_max_tokens,
+            last_message: history.last().map(|m| m.mes.clone()).unwrap_or_default(),
+            last_user_message: history.iter().rev().find(|m| m.is_user).map(|m| m.mes.clone()).unwrap_or_default(),
+            last_char_message: history.iter().rev().find(|m| !m.is_user).map(|m| m.mes.clone()).unwrap_or_default(),
+            last_swipe_id: history.last().and_then(|m| m.swipe_id),
+            current_swipe_id: history.last().and_then(|m| m.swipe_id),
+            outlets: Default::default(), ..Default::default()
+        };
+        macro_context.vars.local = metadata.variables.clone().into_iter().collect();
+        macro_context.vars.global = self.global_variables.borrow().clone();
+        let macro_context = std::cell::RefCell::new(macro_context);
+
 
         let messages: Vec<HistoryMessage> = history
             .iter()
@@ -561,6 +646,18 @@ impl<'a> GenerateSession<'a> {
                 let mut content = nast_engine::regex_engine::get_regexed_string(
                     &m.mes, placement, &regex_scripts, &params, &macro_fn,
                 );
+                let is_prefix = p.generation_type == GenerationType::Continue && idx + 1 == total;
+                let reasoning = m.extra.reasoning.as_deref().unwrap_or("");
+                let reasoning_enabled = self.power_bool("reasoning", "add_to_prompts", false);
+                let limit = self.settings_json.pointer("/power_user/reasoning/max_additions").and_then(Value::as_u64).unwrap_or(1) as usize;
+                let newer_reasoning = history.iter().skip(idx + 1).filter(|message| message.extra.reasoning.as_ref().is_some_and(|r| !r.is_empty())).count();
+                if !reasoning.is_empty() && (is_prefix || (reasoning_enabled && newer_reasoning < limit)) {
+                    let option = |key: &str, fallback: &str| self.settings_json.get("power_user")
+                        .and_then(|power| power.get("reasoning")).and_then(|settings| settings.get(key))
+                        .and_then(Value::as_str).unwrap_or(fallback).to_string();
+                    content = format!("{}{}{}{}{}", option("prefix", "<think>"), reasoning,
+                        option("suffix", "</think>"), option("separator", "\n"), content);
+                }
                 // names_behavior CONTENT（2）：所有人加前缀；DEFAULT（0）：仅群/强制头像
                 let names_behavior = self.oai.character_names_behavior;
                 let is_narrator = m.extra.kind.as_deref() == Some("narrator");
@@ -611,13 +708,11 @@ impl<'a> GenerateSession<'a> {
         }
         // 角色内嵌书 + charLore 辅助书
         let mut char_book_names: Vec<String> = Vec::new();
-        if let Some(name) = &p.character.data.extensions.world {
+        if let Some(name) = &character.data.extensions.world {
             char_book_names.push(name.clone());
         }
-        if let Some(char_lore) = self
-            .settings_json
-            .get("world_info")
-            .and_then(|w| w.get("char_lore"))
+        if let Some(char_lore) = world_config
+            .get("char_lore")
             .and_then(|v| v.as_array())
         {
             let avatar_key = p.avatar.trim_end_matches(".png").to_string();
@@ -642,10 +737,8 @@ impl<'a> GenerateSession<'a> {
             }
         }
         // 全局激活书
-        if let Some(globals) = self
-            .settings_json
-            .get("world_info")
-            .and_then(|w| w.get("global_select"))
+        if let Some(globals) = world_config
+            .get("global_select")
             .or_else(|| {
                 self.settings_json
                     .get("world_info")
@@ -694,22 +787,12 @@ impl<'a> GenerateSession<'a> {
             } else {
                 String::new()
             };
-            let env = nast_engine::macros::MacroEnv {
-                user: name1.clone(),
-                char: name2.clone(),
-                group: name2.clone(),
-                description: p.character.data.description.clone(),
-                personality: p.character.data.personality.clone(),
-                scenario: p.character.data.scenario.clone(),
-                persona: persona.description.clone(),
-                creator_notes: p.character.data.creator_notes.clone(),
-                ..Default::default()
-            };
             let scan_source = nast_engine::world_info::ScanSource {
+                generation_type: p.generation_type.as_str().into(),
                 chat: history.iter().map(|m| m.mes.clone()).collect(),
                 persona_description: persona.description.clone(),
-                char_description: p.character.data.description.clone(),
-                char_personality: p.character.data.personality.clone(),
+                char_description: character.data.description.clone(),
+                char_personality: character.data.personality.clone(),
                 char_depth_prompt: p
                     .character
                     .data
@@ -718,10 +801,10 @@ impl<'a> GenerateSession<'a> {
                     .as_ref()
                     .map(|d| d.prompt.clone())
                     .unwrap_or_default(),
-                scenario: p.character.data.scenario.clone(),
-                creator_notes: p.character.data.creator_notes.clone(),
+                scenario: character.data.scenario.clone(),
+                creator_notes: character.data.creator_notes.clone(),
                 char_file: p.avatar.trim_end_matches(".png").to_string(),
-                char_tags: p.character.data.tags.clone(),
+                char_tags: character.data.tags.clone(),
                 extra_scan,
             };
             if any_books {
@@ -755,13 +838,11 @@ impl<'a> GenerateSession<'a> {
                     character_lore: char_refs,
                     global_lore: global_refs,
                 };
-                let wi = nast_engine::world_info::check_world_info(
-                    &books, &wi_settings, &scan_source, &mut state, &env, &regex_scripts,
-                    max_context,
+                let wi = nast_engine::world_info::check_world_info_with_context(
+                    &books, &wi_settings, &scan_source, &mut state, &macro_env, &regex_scripts,
+                    max_context, &macro_context,
                 );
-                let mut metadata_to_save = metadata.clone();
-                metadata_to_save.timed_world_info = Some(timed);
-                self.save_chat_metadata(&p.avatar, &p.chat_file, &metadata_to_save);
+                metadata.timed_world_info = Some(timed);
                 wi_before = wi.world_info_before;
                 wi_after = wi.world_info_after;
                 an_top = wi.an_top;
@@ -807,7 +888,7 @@ impl<'a> GenerateSession<'a> {
 
         // ---------- 示例区：EM 块前后拼接（before 逆序 prepend / after append） ----------
         let mut message_examples =
-            parse_examples(&p.character.data.mes_example, &name1, &name2);
+            parse_examples(&character.data.mes_example, &name1, &name2);
         for (pos, blocks) in em_blocks {
             if pos == 0 {
                 for b in blocks.into_iter().rev() {
@@ -820,6 +901,15 @@ impl<'a> GenerateSession<'a> {
 
         // ---------- 注入集合 ----------
         let mut all_injections = build_injections(p);
+        if let Some(context) = &p.group {
+            if context.group.generation_mode != 0 {
+                all_injections.clear();
+                for (depth, role, content) in nast_engine::group_chat::group_depth_prompts_for(&context.group, &context.members, Some(&p.avatar)) {
+                    all_injections.push(InChatInjection { content, depth,
+                        role: match role.as_str() { "user"=>1, "assistant"=>2, _=>0 }, injection_order:100 });
+                }
+            }
+        }
         all_injections.extend(wi_depth_injections);
         // AN 聊天内深度（position 1）
         if let Some(an) = &an_note {
@@ -882,15 +972,20 @@ impl<'a> GenerateSession<'a> {
             }
         });
 
+        macro_env.outlets = outlets.clone();
+        macro_context.borrow_mut().outlets = outlets.clone();
         crate::prompt_bridge::BridgeInput {
+            metadata,
+            macro_env,
+            macro_context,
             oai: &self.oai,
             generation_type: p.generation_type.as_str(),
             name1: name1,
             name2: name2,
             is_group: p.is_group,
-            char_description: p.character.data.description.clone(),
-            char_personality: p.character.data.personality.clone(),
-            scenario: p.character.data.scenario.clone(),
+            char_description: character.data.description.clone(),
+            char_personality: character.data.personality.clone(),
+            scenario: character.data.scenario.clone(),
             persona_description,
             persona_position_in_prompt,
             world_info_before: wi_before,
@@ -902,11 +997,11 @@ impl<'a> GenerateSession<'a> {
             authors_note,
             outlets,
             system_prompt_override: {
-                let sp = &p.character.data.system_prompt;
+                let sp = &character.data.system_prompt;
                 if !sp.is_empty() { Some(sp.clone()) } else { None }
             },
             jailbreak_prompt_override: {
-                let phi = &p.character.data.post_history_instructions;
+                let phi = &character.data.post_history_instructions;
                 if !phi.is_empty() { Some(phi.clone()) } else { None }
             },
             cycle_prompt: None,
@@ -919,6 +1014,7 @@ impl<'a> GenerateSession<'a> {
         assembled: &AssembleOutput,
         prefill: Option<&str>,
     ) -> Result<String, String> {
+        if let Some(error) = &assembled.error { return Err(error.clone()); }
         let provider_msgs: Vec<ProviderMessage> = assembled
             .chat
             .iter()
@@ -943,80 +1039,11 @@ impl<'a> GenerateSession<'a> {
             extra_headers: crate::connection::extra_headers(&self.oai),
             extra_body: crate::connection::extra_body(&self.oai),
         };
-        self.provider.generate(&gen_req).await.map_err(|e| e.to_string())
-    }
-
-    /// 流式调用 provider：逐 token 广播（群聊逐字渲染用）；中止保留半截文本。
-    pub async fn call_provider_stream(
-        &self,
-        assembled: &AssembleOutput,
-    ) -> Result<String, String> {
-        let provider_msgs: Vec<ProviderMessage> = assembled
-            .chat
-            .iter()
-            .map(|m| ProviderMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-                name: m.name.clone(),
-            })
-            .collect();
-        let gen_req = GenRequest {
-            messages: provider_msgs,
-            model: crate::connection::model_for(&self.oai),
-            temperature: self.oai.temperature,
-            top_p: self.oai.top_p,
-            frequency_penalty: self.oai.frequency_penalty,
-            presence_penalty: self.oai.presence_penalty,
-            max_tokens: self.oai.openai_max_tokens,
-            stop: vec![],
-            stream: true,
-            assistant_prefill: None,
-            use_sysprompt: true,
-            extra_headers: crate::connection::extra_headers(&self.oai),
-            extra_body: crate::connection::extra_body(&self.oai),
-        };
-        let stream = self
-            .provider
-            .generate_stream(&gen_req)
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::pin!(stream);
-        let mut streamed = String::new();
-        let mut errored: Option<String> = None;
-        while let Some(ev) = stream.next().await {
-            if self.abort.is_cancelled() {
-                break;
-            }
-            match ev {
-                Ok(StreamEvent::Token(t)) => {
-                    streamed.push_str(&t);
-                    if let Ok(mut p) = self.progress.lock() {
-                        *p = streamed.clone();
-                    }
-                    self.hub.emit("stream_token_received", json!({"text": t}));
-                }
-                Ok(StreamEvent::Reasoning(r)) => {
-                    self.hub.emit("stream_reasoning_received", json!({"text": r}));
-                }
-                Ok(StreamEvent::Error(e)) => {
-                    errored = Some(e);
-                    break;
-                }
-                Ok(StreamEvent::Done) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    errored = Some(e.to_string());
-                    break;
-                }
-            }
+        tokio::select! {
+            biased;
+            _ = self.abort.cancelled() => Err("generation cancelled".into()),
+            result = self.provider.generate(&gen_req) => result.map_err(|e| e.to_string()),
         }
-        if let Some(e) = errored {
-            self.hub.emit("toast", json!({"message": e, "type": "error"}));
-            if streamed.is_empty() {
-                return Err(e);
-            }
-        }
-        Ok(streamed)
     }
 
     /// 派发插件事件（无转换返回）。
@@ -1036,6 +1063,17 @@ impl<'a> GenerateSession<'a> {
         fallback.to_string()
     }
 
+    fn read_chat_for(&self, p: &GenerateParams) -> Result<ChatFile, String> {
+        let result = if p.is_group { self.user.read_group_chat(&p.chat_file) }
+            else { self.user.read_chat(&p.avatar, &p.chat_file) };
+        result.map_err(|e| e.to_string())
+    }
+
+    fn save_chat_for(&self, p: &GenerateParams, chat: &ChatFile) -> Result<(), String> {
+        if p.is_group { self.user.save_group_chat(&p.chat_file, chat, false).map_err(|e| e.to_string()) }
+        else { self.save_chat(&p.avatar, &p.chat_file, chat) }
+    }
+
     fn save_chat(&self, avatar: &str, file: &str, chat: &ChatFile) -> Result<(), String> {
         self.user
             .save_chat(avatar, file, chat, false)
@@ -1044,26 +1082,6 @@ impl<'a> GenerateSession<'a> {
 
     fn emit_message_deleted(&self, at: usize) {
         self.hub.emit("message_deleted", json!(at));
-    }
-
-    /// 读当前聊天的 chat_metadata。
-    pub fn current_chat_metadata(
-        &self,
-        avatar: &str,
-        file: &str,
-    ) -> Option<nast_model::chat::ChatMetadata> {
-        self.user.read_chat(avatar, file).ok().map(|c| c.metadata())
-    }
-
-    /// 仅保存聊天元数据（保留消息不变）。
-    fn save_chat_metadata(&self, avatar: &str, file: &str, metadata: &nast_model::chat::ChatMetadata) {
-        if let Ok(mut chat) = self.user.read_chat(avatar, file) {
-            if let Some(header) = chat.0.first_mut() {
-                header["chat_metadata"] =
-                    serde_json::to_value(metadata).unwrap_or_else(|_| json!({}));
-                let _ = self.user.save_chat(avatar, file, &chat, false);
-            }
-        }
     }
 
     /// 解析 persona（personas.js：chat_metadata.persona 绑定 > power_user.default_persona；
@@ -1220,36 +1238,14 @@ impl<'a> GenerateSession<'a> {
         character: &nast_model::card::Character,
         metadata: &nast_model::chat::ChatMetadata,
     ) -> Vec<nast_model::regex_script::RegexScript> {
-        let mut out: Vec<nast_model::regex_script::RegexScript> = Vec::new();
-        // 全局：extension_settings.regex
-        if let Some(list) = self
-            .settings_json
-            .get("extension_settings")
-            .and_then(|e| e.get("regex"))
-            .and_then(|v| v.as_array())
-        {
-            for s in list {
-                if let Ok(script) =
-                    serde_json::from_value::<nast_model::regex_script::RegexScript>(s.clone())
-                {
-                    out.push(script);
-                }
-            }
-        }
-        // 角色内嵌：data.extensions.regex_scripts
-        out.extend(character.data.extensions.regex_scripts.clone());
-        // 聊天级
-        out.extend(metadata.regex_scripts.clone());
-        out
+        collect_regex_scripts_for(self.settings_json, character, metadata)
     }
 
     /// WI 全局设置（settings.json 的 world_info 切片；缺省用默认值）。
     fn wi_settings(&self) -> nast_engine::world_info::WiSettings {
+        let world_config = nast_model::settings::world_info_view(self.settings_json);
         let default = nast_engine::world_info::WiSettings::default();
-        let Some(wi) = self
-            .settings_json
-            .get("world_info")
-            .and_then(|v| v.as_object())
+        let Some(wi) = world_config.as_object()
         else {
             return default;
         };
@@ -1364,24 +1360,42 @@ pub fn collect_regex_scripts_for(
     character: &nast_model::card::Character,
     metadata: &nast_model::chat::ChatMetadata,
 ) -> Vec<nast_model::regex_script::RegexScript> {
-    let mut out: Vec<nast_model::regex_script::RegexScript> = Vec::new();
-    if let Some(list) = settings
-        .get("extension_settings")
-        .and_then(|e| e.get("regex"))
-        .and_then(|v| v.as_array())
-    {
-        for s in list {
-            if let Ok(script) =
-                serde_json::from_value::<nast_model::regex_script::RegexScript>(s.clone())
-            {
-                out.push(script);
+        let mut out: Vec<nast_model::regex_script::RegexScript> = Vec::new();
+        if settings.pointer("/extension_settings/disabledExtensions")
+            .and_then(Value::as_array).is_some_and(|values| values.iter().any(|v| v == "regex")) {
+            return out;
+        }
+        // 全局：extension_settings.regex
+        if let Some(list) = settings
+            .get("extension_settings")
+            .and_then(|e| e.get("regex"))
+            .and_then(|v| v.as_array())
+        {
+            for s in list {
+                if let Ok(script) =
+                    serde_json::from_value::<nast_model::regex_script::RegexScript>(s.clone())
+                {
+                    out.push(script);
+                }
             }
         }
+        // ST order: global -> allowed preset -> allowed character.
+        let preset_name = settings.pointer("/oai_settings/preset_settings_openai").and_then(Value::as_str).unwrap_or("");
+        if settings.pointer("/extension_settings/preset_allowed_regex/openai")
+            .and_then(Value::as_array).is_some_and(|values| values.iter().any(|v| v == preset_name)) {
+            if let Some(scripts) = settings.pointer("/oai_settings/extensions").and_then(|v| v.get("regex_scripts")).and_then(Value::as_array) {
+                out.extend(scripts.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()));
+            }
+        }
+        if character.avatar.as_ref().is_some_and(|avatar|
+            settings.pointer("/extension_settings/character_allowed_regex")
+                .and_then(Value::as_array).is_some_and(|values| values.iter().any(|v| v == avatar))) {
+            out.extend(character.data.extensions.regex_scripts.clone());
+        }
+        // 聊天级
+        out.extend(metadata.regex_scripts.clone());
+        out
     }
-    out.extend(character.data.extensions.regex_scripts.clone());
-    out.extend(metadata.regex_scripts.clone());
-    out
-}
 
 /// 角色卡 @depth 注入（AN/persona 已服务端化，不再从前端透传）。
 pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {    let mut out = Vec::new();

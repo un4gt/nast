@@ -21,13 +21,22 @@ Avatar.displayName = AvatarPrimitive.Root.displayName
 const AvatarImage = React.forwardRef<
   React.ElementRef<typeof AvatarPrimitive.Image>,
   React.ComponentPropsWithoutRef<typeof AvatarPrimitive.Image>
->(({ className, ...props }, ref) => (
-  <AvatarPrimitive.Image
-    ref={ref}
-    className={cn("aspect-square h-full w-full", className)}
-    {...props}
-  />
-))
+>(({ className, src, onLoad, ...props }, ref) => {
+  const [placeholderSrc, setPlaceholderSrc] = React.useState<string>()
+  return (
+    <AvatarPrimitive.Image
+      ref={ref}
+      src={src === placeholderSrc ? undefined : src}
+      className={cn("aspect-square h-full w-full object-cover", className)}
+      onLoad={(event) => {
+        // JSON 角色卡的服务端占位图只有 1 像素，使用姓名 fallback。
+        if (event.currentTarget.naturalWidth === 1 && event.currentTarget.naturalHeight === 1) setPlaceholderSrc(src)
+        onLoad?.(event)
+      }}
+      {...props}
+    />
+  )
+})
 AvatarImage.displayName = AvatarPrimitive.Image.displayName
 
 const AvatarFallback = React.forwardRef<

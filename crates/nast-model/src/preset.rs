@@ -133,9 +133,13 @@ pub struct OaiSettings {
     /// custom 源附加请求体：JSON 对象（ST custom_include_body）
     pub custom_include_body: String,
     pub stream_openai: bool,
+    #[serde(rename = "temp_openai", alias = "temperature")]
     pub temperature: f64,
+    #[serde(rename = "freq_pen_openai", alias = "frequency_penalty")]
     pub frequency_penalty: f64,
+    #[serde(rename = "pres_pen_openai", alias = "presence_penalty")]
     pub presence_penalty: f64,
+    #[serde(rename = "top_p_openai", alias = "top_p")]
     pub top_p: f64,
     pub max_context_unlocked: bool,
     pub custom_prompt_post_processing: String,

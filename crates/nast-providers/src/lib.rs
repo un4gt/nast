@@ -396,7 +396,7 @@ impl Provider {
         url: String,
         headers: Vec<(String, String)>,
         body: Value,
-    ) -> Result<impl Stream<Item = Result<StreamEvent, ProviderError>>, ProviderError> {
+    ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError> {
         let mut request = self.client.post(&url).json(&body);
         for (k, v) in headers {
             request = request.header(&k, &v);
@@ -410,8 +410,31 @@ impl Provider {
             let body = response.text().await.unwrap_or_default();
             return Err(ProviderError::Http { status: status.as_u16(), body });
         }
-        let byte_stream = response.bytes_stream();
-        Ok(sse_events(byte_stream))
+        let is_json = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("application/json"));
+        if is_json {
+            let mut value: Value = response.json().await.map_err(|e| ProviderError::Network(e.to_string()))?;
+            if let Some(choices) = value.get_mut("choices").and_then(Value::as_array_mut) {
+                for choice in choices {
+                    if let Some(message) = choice.get("message").cloned() { choice["delta"] = message; }
+                }
+            }
+            let mut events = if value["type"].as_str() == Some("message") {
+                let mut events = Vec::new();
+                for block in value["content"].as_array().into_iter().flatten() {
+                    if let Some(text) = block["text"].as_str() { events.push(StreamEvent::Token(text.into())); }
+                    if let Some(text) = block["thinking"].as_str() { events.push(StreamEvent::Reasoning(text.into())); }
+                }
+                events.push(StreamEvent::Usage {
+                    input: value["usage"]["input_tokens"].as_i64(),
+                    output: value["usage"]["output_tokens"].as_i64(),
+                });
+                events
+            } else { normalize(value) };
+            events.push(StreamEvent::Done);
+            return Ok(Box::pin(futures_util::stream::iter(events.into_iter().map(Ok))));
+        }
+        Ok(Box::pin(sse_events(response.bytes_stream())))
     }
 }
 
@@ -420,78 +443,54 @@ fn sse_events(
     stream: impl Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
 ) -> impl Stream<Item = Result<StreamEvent, ProviderError>> {
     futures_util::stream::unfold(
-        (Box::pin(stream), String::new(), false),
-        |(mut stream, mut buf, done)| async move {
-            if done {
-                return None;
-            }
+        (Box::pin(stream), Vec::<u8>::new(), std::collections::VecDeque::new(), false),
+        |(mut stream, mut buf, mut pending, mut done)| async move {
             loop {
-                // 从 buffer 提取完整 SSE 事件（空行分隔）
-                while let Some((event, sep_len)) = split_event(&buf) {
-                    let event = event.to_string();
-                    buf.drain(..event.len() + sep_len);
-                    // 提取 data: 行（可多行拼接）
-                    let mut data = String::new();
-                    for line in event.lines() {
-                        if let Some(d) = line.strip_prefix("data:") {
-                            if !data.is_empty() {
-                                data.push('\n');
-                            }
-                            data.push_str(d.trim_start_matches(' '));
-                        }
-                    }
+                if let Some(event) = pending.pop_front() {
+                    return Some((Ok(event), (stream, buf, pending, done)));
+                }
+                if done { return None; }
+                // Decode only complete frames, never partial UTF-8 chunks.
+                let boundary = [b"\r\n\r\n".as_slice(), b"\n\n".as_slice(), b"\r\r".as_slice()]
+                    .iter().filter_map(|sep| buf.windows(sep.len()).position(|w| w == *sep)
+                        .map(|pos| (pos, sep.len()))).min_by_key(|(pos, _)| *pos);
+                if let Some((pos, length)) = boundary {
+                    let bytes: Vec<u8> = buf.drain(..pos + length).collect();
+                    let event = match std::str::from_utf8(&bytes[..pos]) {
+                        Ok(event) => event,
+                        Err(error) => return Some((Err(ProviderError::Network(error.to_string())),
+                            (stream, buf, pending, true))),
+                    };
+                    let data = event.lines().filter_map(|line| line.strip_prefix("data:")
+                        .map(|v| v.trim_start_matches(' '))).collect::<Vec<_>>().join("\n");
                     if data.trim() == "[DONE]" {
-                        return Some((Ok(StreamEvent::Done), (stream, buf, true)));
-                    }
-                    if data.trim().is_empty() {
-                        continue;
-                    }
-                    match serde_json::from_str::<Value>(data.trim()) {
-                        Ok(v) => {
-                            let events = normalize(v);
-                            if let Some(first) = events.first() {
-                                let is_done = matches!(first, StreamEvent::Done);
-                                let ev = if is_done {
-                                    first.clone()
-                                } else {
-                                    first.clone()
-                                };
-                                // 多事件时丢弃后续（一个 chunk 多事件极少见；
-                                // Done 事件除外，其他情况每 chunk 单事件是常态）
-                                let _ = events;
-                                return Some((Ok(ev), (stream, buf, is_done)));
-                            }
+                        pending.push_back(StreamEvent::Done);
+                        done = true;
+                    } else if !data.trim().is_empty() {
+                        match serde_json::from_str::<Value>(&data) {
+                            Ok(value) => pending.extend(normalize(value)),
+                            Err(error) => return Some((Err(ProviderError::Network(format!("invalid SSE JSON: {error}"))),
+                                (stream, buf, pending, true))),
                         }
-                        Err(_) => continue,
                     }
+                    continue;
                 }
                 match stream.next().await {
-                    Some(Ok(bytes)) => {
-                        buf.push_str(&String::from_utf8_lossy(&bytes));
-                    }
-                    Some(Err(e)) => {
-                        return Some((
-                            Err(ProviderError::Network(e.to_string())),
-                            (stream, buf, true),
-                        ));
-                    }
+                    Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
+                    Some(Err(error)) => return Some((Err(ProviderError::Network(error.to_string())),
+                        (stream, buf, pending, true))),
                     None => {
-                        return Some((Ok(StreamEvent::Done), (stream, buf, true)));
+                        if !buf.is_empty() {
+                            return Some((Err(ProviderError::Network("incomplete SSE frame".into())),
+                                (stream, buf, pending, true)));
+                        }
+                        pending.push_back(StreamEvent::Done);
+                        done = true;
                     }
                 }
             }
         },
     )
-}
-
-/// 返回 (事件内容, 分隔符长度)。
-fn split_event(buf: &str) -> Option<(&str, usize)> {
-    for pat in ["\r\n\r\n", "\n\n", "\r\r"] {
-        if let Some(p) = buf.find(pat) {
-            return Some((&buf[..p], pat.len()));
-        }
-    }
-    None
 }
 
 /// 上游 chunk → StreamEvent 列表（getStreamingReply 的服务端等价）。
@@ -618,6 +617,31 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fragmented_utf8_and_all_events_in_one_frame_survive() {
+        let wire = format!("data: {}\r\n\r\ndata: [DONE]\n\n", json!({
+            "choices":[{"delta":{"content":"中文😀", "reasoning_content":"推理"}}],
+            "usage":{"prompt_tokens":4,"completion_tokens":3}
+        }));
+        let bytes = wire.into_bytes().into_iter().map(|b| Ok::<_, reqwest::Error>(bytes::Bytes::from(vec![b])));
+        let events = sse_events(futures_util::stream::iter(bytes));
+        tokio::pin!(events);
+        let mut text = String::new();
+        let mut reasoning = String::new();
+        let mut usage = None;
+        while let Some(event) = events.next().await {
+            match event.unwrap() {
+                StreamEvent::Token(value) => text.push_str(&value),
+                StreamEvent::Reasoning(value) => reasoning.push_str(&value),
+                StreamEvent::Usage { input, output } => usage = Some((input,output)),
+                _ => {},
+            }
+        }
+        assert_eq!(text,"中文😀");
+        assert_eq!(reasoning,"推理");
+        assert_eq!(usage,Some((Some(4),Some(3))));
+    }
 
     #[test]
     fn normalize_openai_delta() {

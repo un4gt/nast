@@ -5,6 +5,7 @@
 import { rpc } from './rpc';
 import { pushToast } from './toasts';
 import { useStore } from './store';
+import { ttsPlayer } from './tts/player';
 
 export type CommandResult =
   | { status: 'handled' }
@@ -29,6 +30,8 @@ const HELP = [
   '  /swipe <left|right>      切换/生成 swipe',
   '  /regenerate              重新生成最后一条回复',
   '  /continue                续写最后一条回复',
+  '  /speak [voice="角色名"] <文本>  朗读文本',
+  '  /tts-stop                停止朗读',
   '  /impersonate             以用户身份生成发言（填入输入框）',
   '  /sys <text>              插入旁白系统消息（落盘，不生成）',
   '  /name <新名称>            重命名当前聊天',
@@ -47,6 +50,18 @@ export async function runSlashCommand(
   helpers: { setInput: (v: string) => void } = { setInput: () => {} },
 ): Promise<CommandResult> {
   const store = useStore.getState();
+  const ttsCommand = input.match(/^\/(speak|tts-stop)(?:\s+([\s\S]*))?$/i);
+  if (ttsCommand) {
+    if (ttsCommand[1].toLowerCase() === 'tts-stop') ttsPlayer.cancel();
+    else {
+      const body = ttsCommand[2] ?? '';
+      const voice = body.match(/^voice=(?:"([^"]+)"|'([^']+)'|(\S+))\s+/);
+      const text = (voice ? body.slice(voice[0].length) : body).trim();
+      if (text) ttsPlayer.speakText(text, voice?.[1] ?? voice?.[2] ?? voice?.[3]);
+      else pushToast('用法：/speak [voice="角色名"] 要朗读的文本', 'info');
+    }
+    return { status: 'handled' };
+  }
   const { activeAvatar, activeChatName, messages, chatList } = store;
   if (!activeAvatar || !activeChatName) return { status: 'unknown' };
 
@@ -288,7 +303,7 @@ export async function runSlashCommand(
 
   const builtin = commands.find((c) => c.name === name || c.name.startsWith(name));
   if (builtin) {
-    await builtin.run();
+    await builtin.run(args);
     return { status: 'handled' };
   }
 

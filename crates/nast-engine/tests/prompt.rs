@@ -12,6 +12,8 @@ fn default_oai() -> OaiSettings {
 
 fn base_input(oai: &OaiSettings) -> AssembleInput<'_> {
     AssembleInput {
+        macro_context: None,
+        macro_env: None,
         oai,
         generation_type: "normal",
         name1: "User",
@@ -377,7 +379,6 @@ fn mandatory_overflow_errors() {
     let out = assemble(&input);
     assert!(out.error.is_some());
 }
-
 
 
 

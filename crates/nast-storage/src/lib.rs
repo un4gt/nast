@@ -351,7 +351,7 @@ impl UserData {
         let path = self.root.join("worlds").join(format!("{name}.json"));
         let raw = fs::read_to_string(&path)
             .map_err(|_| StorageError::NotFound(format!("world {name}")))?;
-        Ok(serde_json::from_str(&raw)?)
+        Ok(WorldInfoBook::from_json(serde_json::from_str(&raw)?)?)
     }
 
     pub fn save_world(&self, name: &str, book: &WorldInfoBook) -> StorageResult<()> {
@@ -449,6 +449,9 @@ fn sanitize_world_name(name: &str) -> String {
 
 /// 原子写：同目录 tmp 文件 + rename。
 pub fn atomic_write(path: &Path, data: &[u8]) -> StorageResult<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)?;
+    }
     let tmp = path.with_extension("tmp");
     {
         let mut f = fs::File::create(&tmp)?;

@@ -4,7 +4,6 @@
 
 use crate::events;
 use crate::state::SharedState;
-use base64::Engine as _;
 use nast_cards::CardSpec;
 use nast_model::card::Character;
 use nast_model::chat::{ChatFile, ChatHeader};
@@ -47,9 +46,13 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "characters.all" => characters_all(state),
         "characters.get" => characters_get(state, params),
         "characters.import" => characters_import(state, params),
+        "characters.create" => crate::library::create_character(state, params),
+        "characters.export" => crate::library::export_character(state, params),
+        "characters.import_book" => crate::library::import_book(state, params),
         "characters.delete" => characters_delete(state, params),
         "characters.chats" => characters_chats(state, params),
         "characters.edit" => characters_edit(state, params),
+        "characters.rename" => crate::library::rename_character(state, params).await,
         "characters.duplicate" => characters_duplicate(state, params),
         "chats.stats" => chats_stats(state, params).await,
         "chats.get" => chats_get(state, params),
@@ -72,8 +75,10 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "groups.delete" => groups_delete(state, params),
         "groups.get" => groups_get(state),
         "groups.chats" => groups_chats(state, params),
+        "groups.new_chat" | "groups.open_chat" | "groups.rename_chat" | "groups.delete_chat"
+        | "groups.import_chat" | "groups.export_chat" | "groups.set_world" | "groups.swipe" => crate::group_sessions::manage(state, method, params).await,
         "generate.group" => crate::group_gen::generate_group(state, params).await,
-        "chats.swipe" => chats_swipe(state, params),
+        "chats.swipe" => chats_swipe(state, params).await,
         "chats.new" => chats_new(state, params),
         "worlds.list" => worlds_list(state),
         "worlds.get" => worlds_get(state, params),
@@ -98,10 +103,11 @@ async fn settings_get(state: SharedState) -> RpcResult {
 }
 
 async fn settings_save(state: SharedState, params: Value) -> RpcResult {
-    let settings = params
+    let mut settings = params
         .get("settings")
-        .ok_or_else(|| RpcError::BadRequest("missing settings".into()))?;
-    state.user.save_settings(settings)?;
+        .ok_or_else(|| RpcError::BadRequest("missing settings".into()))?.clone();
+    nast_model::settings::normalize_settings(&mut settings);
+    state.user.save_settings(&settings)?;
     *state.settings.write().await = settings.clone();
     state.hub.emit(events::SETTINGS_UPDATED, json!({}));
     Ok(json!({"ok": true}))
@@ -150,7 +156,7 @@ async fn secrets_get(state: SharedState) -> RpcResult {
 async fn secrets_set(state: SharedState, params: Value) -> RpcResult {
     let key = param_str(&params, "key")?.to_string();
     let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
-    if !key.starts_with("api_key_") {
+    if !key.starts_with("api_key_") && !matches!(key.as_str(), "minimax_group_id" | "volcengine_app_id" | "volcengine_access_key") {
         return Err(RpcError::BadRequest("key must be an api_key_* name".into()));
     }
     let mut secrets = state.secrets.write().await;
@@ -213,9 +219,12 @@ async fn models_list(state: SharedState, params: Value) -> RpcResult {
 // ---------- characters ----------
 
 pub fn read_character(state: &SharedState, avatar: &str) -> Result<Character, RpcError> {
+    crate::library::leaf(avatar)?;
     let path = state.user.character_dir().join(avatar);
     let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(avatar.into()))?;
-    nast_cards::read_card(&bytes).map_err(|e| RpcError::BadRequest(e.to_string()))
+    let mut character = nast_cards::read_card(&bytes).map_err(|e| RpcError::BadRequest(e.to_string()))?;
+    character.avatar = Some(avatar.to_string());
+    Ok(character)
 }
 
 /// 角色列表（浅）：解码每张 PNG 的 chara chunk（无索引文件，GOTCHA #18）。
@@ -245,57 +254,7 @@ fn characters_get(state: SharedState, params: Value) -> RpcResult {
 
 /// 导入：base64 PNG 或 JSON 卡。
 fn characters_import(state: SharedState, params: Value) -> RpcResult {
-    let data_b64 = param_str(&params, "data_base64")?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data_b64)
-        .map_err(|_| RpcError::BadRequest("data_base64 is not valid base64".into()))?;
-    let character: Character = if bytes.starts_with(&[0x89, b'P']) {
-        nast_cards::read_card(&bytes).map_err(|e| RpcError::BadRequest(e.to_string()))?
-    } else {
-        let json: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| RpcError::BadRequest(format!("invalid card json: {e}")))?;
-        Character::from_card_json(&json).map_err(|e| RpcError::BadRequest(e.to_string()))?
-    };
-    character.validate().map_err(|e| RpcError::BadRequest(e.to_string()))?;
-
-    let file_name = state.user.unique_character_file(&character.name);
-    // 卡 JSON 双写：V2 形态 = 整个 character（顶层+data），V3 原样存 ccv3
-    let v2_json = serde_json::to_value(&character)
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
-    let png = if bytes.starts_with(&[0x89, b'P']) {
-        bytes // 原样保留图像
-    } else {
-        nast_cards::minimal_png()
-    };
-    // V3 卡同时写 ccv3 chunk（ST write 总是 chara + ccv3 双写）
-    let ccv3_json = if v2_json.get("spec").and_then(|s| s.as_str()) == Some("chara_card_v3") {
-        Some(&v2_json)
-    } else {
-        None
-    };
-    let out = nast_cards::write_card(&png, &v2_json, ccv3_json)
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
-    std::fs::write(state.user.character_dir().join(&file_name), out)
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
-
-    // 自动建首个聊天文件
-    let chat_name = format!(
-        "{} - {}",
-        character.name,
-        nast_storage::humanized_date_time()
-    );
-    let header = ChatHeader {
-        user_name: "unused".into(),
-        character_name: "unused".into(),
-        chat_metadata: Default::default(),
-    };
-    let chat = ChatFile(vec![serde_json::to_value(&header).unwrap()]);
-    state
-        .user
-        .save_chat(&file_name, &format!("{chat_name}.jsonl"), &chat, false)?;
-
-    state.hub.emit(events::CHAT_CHANGED, json!({"avatar": file_name}));
-    Ok(json!({"avatar": file_name, "name": character.name}))
+    crate::library::import_character(state, params)
 }
 
 fn characters_delete(state: SharedState, params: Value) -> RpcResult {
@@ -313,88 +272,7 @@ fn characters_delete(state: SharedState, params: Value) -> RpcResult {
 /// 编辑角色卡：部分更新 data 字段（description/personality/scenario/first_mes/mes_example/
 /// system_prompt/post_history_instructions/tags 等），写回 PNG chara chunk。
 fn characters_edit(state: SharedState, params: Value) -> RpcResult {
-    let avatar = param_str(&params, "avatar")?;
-    let mut ch = read_character(&state, avatar)?;
-
-    let data = params
-        .get("data")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| RpcError::BadRequest("missing data".into()))?;
-    // 收藏开关（顶层 fav，非 data 字段）
-    if let Some(fav) = data.get("fav").and_then(|v| v.as_bool()) {
-        ch.fav = fav;
-    }
-
-    // talkativeness（群聊健谈度，卡片字段，字符串存储）
-    if let Some(t) = data.get("talkativeness").and_then(|v| v.as_str()) {
-        ch.talkativeness = Some(t.to_string());
-    }
-
-    for (k, v) in data {
-        // 白名单：仅允许编辑卡内容字段
-        if matches!(
-            k.as_str(),
-            "description" | "personality" | "scenario" | "first_mes" | "mes_example"
-                | "system_prompt" | "post_history_instructions" | "creator_notes"
-                | "character_version" | "tags" | "alternate_greetings"
-        ) {
-            if let Ok(v) = serde_json::from_value::<serde_json::Value>(v.clone()) {
-                ch.data.extra.remove(k);                // 直接写 typed 字段
-                match k.as_str() {
-                    "description" => ch.data.description = v.as_str().unwrap_or_default().to_string(),
-                    "personality" => ch.data.personality = v.as_str().unwrap_or_default().to_string(),
-                    "scenario" => ch.data.scenario = v.as_str().unwrap_or_default().to_string(),
-                    "first_mes" => ch.data.first_mes = v.as_str().unwrap_or_default().to_string(),
-                    "mes_example" => ch.data.mes_example = v.as_str().unwrap_or_default().to_string(),
-                    "system_prompt" => ch.data.system_prompt = v.as_str().unwrap_or_default().to_string(),
-                    "post_history_instructions" => {
-                        ch.data.post_history_instructions = v.as_str().unwrap_or_default().to_string()
-                    }
-                    "creator_notes" => ch.data.creator_notes = v.as_str().unwrap_or_default().to_string(),
-                    "character_version" => {
-                        ch.data.character_version = v.as_str().unwrap_or_default().to_string()
-                    }
-                    "tags" => {
-                        ch.data.tags = v
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
-                            .unwrap_or_default()
-                    }
-                    "alternate_greetings" => {
-                        ch.data.alternate_greetings = v
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
-                            .unwrap_or_default()
-                    }
-                    _ => {}
-                }
-                // 同步顶层（ST 内存形态双写）
-                match k.as_str() {
-                    "description" => ch.description = ch.data.description.clone(),
-                    "personality" => ch.personality = ch.data.personality.clone(),
-                    "scenario" => ch.scenario = ch.data.scenario.clone(),
-                    "first_mes" => ch.first_mes = ch.data.first_mes.clone(),
-                    "mes_example" => ch.mes_example = ch.data.mes_example.clone(),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    // 写回 PNG（剔除旧 chunk + 双写 chara）
-    let path = state.user.character_dir().join(avatar);
-    let png_bytes = std::fs::read(&path).map_err(|e| RpcError::Internal(e.to_string()))?;
-    let v2_json =
-        serde_json::to_value(&ch).map_err(|e| RpcError::Internal(e.to_string()))?;
-    let ccv3 = if v2_json.get("spec").and_then(|s| s.as_str()) == Some("chara_card_v3") {
-        Some(&v2_json)
-    } else {
-        None
-    };
-    let out = nast_cards::write_card(&png_bytes, &v2_json, ccv3)
-        .map_err(|e| RpcError::Internal(e.to_string()))?;
-    std::fs::write(&path, out).map_err(|e| RpcError::Internal(e.to_string()))?;
-    Ok(json!({"ok": true}))
+    crate::library::edit_character(state, params)
 }
 
 fn characters_chats(state: SharedState, params: Value) -> RpcResult {
@@ -409,11 +287,15 @@ fn characters_duplicate(state: SharedState, params: Value) -> RpcResult {
     let src = read_character(&state, avatar)?;
     let mut copy = src.clone();
     copy.name = format!("{} (copy)", src.name);
+    copy.data.name = copy.name.clone();
+    copy.chat = None;
+    copy.avatar = None;
     let file_name = state.user.unique_character_file(&copy.name);
     let v2_json = serde_json::to_value(&copy).map_err(|e| RpcError::Internal(e.to_string()))?;
     let png_bytes = std::fs::read(state.user.character_dir().join(avatar))
         .map_err(|e| RpcError::Internal(e.to_string()))?;
-    let out = nast_cards::write_card(&png_bytes, &v2_json, None)
+    let ccv3 = (copy.spec.as_deref() == Some("chara_card_v3")).then_some(&v2_json);
+    let out = nast_cards::write_card(&png_bytes, &v2_json, ccv3)
         .map_err(|e| RpcError::Internal(e.to_string()))?;
     std::fs::write(state.user.character_dir().join(&file_name), out)
         .map_err(|e| RpcError::Internal(e.to_string()))?;
@@ -751,10 +633,11 @@ fn chats_set_world(state: SharedState, params: Value) -> RpcResult {
             .get_mut("chat_metadata")
             .ok_or_else(|| RpcError::BadRequest("missing chat_metadata".into()))?;
         if let Some(m) = metadata.as_object_mut() {
+            m.remove("world");
             if world.is_null() || world.as_str() == Some("") {
-                m.remove("world");
+                m.remove("world_info");
             } else {
-                m.insert("world".into(), world);
+                m.insert("world_info".into(), world);
             }
         }
         state.user.save_chat(&avatar, &file_name, &chat, false)?;
@@ -913,46 +796,41 @@ fn chats_new(state: SharedState, params: Value) -> RpcResult {
     Ok(json!({"file_name": file_name}))
 }
 
-/// 切换到指定 swipe（左/右箭头）：更新 swipe_id、mes 镜像当前 swipe。
-fn chats_swipe(state: SharedState, params: Value) -> RpcResult {
+/// Restore the selected candidate together with its reasoning/provider metadata.
+pub(crate) fn select_swipe(chat: &mut ChatFile, direction: &str) -> RpcResult {
+    let last = chat.0.last_mut().filter(|m| m["mes"].is_string() && m["is_user"] != true && m["is_system"] != true)
+        .ok_or_else(|| RpcError::BadRequest("no assistant message to swipe".into()))?;
+    let current = last["swipe_id"].as_u64().unwrap_or(0) as usize;
+    let swipes = last["swipes"].as_array().filter(|items| !items.is_empty())
+        .ok_or_else(|| RpcError::BadRequest("message has no candidates".into()))?;
+    let selected = match direction {
+        "left" => current.saturating_sub(1),
+        "right" => (current + 1).min(swipes.len() - 1),
+        _ => return Err(RpcError::BadRequest("direction must be left or right".into())),
+    }.min(swipes.len() - 1);
+    let text = swipes[selected].clone();
+    if selected != current {
+        last["mes"] = text.clone(); last["swipe_id"] = json!(selected);
+        let info = last["swipe_info"].get(selected).cloned().unwrap_or(json!({}));
+        last["extra"] = info.get("extra").cloned().unwrap_or(json!({}));
+        for field in ["send_date", "gen_started", "gen_finished"] {
+            if let Some(value) = info.get(field) { last[field] = value.clone(); }
+            else if field != "send_date" { last.as_object_mut().unwrap().remove(field); }
+        }
+    }
+    Ok(json!({"swipe_id":selected,"mes":text}))
+}
+
+async fn chats_swipe(state: SharedState, params: Value) -> RpcResult {
+    let generation = state.generation.read().await;
+    if generation.abort.is_some() { return Err(RpcError::BadRequest("stop generation before switching candidates".into())); }
     let avatar = param_str(&params, "avatar")?;
     let file_name = param_str(&params, "file_name")?;
-    let mut chat = state.user.read_chat(&avatar, &file_name)?;
-    let last = chat
-        .0
-        .last_mut()
-        .ok_or_else(|| RpcError::BadRequest("empty chat".into()))?;
-
-    let direction = params.get("direction").and_then(|v| v.as_str()).unwrap_or("right");
-    let cur = last.get("swipe_id").and_then(|v| v.as_i64()).unwrap_or(0);
-    let total = last.get("swipes").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(1);
-
-    let new_id = match direction {
-        "left" => (cur - 1).max(0),
-        _ => (cur + 1).min(total as i64 - 1),
-    };
-    if new_id != cur {
-        last["swipe_id"] = json!(new_id);
-        if let Some(swipes) = last.get("swipes").and_then(|v| v.as_array()) {
-            if let Some(text) = swipes.get(new_id as usize).and_then(|v| v.as_str()) {
-                last["mes"] = json!(text);
-            }
-        }
-        // 同步 swipe_info 的 send_date 语义（当前 swipe 的展示时间）
-        let mes_text = last
-            .get("mes")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        state.user.save_chat(&avatar, &file_name, &chat, false)?;
-        return Ok(json!({"swipe_id": new_id, "mes": mes_text}));
-    }
-    let mes_text = last
-        .get("mes")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Ok(json!({"swipe_id": new_id, "mes": mes_text}))
+    crate::library::leaf(avatar)?; crate::library::leaf(file_name)?;
+    let mut chat = state.user.read_chat(avatar, file_name)?;
+    let result = select_swipe(&mut chat, params["direction"].as_str().unwrap_or("right"))?;
+    state.user.save_chat(avatar, file_name, &chat, false)?;
+    Ok(result)
 }
 
 fn worlds_list(state: SharedState) -> RpcResult {
@@ -961,22 +839,29 @@ fn worlds_list(state: SharedState) -> RpcResult {
 
 fn worlds_get(state: SharedState, params: Value) -> RpcResult {
     let name = param_str(&params, "name")?;
+    crate::library::leaf(name)?;
     let book: WorldInfoBook = state.user.read_world(&name)?;
     Ok(serde_json::to_value(book).map_err(|e| RpcError::Internal(e.to_string()))?)
 }
 
 fn worlds_save(state: SharedState, params: Value) -> RpcResult {
     let name = param_str(&params, "name")?;
-    let book: WorldInfoBook = serde_json::from_value(
+    crate::library::leaf(name)?;
+    let mut book: WorldInfoBook = WorldInfoBook::from_json(
         params.get("book").cloned().unwrap_or(Value::Null),
     )
     .map_err(|e| RpcError::BadRequest(format!("invalid book: {e}")))?;
+    if book.extra.contains_key("originalData") {
+        let embedded = book.to_embedded(name).map_err(|e| RpcError::BadRequest(e.to_string()))?;
+        book.extra.insert("originalData".into(), json!(embedded));
+    }
     state.user.save_world(&name, &book)?;
     Ok(json!({"ok": true}))
 }
 
 fn worlds_delete(state: SharedState, params: Value) -> RpcResult {
     let name = param_str(&params, "name")?;
+    crate::library::leaf(name)?;
     state.user.delete_world(&name)?;
     Ok(json!({"ok": true}))
 }
@@ -1034,16 +919,13 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
     };
     let character = read_character(&state, &avatar)?;
 
-    // 同一时刻一个生成：已有生成在跑则拒绝（ST is_send_press 语义）
-    {
-        let guard = state.generation.read().await;
-        if guard.abort.is_some() && !guard.abort.as_ref().unwrap().is_cancelled() {
-            return Err(RpcError::BadRequest("generation already in progress".into()));
-        }
-    }
     let abort = tokio_util::sync::CancellationToken::new();
     {
         let mut guard = state.generation.write().await;
+        // Claim atomically; a cancelled request still owns its final save/cleanup.
+        if guard.abort.is_some() {
+            return Err(RpcError::BadRequest("generation already in progress".into()));
+        }
         guard.abort = Some(abort.clone());
         guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         guard.info = Some(crate::state::GenerationInfo {
@@ -1063,6 +945,8 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
 
     let settings_snapshot = state.settings.read().await.clone();
     let session = GenerateSession {
+        shared_settings: &state.settings,
+        global_variables: std::cell::RefCell::new(settings_snapshot.pointer("/extension_settings/variables/global").and_then(Value::as_object).cloned().unwrap_or_default()),
         user: &state.user,
         hub: &state.hub,
         oai,
@@ -1073,6 +957,7 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         progress,
     };
     let p = GenerateParams {
+        group: None,
         generation_type,
         avatar: avatar.clone(),
         chat_file: chat_file.clone(),

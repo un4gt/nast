@@ -34,26 +34,26 @@ export function GenerationPanel() {
       />
       <SliderField
         label="Temperature"
-        value={oai.temperature ?? 1.0}
+        value={oai.temp_openai ?? 1.0}
         min={0}
         max={2}
         step={0.05}
-        onChange={(v) => setOai({ temperature: v })}
+        onChange={(v) => setOai({ temp_openai: v })}
       />
       <SliderField
         label="Top P"
-        value={oai.top_p ?? 1.0}
+        value={oai.top_p_openai ?? 1.0}
         min={0}
         max={1}
         step={0.01}
-        onChange={(v) => setOai({ top_p: v })}
+        onChange={(v) => setOai({ top_p_openai: v })}
       />
       <SwitchField
         label="流式输出"
         checked={oai.stream_openai ?? true}
         onChange={(v) => setOai({ stream_openai: v })}
       />
-      <p className="text-[10px] text-muted-foreground">改动即时保存到 settings.json</p>
+      <p className="text-xs text-muted-foreground">参数调整后即时保存，下一次生成时生效。</p>
     </div>
   );
 }

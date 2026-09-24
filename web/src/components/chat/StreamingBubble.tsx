@@ -19,16 +19,17 @@ export function StreamingBubble({
     return DOMPurify.sanitize(html);
   }, [text]);
   return (
-    <div className="flex w-full justify-start gap-2">
-      <Avatar className="mt-1 size-8 shrink-0">
-        <AvatarFallback className="bg-primary/20 text-xs text-primary">
+    <div className="flex w-full min-w-0 justify-start gap-2.5 sm:gap-3" aria-label={`${name} 正在回复`}>
+      <Avatar className="mt-1 size-8 shrink-0 rounded-xl sm:size-9">
+        <AvatarFallback className="rounded-xl bg-accent text-xs text-primary">
           {name.slice(0, 2) || '…'}
         </AvatarFallback>
       </Avatar>
-      <div className="flex max-w-[75%] flex-col items-start gap-1">
+      <div className="flex min-w-0 max-w-[calc(100%-3rem)] flex-col items-start gap-2 sm:max-w-[88%]">
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground/80">{name}</span>
           <Spinner className="size-3" />
+          <span>正在回复</span>
         </div>
         {reasoning ? (
           <Collapsible open={reasonOpen} onOpenChange={setReasonOpen} className="w-full">
@@ -44,7 +45,7 @@ export function StreamingBubble({
           </Collapsible>
         ) : null}
         <div
-          className="msg-content break-words rounded-2xl rounded-tl-sm border bg-card px-4 py-2.5 text-sm leading-relaxed"
+          className="msg-content message-surface"
           dangerouslySetInnerHTML={{ __html: rendered || '…' }}
         />
       </div>

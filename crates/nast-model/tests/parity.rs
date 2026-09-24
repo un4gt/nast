@@ -1,0 +1,71 @@
+use nast_model::{Character, WorldInfoBook, WIEntry, RegexScript};
+use serde_json::json;
+
+#[test]
+fn st_v3_card_and_embedded_book_roundtrip() {
+    let card = Character::from_card_json(&json!({
+        "spec": "chara_card_v3", "spec_version": "3.0", "vendorRoot": {"value": 42},
+        "data": {"name": "测试角色", "extensions": {"talkativeness": 0.7},
+        "character_book": {"name": "角色书", "vendorBook": true, "entries": [{
+            "id": 7, "keys": ["城堡"], "content": "旧内容", "enabled": true,
+            "vendorEntry": "keep", "extensions": {"delay_until_recursion": 2,
+                "sticky": null, "cooldown": null, "delay": null, "selectiveLogic": 3,
+                "useProbability": false, "position": 7, "outlet_name": "secret", "vendor": 42}
+        }]}}
+    })).unwrap();
+    assert_eq!(card.talkativeness.as_deref(), Some("0.7"));
+    let mut world = WorldInfoBook::from_embedded(card.data.character_book.as_ref().unwrap()).unwrap();
+    let entry = world.entries.get_mut("7").unwrap();
+    assert_eq!(entry.delay_until_recursion.level(), 2);
+    assert_eq!(entry.selective_logic, 3);
+    assert!(!entry.use_probability);
+    assert_eq!(entry.outlet_name.as_deref(), Some("secret"));
+    entry.content = "新内容".into();
+    let rebuilt = serde_json::to_value(world.to_embedded("角色书").unwrap()).unwrap();
+    assert_eq!(rebuilt["entries"][0]["content"], "新内容");
+    assert_eq!(rebuilt["entries"][0]["vendorEntry"], "keep");
+    assert_eq!(rebuilt["entries"][0]["extensions"]["vendor"], 42);
+    assert_eq!(rebuilt["vendorBook"], true);
+    let serialized = serde_json::to_value(card).unwrap();
+    assert_eq!(serialized["spec"], "chara_card_v3");
+    assert_eq!(serialized["spec_version"], "3.0");
+    assert_eq!(serialized["vendorRoot"]["value"], 42);
+}
+
+#[test]
+fn st_world_fields_are_consumed_and_legacy_names_still_load() {
+    for wire in [json!({"scanDepth": 2, "ignoreBudget": true, "preventRecursion": true}),
+                 json!({"scan_depth": 2, "ignore_budget": true, "prevent_recursion": true})] {
+        let entry: WIEntry = serde_json::from_value(wire).unwrap();
+        assert_eq!(entry.scan_depth, Some(2));
+        assert!(entry.ignore_budget && entry.prevent_recursion);
+        assert!(!entry.extra.contains_key("ignoreBudget"));
+        let output = serde_json::to_value(entry).unwrap();
+        assert_eq!(output["scanDepth"], 2);
+        assert!(output.get("scan_depth").is_none());
+    }
+    let entry: WIEntry = serde_json::from_value(json!({"sticky":null,"cooldown":null,"delay":null})).unwrap();
+    assert_eq!((entry.sticky, entry.cooldown, entry.delay), (0, 0, 0));
+}
+
+#[test]
+fn st_regex_wire_names_are_not_silently_dropped() {
+    let script: RegexScript = serde_json::from_value(json!({
+        "scriptName": "测试", "findRegex": "/foo/gi", "replaceString": "bar",
+        "promptOnly": true, "minDepth": 2
+    })).unwrap();
+    assert_eq!(script.find_regex, "/foo/gi");
+    assert!(script.prompt_only);
+    assert_eq!(script.min_depth, Some(2));
+}
+
+#[test]
+fn missing_embedded_extensions_use_st_defaults() {
+    let entry: nast_model::card::CharacterBookEntry = serde_json::from_value(json!({
+        "keys":["castle"], "content":"lore", "enabled":true
+    })).unwrap();
+    assert_eq!(entry.extensions.probability, 100);
+    assert!(entry.extensions.use_probability);
+    assert_eq!(entry.extensions.depth, 4);
+    assert_eq!(entry.extensions.group_weight, 100);
+}

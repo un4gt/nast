@@ -80,13 +80,9 @@ fn script_applies(script: &RegexScript, placement: i64, params: &RegexParams) ->
     // pass 匹配（engine.js 348-355）：
     // markdownOnly 只在 isMarkdown；promptOnly 只在 isPrompt；
     // 两者皆 false → 所有 pass 应用（改动聊天文本的 pass 只是其中一个）
-    let pass_ok = if script.markdown_only {
-        params.is_markdown
-    } else if script.prompt_only {
-        params.is_prompt
-    } else {
-        true
-    };
+    let pass_ok = (script.markdown_only && params.is_markdown)
+        || (script.prompt_only && params.is_prompt)
+        || (!script.markdown_only && !script.prompt_only && !params.is_markdown && !params.is_prompt);
     if !pass_ok {
         return false;
     }
@@ -110,84 +106,59 @@ fn script_applies(script: &RegexScript, placement: i64, params: &RegexParams) ->
     script.placement.contains(&placement)
 }
 
-/// 运行单条脚本（runRegexScript 语义）。
-fn run_script(script: &RegexScript, raw: &str, macro_fn: MacroFn) -> String {
-    if script.disabled || script.find_regex.is_empty() || raw.is_empty() {
-        return raw.to_string();
+/// A bounded ECMAScript runtime keeps browser RegExp semantics on the server.
+fn execute_regex(payload: serde_json::Value) -> Result<String, String> {
+    let runtime = rquickjs::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.set_memory_limit(32 * 1024 * 1024);
+    runtime.set_max_stack_size(512 * 1024);
+    let started = std::time::Instant::now();
+    runtime.set_interrupt_handler(Some(Box::new(move || started.elapsed() > std::time::Duration::from_millis(100))));
+    let context = rquickjs::Context::full(&runtime).map_err(|e| e.to_string())?;
+    context.with(|ctx| {
+        ctx.globals().set("payload", payload.to_string()).map_err(|e| e.to_string())?;
+        ctx.eval::<String, _>(include_str!("regex_runtime.js")).map_err(|e| e.to_string())
+    })
+}
+
+pub fn ecma_is_match(pattern: &str, text: &str) -> Result<bool, String> {
+    let output = execute_regex(serde_json::json!({"find":pattern,"raw":text,"test":true}))?;
+    serde_json::from_str(&output).map_err(|e| e.to_string())
+}
+
+fn escape_macro(text: &str) -> String {
+    let mut output = String::new();
+    for c in text.chars() {
+        match c {
+            '\n' => output.push_str("\\n"), '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"), '\0' => output.push_str("\\0"),
+            '.' | '^' | '$' | '*' | '+' | '?' | '{' | '}' | '[' | ']' | '\\' | '/' | '|' | '(' | ')' => {
+                output.push('\\'); output.push(c);
+            }
+            _ => output.push(c),
+        }
     }
-    // findRegex 宏替换模式
+    output
+}
+
+fn run_script(script: &RegexScript, raw: &str, macro_fn: MacroFn) -> String {
+    if script.disabled || script.find_regex.is_empty() || raw.is_empty() { return raw.into(); }
     let find = match script.substitute_regex {
         SUB_RAW => macro_fn(&script.find_regex),
-        SUB_ESCAPED => regex::escape(&macro_fn(&script.find_regex)),
+        SUB_ESCAPED => regex::Regex::new(r"\{\{[^}]+\}\}").unwrap()
+            .replace_all(&script.find_regex, |caps: &regex::Captures| escape_macro(&macro_fn(&caps[0]))).into_owned(),
         _ => script.find_regex.clone(),
     };
-    let Ok(re) = regex::Regex::new(&find) else {
-        // JS regex 特性（look-around 等）regex crate 不支持 → 跳过该脚本
-        return raw.to_string();
-    };
-
-    // 替换串：{{match}} → $0（regex crate 用 ${0}）
-    let replace_template = script.replace_string.replace("{{match}}", "$0");
-
-    re.replace_all(raw, |caps: &regex::Captures| {
-        // $N / $<name> 展开：捕获组值先过滤 trimStrings
-        let expanded = expand_groups(&replace_template, caps, &script.trim_strings);
-        // 替换结果末尾 substituteParams
-        macro_fn(&expanded)
-    })
-    .to_string()
-}
-
-/// 展开 $N / $<name>，组值经 trimStrings 过滤。
-fn expand_groups(template: &str, caps: &regex::Captures, trim: &[String]) -> String {
-    let mut out = String::new();
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'<' {
-                // $<name>
-                if let Some(end) = template[i + 2..].find('>') {
-                    let name = &template[i + 2..i + 2 + end];
-                    let val = caps.name(name).map(|m| m.as_str()).unwrap_or("");
-                    out.push_str(&filter_string(val, trim));
-                    i += 2 + end + 1;
-                    continue;
-                }
-            }
-            // $N（多位数字）
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > i + 1 {
-                let num: usize = template[i + 1..j].parse().unwrap_or(0);
-                let val = caps.get(num).map(|m| m.as_str()).unwrap_or("");
-                out.push_str(&filter_string(val, trim));
-                i = j;
-                continue;
-            }
-            out.push('$');
-            i += 1;
-        } else {
-            let ch = template[i..].chars().next().unwrap();
-            out.push(ch);
-            i += ch.len_utf8();
+    let result = execute_regex(serde_json::json!({
+        "find":find, "raw":raw, "replace":script.replace_string,
+        "trim":script.trim_strings.iter().map(|s| macro_fn(s)).collect::<Vec<_>>(),
+    })).and_then(|result| serde_json::from_str::<Vec<(bool,String)>>(&result).map_err(|e| e.to_string()));
+    match result {
+        Ok(pieces) => pieces.into_iter().map(|(replacement,text)| if replacement { macro_fn(&text) } else { text }).collect(),
+        Err(error) => {
+            tracing::warn!(script_id=%script.id, %error, "regular expression skipped");
+            raw.into()
         }
     }
-    out
-}
-
-/// filterString：从值中移除 trimStrings 子串（split(t).join('')）。
-fn filter_string(s: &str, trim_strings: &[String]) -> String {
-    let mut out = s.to_string();
-    for t in trim_strings {
-        if t.is_empty() {
-            continue;
-        }
-        out = out.replace(t.as_str(), "");
-    }
-    out
 }
 
 #[cfg(test)]
@@ -211,7 +182,7 @@ mod tests {
     fn basic_replacement() {
         let scripts = vec![script("foo", "bar", vec![0, 1])];
         let out = get_regexed_string("foo baz foo", 1, &scripts, &RegexParams::default(), M);
-        assert_eq!(out, "bar baz bar");
+        assert_eq!(out, "bar baz foo"); // No g flag: ST replaces only the first match.
     }
 
     #[test]
@@ -284,6 +255,7 @@ mod tests {
     #[test]
     fn depth_filter() {
         let mut s = script("foo", "bar", vec![1]);
+        s.prompt_only = true;
         s.min_depth = Some(1);
         s.max_depth = Some(3);
         let scripts = vec![s];
@@ -332,6 +304,7 @@ mod tests {
     fn trim_strings_filters_group_values() {
         // trimStrings 过滤的是捕获组展开值（JS filterString 作用于 $N 值）
         let mut s = script(r"(remove-me)?foo", "$1bar", vec![1]);
+        s.prompt_only = true;
         s.trim_strings = vec!["remove-me".into()];
         let scripts = vec![s];
         let out = get_regexed_string(
@@ -350,11 +323,12 @@ mod tests {
 
     #[test]
     fn capture_groups_and_match() {
-        let scripts = vec![script(
+        let mut scripts = vec![script(
             r"(\w+) says",
             "$1 spoke ({{match}})",
             vec![1],
         )];
+        scripts[0].prompt_only = true;
         let out = get_regexed_string(
             "Alice says hi",
             1,
@@ -389,7 +363,8 @@ mod tests {
     #[test]
     fn replace_string_macro_substituted() {
         // 替换结果末尾过 substituteParams
-        let scripts = vec![script("hello", "hi {{user}}", vec![1])];
+        let mut scripts = vec![script("hello", "hi {{user}}", vec![1])];
+        scripts[0].prompt_only = true;
         let out = get_regexed_string(
             "hello world",
             1,
@@ -440,11 +415,14 @@ mod tests {
     #[test]
     fn scoped_chaining_order() {
         // 全局 → 角色 → 聊天 链式：后一环作用在前一环输出上
-        let scoped = RegexScripts {
+        let mut scoped = RegexScripts {
             global: vec![script("one", "two", vec![1])],
             character: vec![script("two", "three", vec![1])],
             chat: vec![script("three", "four", vec![1])],
         };
+        for script in scoped.global.iter_mut().chain(scoped.character.iter_mut()).chain(scoped.chat.iter_mut()) {
+            script.prompt_only = true;
+        }
         let out = scoped.apply(
             "one",
             1,
@@ -458,9 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_regex_skipped() {
-        // look-ahead 在 regex crate 不支持 → 脚本跳过（原文保留）
-        let scripts = vec![script(r"foo(?=bar)", "baz", vec![1])];
+    fn lookahead_is_supported() {
+        let mut scripts = vec![script(r"foo(?=bar)", "baz", vec![1])];
+        scripts[0].prompt_only = true;
         let out = get_regexed_string(
             "foobar",
             1,
@@ -471,6 +449,18 @@ mod tests {
             },
             M,
         );
-        assert_eq!(out, "foobar");
+        assert_eq!(out, "bazbar");
     }
+    #[test]
+    fn ecmascript_flags_named_groups_and_raw_pass_gates() {
+        let script = script(r"/(?<=prefix)(?<word>foo)/gi", "$<word>!", vec![1]);
+        assert_eq!(run_script(&script, "prefixFoo prefixfoo", M), "prefixFoo! prefixfoo!");
+        assert!(!script_applies(&script, 1, &RegexParams { is_prompt:true, ..Default::default() }));
+        let mut both = script;
+        both.markdown_only = true; both.prompt_only = true;
+        assert!(script_applies(&both, 1, &RegexParams { is_prompt:true, ..Default::default() }));
+        assert!(script_applies(&both, 1, &RegexParams { is_markdown:true, ..Default::default() }));
+        assert!(ecma_is_match("/(?<=a)b/", "ab").unwrap());
+    }
+
 }

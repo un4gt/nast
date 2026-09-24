@@ -1,13 +1,42 @@
 import { useEffect, useState } from 'react';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { worldInfoPath, worldInfoView } from '@/lib/world-settings';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Spinner } from '@/components/ui/spinner';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { useStore } from '../../store';
 import { pushToast } from '../../toasts';
 import {
-  Plug, SlidersHorizontal, Sparkles, UserCircle, Palette, BookOpen, Info,
-  ListOrdered, FolderOpen, Regex, Puzzle, TerminalSquare,
+  Plug,
+  SlidersHorizontal,
+  Sparkles,
+  UserCircle,
+  Palette,
+  BookOpen,
+  Info,
+  ListOrdered,
+  FolderOpen,
+  Regex,
+  Puzzle,
+  TerminalSquare,
+  Check,
+  Save,
+  Headphones,
 } from 'lucide-react';
 import { ConnectionPanel } from './sections/ConnectionPanel';
 import { SamplingPanel } from './sections/SamplingPanel';
@@ -21,11 +50,13 @@ import { PresetPanel } from './sections/PresetPanel';
 import { RegexPanel } from './sections/RegexPanel';
 import { PluginsPanel } from './sections/PluginsPanel';
 import { CustomCommandsPanel } from './sections/CustomCommandsPanel';
+import { TtsPanel } from './sections/TtsPanel';
 
 const SECTIONS = [
   { id: 'connection', icon: Plug, label: '连接' },
+  { id: 'tts', icon: Headphones, label: '语音朗读' },
   { id: 'preset', icon: FolderOpen, label: '预设' },
-  { id: 'prompts', icon: ListOrdered, label: 'Prompt Manager' },
+  { id: 'prompts', icon: ListOrdered, label: '提示词管理' },
   { id: 'sampling', icon: SlidersHorizontal, label: '采样参数' },
   { id: 'ai-response', icon: Sparkles, label: 'AI 回复' },
   { id: 'regex', icon: Regex, label: '正则脚本' },
@@ -42,14 +73,21 @@ type SectionId = (typeof SECTIONS)[number]['id'];
 export function SettingsSheet({
   open,
   onOpenChange,
+  initialSection,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  initialSection?: string;
 }) {
   const { settings, saveSettings } = useStore();
   const [section, setSection] = useState<SectionId>('connection');
   const [draft, setDraft] = useState<any>({});
   const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (open && initialSection && SECTIONS.some((s) => s.id === initialSection)) setSection(initialSection as SectionId);
+  }, [open, initialSection]);
 
   useEffect(() => {
     if (open && settings) {
@@ -73,73 +111,83 @@ export function SettingsSheet({
     setDirty(true);
   };
 
-  const patchWi = (key: string, value: unknown) => patch(`world_info.${key}`, value);
+  const patchWi = (key: string, value: unknown) => patch(worldInfoPath(key), value);
   const patchOai = (key: string, value: unknown) => patch(`oai_settings.${key}`, value);
 
   const save = async () => {
+    if (saving) return;
+    setSaving(true);
     try {
       await saveSettings(draft);
       pushToast('设置已保存', 'success');
       setDirty(false);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setSaving(false);
     }
   };
 
   const oai = draft.oai_settings ?? {};
-  const wi = draft.world_info ?? {};
+  const wi = worldInfoView(draft);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-[720px] max-w-[92vw] gap-0 p-0 sm:max-w-[92vw]">
-        <SheetHeader className="shrink-0 border-b px-6 py-4">
-          <SheetTitle className="flex items-center gap-2">
-            设置
-            {dirty && (
-              <Button size="sm" className="h-6 px-2.5 text-xs" onClick={() => void save()}>
-                保存
-              </Button>
-            )}
-          </SheetTitle>
-          <SheetDescription className="sr-only">nast 设置中心</SheetDescription>
+      <SheetContent
+        side="right"
+        className="w-full max-w-full gap-0 p-0 sm:w-[780px] sm:max-w-[94vw]"
+      >
+        <SheetHeader className="shrink-0 border-b px-5 py-5 sm:px-6">
+          <SheetTitle>设置</SheetTitle>
+          <SheetDescription>调整连接、角色与偏好，让对话更合心意。</SheetDescription>
         </SheetHeader>
+
+        <div className="shrink-0 border-b px-4 py-3 sm:hidden">
+          <Select value={section} onValueChange={(value) => setSection(value as SectionId)}>
+            <SelectTrigger aria-label="设置分类">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {SECTIONS.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.label}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
 
         <div className="flex min-h-0 flex-1">
           {/* 左侧分区导航 */}
-          <nav className="flex w-40 shrink-0 flex-col gap-0.5 border-r p-2">
+          <nav
+            aria-label="设置分类"
+            className="hidden w-44 shrink-0 flex-col gap-1 overflow-y-auto border-r bg-sidebar p-3 sm:flex"
+          >
             {SECTIONS.map((s) => (
               <Button
                 key={s.id}
-                variant="ghost"
-                className={cn(
-                  'h-auto w-full justify-start px-3 py-2 font-normal',
-                  section === s.id && 'bg-accent font-medium text-accent-foreground',
-                )}
+                variant={section === s.id ? 'secondary' : 'ghost'}
+                className="h-10 w-full shrink-0 justify-start px-3"
+                aria-current={section === s.id ? 'page' : undefined}
                 onClick={() => setSection(s.id)}
               >
-                <s.icon className="size-4 shrink-0" />
+                <s.icon data-icon="inline-start" />
                 <span className="truncate">{s.label}</span>
               </Button>
             ))}
             <div className="flex-1" />
-            {dirty && (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-auto w-full justify-start px-3 py-2 text-xs text-primary hover:bg-primary/10"
-                onClick={() => void save()}
-              >
-                <span className="size-1.5 rounded-full bg-primary" />
-                未保存的更改
-              </Button>
-            )}
           </nav>
 
           {/* 右侧内容 */}
-          <ScrollArea className="min-w-0 flex-1">
-            <div className="p-6">
+          <ScrollArea className="min-w-0 flex-1" key={section}>
+            <fieldset disabled={saving} className="min-w-0 border-0 p-5 sm:p-7">
               {section === 'connection' && <ConnectionPanel oai={oai} patchOai={patchOai} />}
-              {section === 'preset' && <PresetPanel oai={oai} applyToOai={(m) => patch('oai_settings', m)} />}
+              {section === 'tts' && <TtsPanel draft={draft} patch={patch} />}
+              {section === 'preset' && (
+                <PresetPanel oai={oai} applyToOai={(m) => patch('oai_settings', m)} />
+              )}
               {section === 'prompts' && <PromptManagerPanel oai={oai} patchOai={patchOai} />}
               {section === 'regex' && <RegexPanel draft={draft} patch={patch} />}
               {section === 'commands' && <CustomCommandsPanel draft={draft} patch={patch} />}
@@ -150,9 +198,28 @@ export function SettingsSheet({
               {section === 'appearance' && <AppearancePanel />}
               {section === 'world-info' && <WorldInfoGlobalPanel wi={wi} patchWi={patchWi} />}
               {section === 'about' && <AboutPanel />}
-            </div>
+            </fieldset>
           </ScrollArea>
         </div>
+        <footer className="safe-bottom flex shrink-0 items-center justify-between gap-3 border-t bg-card px-5 pt-3">
+          <span
+            className={cn(
+              'flex items-center gap-2 text-xs',
+              dirty ? 'text-primary' : 'text-muted-foreground',
+            )}
+            role="status"
+          >
+            {dirty ? (
+              <span className="size-1.5 rounded-full bg-primary" />
+            ) : (
+              <Check className="size-3.5" />
+            )}
+            {saving ? '正在保存…' : dirty ? '有尚未保存的更改' : '更改已保存'}
+          </span>
+          <Button disabled={!dirty || saving} onClick={() => void save()}>
+            {saving ? <Spinner /> : <Save data-icon="inline-start" />}保存更改
+          </Button>
+        </footer>
       </SheetContent>
     </Sheet>
   );

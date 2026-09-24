@@ -71,6 +71,8 @@ impl PromptMessage {
 
 /// generation input（对应 prepareOpenAIMessages 的参数包）。
 pub struct AssembleInput<'a> {
+    pub macro_env: Option<&'a MacroEnv>,
+    pub macro_context: Option<&'a std::cell::RefCell<MacroContext>>,
     pub oai: &'a OaiSettings,
     pub generation_type: &'a str, // normal/continue/impersonate/swipe/regenerate/quiet
     pub name1: &'a str,
@@ -729,16 +731,18 @@ fn substitute_dyn(text: &str, extra: &[(&str, &str)], input: &AssembleInput) -> 
     let env = MacroEnv {
         user: input.name1.to_string(),
         char: input.name2.to_string(),
-        group: input.name2.to_string(),
+        group: input.macro_env.map(|env| env.group.clone()).unwrap_or_else(|| input.name2.to_string()),
         // personality/scenario format 宏替换需要角色卡字段
         description: input.char_description.clone(),
         personality: input.char_personality.clone(),
         scenario: input.scenario.clone(),
         persona: input.persona_description.clone(),
-        ..Default::default()
+        ..input.macro_env.cloned().unwrap_or_default()
     };
     let mut ctx = MacroContext::default();
-    let mut out = evaluate_macros(text, &env, &mut ctx);
+    let mut out = if let Some(context) = input.macro_context {
+        evaluate_macros(text, &env, &mut context.borrow_mut())
+    } else { evaluate_macros(text, &env, &mut ctx) };
     for (k, v) in extra {
         out = out.replace(&format!("{{{{{k}}}}}"), v);
     }

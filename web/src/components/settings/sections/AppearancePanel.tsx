@@ -1,9 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTheme } from 'next-themes';
 import { Label } from '@/components/ui/label';
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { Moon, Sun } from 'lucide-react';
 import { SliderField } from '../fields';
 
 export function AppearancePanel() {
@@ -11,7 +10,9 @@ export function AppearancePanel() {
     <div className="flex flex-col gap-5">
       <div>
         <h3 className="mb-1 text-sm font-semibold">外观</h3>
-        <p className="text-xs text-muted-foreground">主题与聊天区排版（localStorage 存储，即时生效）。</p>
+        <p className="text-xs text-muted-foreground">
+          选择舒适的阅读方式。外观调整即时生效，并在此设备上保留。
+        </p>
       </div>
       <ThemeField />
       <FontScaleField />
@@ -22,22 +23,36 @@ export function AppearancePanel() {
 
 function ThemeField() {
   const { theme, setTheme } = useTheme();
-  const [value, setValue] = useState(theme ?? 'dark');
-  useEffect(() => {
-    if (theme) setValue(theme);
-  }, [theme]);
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col gap-3">
       <Label>主题</Label>
-      <Select value={value} onValueChange={(v) => setTheme(v)}>
-        <SelectTrigger>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="dark">深色</SelectItem>
-          <SelectItem value="light">浅色</SelectItem>
-        </SelectContent>
-      </Select>
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        value={theme ?? 'dark'}
+        onValueChange={(value) => {
+          if (value) setTheme(value);
+        }}
+        className="grid grid-cols-2 gap-3"
+        aria-label="界面主题"
+      >
+        <ToggleGroupItem
+          value="light"
+          className="h-20 flex-col gap-2 rounded-xl"
+          aria-label="浅色主题"
+        >
+          <Sun className="size-5" />
+          浅色
+        </ToggleGroupItem>
+        <ToggleGroupItem
+          value="dark"
+          className="h-20 flex-col gap-2 rounded-xl"
+          aria-label="深色主题"
+        >
+          <Moon className="size-5" />
+          深色
+        </ToggleGroupItem>
+      </ToggleGroup>
     </div>
   );
 }
@@ -61,5 +76,7 @@ function ChatWidthField() {
     localStorage.setItem(key, String(n));
     document.documentElement.style.setProperty('--chat-width', `${n}%`);
   };
-  return <SliderField label="聊天区宽度 %" value={v} min={50} max={100} step={5} onChange={commit} />;
+  return (
+    <SliderField label="聊天区宽度 %" value={v} min={50} max={100} step={5} onChange={commit} />
+  );
 }

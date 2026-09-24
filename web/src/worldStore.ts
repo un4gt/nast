@@ -15,7 +15,7 @@ export interface WIEntry {
   disable: boolean;
   excludeRecursion: boolean;
   preventRecursion: boolean;
-  delayUntilRecursion: boolean;
+  delayUntilRecursion: boolean | number;
   probability: number;
   useProbability: boolean;
   depth: number;
@@ -27,12 +27,14 @@ export interface WIEntry {
   cooldown: number;
   delay: number;
   ignoreBudget: boolean;
+  [key: string]: unknown;
 }
 
 interface WorldStore {
   worlds: string[];
   activeWorld: string | null;
   entries: Record<string, WIEntry>;
+  bookExtra: Record<string, unknown>;
   loadWorlds: () => Promise<void>;
   openWorld: (name: string) => Promise<void>;
   saveWorld: () => Promise<void>;
@@ -48,6 +50,7 @@ export const useWorldStore = create<WorldStore>((set, get) => ({
   worlds: [],
   activeWorld: null,
   entries: {},
+  bookExtra: {},
 
   loadWorlds: async () => {
     const worlds = await rpc.call<string[]>('worlds.list', {});
@@ -55,20 +58,22 @@ export const useWorldStore = create<WorldStore>((set, get) => ({
   },
 
   openWorld: async (name) => {
-    const book = await rpc.call<{ entries: Record<string, WIEntry> }>('worlds.get', { name });
-    set({ activeWorld: name, entries: book.entries ?? {} });
+    const book = await rpc.call<{ entries: Record<string, WIEntry>; [key: string]: unknown }>('worlds.get', { name });
+    const { entries, ...bookExtra } = book;
+    set({ activeWorld: name, entries: entries ?? {}, bookExtra });
   },
 
   setActiveWorld: (name) => set({ activeWorld: name, entries: {} }),
 
   saveWorld: async () => {
-    const { activeWorld, entries } = get();
+    const { activeWorld, entries, bookExtra } = get();
     if (!activeWorld) return;
-    await rpc.call('worlds.save', { name: activeWorld, book: { entries } });
+    await rpc.call('worlds.save', { name: activeWorld, book: { ...bookExtra, entries } });
     await get().loadWorlds();
   },
 
   createWorld: async (name) => {
+    if ((await rpc.call<string[]>('worlds.list', {})).includes(name)) throw new Error('已有同名世界书，请使用其他名称');
     await rpc.call('worlds.save', { name, book: { entries: {} } });
     await get().loadWorlds();
     await get().openWorld(name);
@@ -87,7 +92,9 @@ export const useWorldStore = create<WorldStore>((set, get) => ({
 
   addEntry: () =>
     set((s) => {
-      const uid = String(Date.now());
+      let candidate = 0;
+      while (String(candidate) in s.entries) candidate += 1;
+      const uid = String(candidate);
       return {
         entries: {
           ...s.entries,

@@ -20,6 +20,12 @@ pub const SPEC_V3: &str = "chara_card_v3";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Character {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec_version: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
     pub name: String,
     #[serde(default)]
     pub description: String,
@@ -39,6 +45,7 @@ pub struct Character {
     pub tags: Vec<String>,
     /// ST 存字符串（V1 遗留），导入时 String(talkativeness)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "crate::compat::string_or_number")]
     pub talkativeness: Option<String>,
     #[serde(default)]
     pub fav: bool,
@@ -118,6 +125,7 @@ pub struct V2CharData {
 pub struct CharExtensions {
     /// ST 里是 string 型数字
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "crate::compat::string_or_number")]
     pub talkativeness: Option<String>,
     #[serde(default)]
     pub fav: bool,
@@ -141,6 +149,7 @@ pub struct DepthPrompt {
     #[serde(default = "default_depth")]
     pub depth: i64,
     #[serde(default = "default_role_system")]
+    #[serde(deserialize_with = "crate::compat::prompt_role", serialize_with = "crate::compat::serialize_prompt_role")]
     pub role: String,
 }
 
@@ -180,6 +189,8 @@ pub struct CharacterBook {
     pub extensions: BTreeMap<String, Value>,
     #[serde(default)]
     pub entries: Vec<CharacterBookEntry>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 /// 卡内嵌条目（spec 字段 + ST extensions 数值字段，见 char-data.js v2DataWorldInfoEntry）。
@@ -217,6 +228,8 @@ pub struct CharacterBookEntry {
     pub use_regex: Option<bool>,
     #[serde(default)]
     pub extensions: BookEntryExtensions,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
 }
 
 fn default_order() -> i64 {
@@ -224,7 +237,7 @@ fn default_order() -> i64 {
 }
 
 /// ST 数值扩展字段全部放在 entry.extensions（导入时映射为 WIEntry 数值字段）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BookEntryExtensions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,15 +247,18 @@ pub struct BookEntryExtensions {
     #[serde(default)]
     pub prevent_recursion: bool,
     #[serde(default)]
-    pub delay_until_recursion: bool,
+    #[serde(deserialize_with = "crate::compat::null_default")]
+    pub delay_until_recursion: crate::world::BoolOrNum,
     /// ST 存 0-100
     #[serde(default = "default_prob")]
     pub probability: i64,
     #[serde(default = "default_true")]
+    #[serde(rename = "useProbability", alias = "use_probability")]
     pub use_probability: bool,
     #[serde(default = "default_depth4")]
     pub depth: i64,
     #[serde(default)]
+    #[serde(rename = "selectiveLogic", alias = "selective_logic")]
     pub selective_logic: i64,
     #[serde(default)]
     pub group: String,
@@ -265,10 +281,13 @@ pub struct BookEntryExtensions {
     #[serde(default)]
     pub vectorized: bool,
     #[serde(default)]
+    #[serde(deserialize_with = "crate::compat::null_default")]
     pub sticky: i64,
     #[serde(default)]
+    #[serde(deserialize_with = "crate::compat::null_default")]
     pub cooldown: i64,
     #[serde(default)]
+    #[serde(deserialize_with = "crate::compat::null_default")]
     pub delay: i64,
     #[serde(default)]
     pub match_persona_description: bool,
@@ -286,6 +305,13 @@ pub struct BookEntryExtensions {
     pub ignore_budget: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for BookEntryExtensions {
+    fn default() -> Self {
+        // An absent extensions object has exactly the same defaults as {}.
+        serde_json::from_value(serde_json::json!({})).expect("static book defaults")
+    }
 }
 
 fn default_prob() -> i64 {
@@ -395,6 +421,11 @@ impl Character {
                 role: "system".into(),
             });
         }
+        if ch.spec.is_none() {
+            ch.spec = Some(SPEC_V2.into());
+            ch.spec_version = Some("2.0".into());
+        }
+        ch.talkativeness = ch.data.extensions.talkativeness.clone();
         Ok(ch)
     }
 

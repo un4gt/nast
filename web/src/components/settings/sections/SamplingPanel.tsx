@@ -16,35 +16,35 @@ export function SamplingPanel({
 
       <SliderField
         label="Temperature"
-        value={oai.temperature ?? 1.0}
+        value={oai.temp_openai ?? 1.0}
         min={0}
         max={2}
         step={0.05}
-        onChange={(v) => patchOai('temperature', v)}
+        onChange={(v) => patchOai('temp_openai', v)}
       />
       <SliderField
         label="Top P"
-        value={oai.top_p ?? 1.0}
+        value={oai.top_p_openai ?? 1.0}
         min={0}
         max={1}
         step={0.01}
-        onChange={(v) => patchOai('top_p', v)}
+        onChange={(v) => patchOai('top_p_openai', v)}
       />
       <SliderField
         label="Frequency Penalty"
-        value={oai.frequency_penalty ?? 0}
+        value={oai.freq_pen_openai ?? 0}
         min={-2}
         max={2}
         step={0.05}
-        onChange={(v) => patchOai('frequency_penalty', v)}
+        onChange={(v) => patchOai('freq_pen_openai', v)}
       />
       <SliderField
         label="Presence Penalty"
-        value={oai.presence_penalty ?? 0}
+        value={oai.pres_pen_openai ?? 0}
         min={-2}
         max={2}
         step={0.05}
-        onChange={(v) => patchOai('presence_penalty', v)}
+        onChange={(v) => patchOai('pres_pen_openai', v)}
       />
       <SliderField
         label="回复长度上限（max_tokens）"

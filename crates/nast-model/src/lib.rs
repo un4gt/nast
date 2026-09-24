@@ -5,6 +5,7 @@
 //! 源码行为契约编写，字段注释标注来源。
 
 pub mod card;
+pub mod compat;
 pub mod chat;
 pub mod group;
 pub mod persona;

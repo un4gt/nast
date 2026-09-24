@@ -6,6 +6,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Read ST's nested settings, falling back to the previous nast layout.
+pub fn world_info_view(settings: &Value) -> Value {
+    let mut view = settings.get("world_info").filter(|v| v.is_object()).cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let Some(canonical) = settings.get("world_info_settings").and_then(Value::as_object) {
+        view.as_object_mut().unwrap().extend(canonical.clone());
+        if let Some(selection) = canonical.get("world_info").and_then(Value::as_object) {
+            for (source, target) in [("globalSelect", "global_select"), ("charLore", "char_lore")] {
+                if let Some(value) = selection.get(source) { view[target] = value.clone(); }
+            }
+        }
+    }
+    for (canonical, legacy) in [("globalSelect", "global_select"), ("charLore", "char_lore")] {
+        if let Some(value) = view.get(canonical).cloned() { view[legacy] = value; }
+    }
+    view
+}
+
+pub fn normalize_settings(settings: &mut Value) {
+    if let Some(oai) = settings.get_mut("oai_settings").and_then(Value::as_object_mut) {
+        for (canonical, legacy) in [("temp_openai","temperature"), ("freq_pen_openai","frequency_penalty"),
+            ("pres_pen_openai","presence_penalty"), ("top_p_openai","top_p")] {
+            if let Some(value) = oai.remove(legacy) { oai.entry(canonical).or_insert(value); }
+        }
+    }
+}
+
 /// WI 全局默认值（world-info.js 顶部 globals）。
 pub const WI_DEPTH_DEFAULT: i64 = 2;
 pub const WI_MIN_ACTIVATIONS_DEFAULT: i64 = 0;

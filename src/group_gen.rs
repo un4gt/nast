@@ -17,10 +17,33 @@ use nast_model::group::Group;
 use serde_json::{json, Value};
 
 pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
+    let abort = tokio_util::sync::CancellationToken::new();
+    {
+        let mut guard = state.generation.write().await;
+        if guard.abort.is_some() {
+            return Err(RpcError::BadRequest("generation already in progress".into()));
+        }
+        guard.abort = Some(abort.clone());
+        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    }
+    let result = generate_group_inner(state.clone(), params, abort).await;
+    {
+        let mut guard = state.generation.write().await;
+        guard.abort = None;
+        guard.info = None;
+        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    }
+    state.hub.emit("generation_ended", json!({"type":"group"}));
+    let host = state.plugins.lock().unwrap();
+    let _ = host.dispatch("generation_ended", &json!({"type":"group"}));
+    result
+}
+
+async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_util::sync::CancellationToken) -> RpcResult {
     let group_id = param_str(&params, "id")?;
     let chat_id = param_str(&params, "chat_id")?;
     // 触发单成员（force_chid 语义）：仅该成员回复
-    let force_member = params
+    let mut force_member = params
         .get("member")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -32,11 +55,48 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         .ok_or_else(|| RpcError::NotFound(format!("group {group_id}")))?
         .clone();
 
+    if !group.chats.iter().any(|id| id == chat_id) && group.chat_id != chat_id {
+        return Err(RpcError::BadRequest("chat does not belong to group".into()));
+    }
+    if !force_member.is_empty() && !group.members.contains(&force_member) {
+        return Err(RpcError::BadRequest("forced character is not a group member".into()));
+    }
+
     // 读群聊天文件（无则用成员开场白初始化）
     let mut chat = match state.user.read_group_chat(chat_id) {
         Ok(c) => c,
-        Err(_) => init_group_chat(&state, &group, chat_id)?,
+        Err(nast_storage::StorageError::NotFound(_)) => init_group_chat(&state, &group, chat_id)?,
+        Err(error) => return Err(error.into()),
     };
+
+    let generation_type = match params["type"].as_str().unwrap_or("normal") {
+        "normal" => GenerationType::Normal,
+        "regenerate" => GenerationType::Regenerate,
+        "swipe" => GenerationType::Swipe,
+        "continue" => GenerationType::Continue,
+        _ => return Err(RpcError::BadRequest("unsupported group generation type".into())),
+    };
+    if matches!(generation_type, GenerationType::Swipe | GenerationType::Continue) {
+        let last = chat.0.last().filter(|m| m["is_user"] == false && m["is_system"] != true)
+            .ok_or_else(|| RpcError::BadRequest("last message is not a character reply".into()))?;
+        force_member = last["original_avatar"].as_str().filter(|a| group.members.iter().any(|m| m == a))
+            .ok_or_else(|| RpcError::BadRequest("reply character is no longer a group member".into()))?.to_string();
+    }
+    if generation_type == GenerationType::Regenerate {
+        let last = chat.0.last().filter(|m| m["is_user"] == false)
+            .ok_or_else(|| RpcError::BadRequest("nothing to regenerate".into()))?;
+        let generation_id = last["extra"]["gen_id"].clone();
+        loop {
+            if chat.0.len() <= 1 { break; }
+            let last = chat.0.last().unwrap();
+            if last["is_user"] != false || last["is_system"] == true { break; }
+            if !generation_id.is_null() && !last["extra"]["gen_id"].is_null()
+                && last["extra"]["gen_id"] != generation_id { break; }
+            chat.0.pop();
+            state.hub.emit("message_deleted", json!(chat.0.len()));
+        }
+        state.user.save_group_chat(chat_id, &chat, false)?;
+    }
 
     // 成员数据
     let mut members: Vec<(GroupMember, Character)> = Vec::new();
@@ -97,10 +157,12 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         name
     };
 
+    state.hub.emit("generation_started", json!({"type": "group"}));
     // 用户消息（可选）先落盘；插件 user_input 钩子可改写
     let user_message = params
         .get("user_message")
         .and_then(|v| v.as_str())
+        .filter(|_| generation_type == GenerationType::Normal)
         .unwrap_or("");
     let user_message = if user_message.is_empty() {
         String::new()
@@ -113,6 +175,13 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
             )
             .unwrap_or_else(|| user_message.to_string())
         };
+        let settings = state.settings.read().await.clone();
+        // No character is selected while submitting the group user message.
+        // Apply shared global/preset rules once, before the member generation loop.
+        let scripts = crate::generate::collect_regex_scripts_for(&settings, &Default::default(), &chat.metadata());
+        let transformed = nast_engine::regex_engine::get_regexed_string(&transformed,
+            nast_model::regex_script::RP_USER_INPUT, &scripts, &Default::default(),
+            &|text| crate::prompt_bridge::substitute_basic(text, &user_name, &group.name));
         let msg = json!({
             "name": user_name,
             "is_user": true,
@@ -122,6 +191,9 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
         });
         chat.0.push(msg);
         state.user.save_group_chat(chat_id, &chat, false)?;
+        let index = chat.0.len() - 1;
+        state.hub.emit("message_sent", json!(index));
+        state.hub.emit("user_message_rendered", json!(index));
         user_message.to_string()
     };
 
@@ -151,7 +223,6 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     }
 
     // 生成会话
-    let abort = tokio_util::sync::CancellationToken::new();
     {
         let mut guard = state.generation.write().await;
         guard.abort = Some(abort.clone());
@@ -178,6 +249,8 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     let provider = crate::connection::provider(&oai, &secrets_snapshot);
     let settings_snapshot = state.settings.read().await.clone();
     let session = GenerateSession {
+        shared_settings: &state.settings,
+        global_variables: std::cell::RefCell::new(settings_snapshot.pointer("/extension_settings/variables/global").and_then(Value::as_object).cloned().unwrap_or_default()),
         user: &state.user,
         hub: &state.hub,
         oai,
@@ -201,7 +274,8 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
     let gen_id = chrono::Utc::now().timestamp_millis();
     let mut replies: Vec<Value> = Vec::new();
     for avatar in &activated {
-        let (member, member_ch) = members
+        if session.abort.is_cancelled() { break; }
+        let (_member, member_ch) = members
             .iter()
             .find(|(gm, _)| &gm.avatar == avatar)
             .ok_or_else(|| RpcError::Internal("member vanished".into()))?;
@@ -210,216 +284,19 @@ pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
             .emit("group_member_drafted", json!(member_ch.name));
 
         let p = GenerateParams {
-            generation_type: GenerationType::Normal,
+            group: Some(crate::generate::GroupContext { group: group.clone(), members: members.clone(), generation_id:gen_id }),
+            generation_type: if generation_type == GenerationType::Regenerate { GenerationType::Normal } else { generation_type },
             avatar: avatar.clone(),
-            chat_file: String::new(),
+            chat_file: chat_id.to_string(),
             user_message: String::new(),
             character: member_ch.clone(),
             is_group: true,
         };
-        let history: Vec<nast_model::chat::ChatMessage> = chat
-            .0
-            .iter()
-            .skip(1)
-            .filter_map(|v| serde_json::from_value(v.clone()).ok())
-            .collect();
-
-        let input =
-            build_group_input(&session, &p, &history, &group, members.as_slice(), member);
-        let assembled = crate::prompt_bridge::assemble_with_macros(&session.oai, &input);
-        // 流式：逐 token 广播（前端群聊逐字渲染）
-        let raw = session
-            .call_provider_stream(&assembled)
-            .await
-            .map_err(RpcError::Internal)?;
-        // cleanUpMessage（群分支：名字清理/endoftext/fixMarkdown）+ ai_output 插件钩子
-        let cleaned = {
-            let host = state.plugins.lock().unwrap();
-            let transformed = host
-                .dispatch(
-                    "ai_output",
-                    &json!({"text": raw, "name": member_ch.name, "is_group": true}),
-                )
-                .unwrap_or(raw);
-            session.clean_up_message(
-                &transformed,
-                &user_name,
-                &member_ch.name,
-                false,
-                false,
-                &[],
-                &[],
-            )
-        };
-        let text = cleaned;
-
-        // 落盘群消息（gen_id 批次 + 身份字段）
-        let msg = json!({
-            "name": member_ch.name,
-            "is_user": false,
-            "is_system": false,
-            "send_date": nast_storage::message_time_stamp(),
-            "mes": text,
-            "force_avatar": format!("thumbnail?type=avatar&file={avatar}"),
-            "original_avatar": avatar,
-            "extra": {
-                "gen_id": gen_id,
-                "api": session.oai.chat_completion_source,
-                "model": crate::connection::model_for(&session.oai),
-                "gen_started": nast_storage::message_time_stamp(),
-            },
-        });
-        chat.0.push(msg.clone());
-        state.user.save_group_chat(chat_id, &chat, false)?;
-        let chat_idx = chat.0.len() as i64 - 1;
-        state.hub.emit("message_received", json!(chat_idx));
-        state.hub.emit("character_message_rendered", json!(chat_idx));
-        replies.push(json!({"name": member_ch.name, "text": text}));
-    }
-    {
-        let mut guard = state.generation.write().await;
-        guard.abort = None;
-        guard.info = None;
-        guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    }
-    // 插件事件：群生成结束
-    {
-        let host = state.plugins.lock().unwrap();
-        let _ = host.dispatch("generation_ended", &json!({"type": "group"}));
+        let result = session.run_content(&p).await.map_err(RpcError::Internal)?;
+        replies.push(json!({"name":member_ch.name,"text":result.text}));
+        if session.abort.is_cancelled() { break; }
     }
     Ok(json!({"activated": activated, "replies": replies, "chat_id": chat_id}))
-}
-
-/// 群输入构建：APPEND 模式合并成员描述/个性/场景，SWAP 用被选中成员的卡。
-fn build_group_input<'a>(
-    session: &'a GenerateSession,
-    p: &'a GenerateParams,
-    history: &'a [nast_model::chat::ChatMessage],
-    group: &'a Group,
-    members: &'a [(GroupMember, Character)],
-    selected: &'a GroupMember,
-) -> crate::prompt_bridge::BridgeInput<'a> {
-    let metadata = session
-        .current_chat_metadata(&p.avatar, &p.chat_file)
-        .unwrap_or_default();
-    let regex_scripts = session.collect_regex_scripts(&p.character, &metadata);
-    let total = history.len();
-
-    let messages: Vec<crate::prompt_bridge::HistoryMessage> = history
-        .iter()
-        .filter(|m| !m.is_system)
-        .enumerate()
-        .map(|(idx, m)| {
-            let depth = (total - 1 - idx) as i64;
-            let placement = if m.is_user {
-                nast_model::regex_script::RP_USER_INPUT
-            } else {
-                nast_model::regex_script::RP_AI_OUTPUT
-            };
-            let macro_fn =
-                |s: &str| crate::prompt_bridge::substitute_basic(s, "User", &p.character.name);
-            let params = nast_engine::regex_engine::RegexParams {
-                depth: Some(depth),
-                is_prompt: true,
-                ..Default::default()
-            };
-            let role = if m.is_user { "user" } else { "assistant" };
-            let mut content = nast_engine::regex_engine::get_regexed_string(
-                &m.mes,
-                placement,
-                &regex_scripts,
-                &params,
-                &macro_fn,
-            );
-            let is_narrator = m.extra.kind.as_deref() == Some("narrator");
-            let names_behavior = session.oai.character_names_behavior;
-            if names_behavior == 2 && !is_narrator {
-                content = format!("{}: {}", m.name, content);
-            } else if names_behavior == 0 && m.name != "User" && !is_narrator {
-                // 群聊中非用户消息全部带名（DEFAULT 语义的群分支）
-                content = format!("{}: {}", m.name, content);
-            }
-            content = content.replace(String::from("\r").as_str(), "");
-            crate::prompt_bridge::HistoryMessage {
-                role: role.into(),
-                content,
-                name: None,
-                is_narrator,
-                injected: false,
-            }
-        })
-        .collect();
-
-    // 卡片字段：SWAP 用选中成员；APPEND 拼接全部
-    let (description, personality, scenario) = if group.generation_mode == 0 {
-        (
-            p.character.data.description.clone(),
-            p.character.data.personality.clone(),
-            p.character.data.scenario.clone(),
-        )
-    } else {
-        let pairs: Vec<(GroupMember, Character)> = members
-            .iter()
-            .map(|(gm, ch)| (gm.clone(), ch.clone()))
-            .collect();
-        (
-            nast_engine::group_chat::append_cards(group, &pairs, |c| &c.data.description),
-            nast_engine::group_chat::append_cards(group, &pairs, |c| &c.data.personality),
-            nast_engine::group_chat::append_cards(group, &pairs, |c| &c.data.scenario),
-        )
-    };
-
-    // 成员深度提示（SWAP 为空）
-    let mut injections: Vec<crate::prompt_bridge::InChatInjection> = Vec::new();
-    if group.generation_mode != 0 {
-        for (depth, role, prompt) in
-            nast_engine::group_chat::group_depth_prompts(group, members)
-        {
-            let role_num = match role.as_str() {
-                "user" => 1,
-                "assistant" => 2,
-                _ => 0,
-            };
-            injections.push(crate::prompt_bridge::InChatInjection {
-                content: prompt,
-                depth,
-                role: role_num,
-                injection_order: 100,
-            });
-        }
-    }
-    injections.extend(crate::generate::build_injections(p));
-
-    crate::prompt_bridge::BridgeInput {
-        oai: &session.oai,
-        generation_type: p.generation_type.as_str(),
-        name1: "User".into(),
-        name2: selected.name.clone(),
-        is_group: true,
-        char_description: description,
-        char_personality: personality,
-        scenario,
-        persona_description: String::new(),
-        persona_position_in_prompt: false, // 群聊 persona 不进 prompt（ST 默认仅单人）
-        world_info_before: String::new(),
-        world_info_after: String::new(),
-        messages,
-        message_examples: crate::generate::parse_examples(&p.character.data.mes_example, "User", &p.character.name),
-        pin_examples: false,
-        in_chat_injections: injections,
-        authors_note: None,
-        outlets: serde_json::Map::new(),
-        system_prompt_override: {
-            let sp = &p.character.data.system_prompt;
-            if !sp.is_empty() { Some(sp.clone()) } else { None }
-        },
-        jailbreak_prompt_override: {
-            let phi = &p.character.data.post_history_instructions;
-            if !phi.is_empty() { Some(phi.clone()) } else { None }
-        },
-        cycle_prompt: None,
-        last_role: None,
-    }
 }
 
 pub(crate) fn init_group_chat(
@@ -441,15 +318,19 @@ pub(crate) fn init_group_chat(
     for avatar in &group.members {
         if let Ok(ch) = read_character(state, avatar) {
             let greeting = nast_engine::group_chat::pick_greeting(&ch, &mut rng);
+            let greeting_id = uuid::Uuid::new_v4().to_string();
             let msg = json!({
                 "name": ch.name,
                 "is_user": false,
                 "is_system": false,
                 "send_date": nast_storage::message_time_stamp(),
                 "mes": greeting,
+                "swipe_id": 0,
+                "swipes": [greeting],
+                "swipe_info": [{"extra": {"gen_id": greeting_id}}],
                 "force_avatar": format!("thumbnail?type=avatar&file={avatar}"),
                 "original_avatar": avatar,
-                "extra": {"gen_id": null},
+                "extra": {"gen_id": greeting_id},
             });
             chat.0.push(msg);
         }

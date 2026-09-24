@@ -4,9 +4,12 @@ mod connection;
 mod events;
 mod generate;
 mod group_gen;
+mod group_sessions;
 mod prompt_bridge;
 mod rpc;
+mod library;
 mod state;
+mod tts;
 mod ws;
 
 use actix_files::Files;
@@ -76,6 +79,35 @@ async fn thumbnail(
     }
 }
 
+/// Imported card resources only; settings, secrets, and chat files are never served.
+async fn card_asset(
+    path: web::Path<String>,
+    state: web::Data<SharedState>,
+) -> actix_web::Result<actix_files::NamedFile> {
+    let relative = path.into_inner();
+    let parts: Vec<_> = relative.split('/').collect();
+    if parts.iter().any(|part| library::leaf(part).is_err()) {
+        return Err(actix_web::error::ErrorBadRequest("invalid resource path"));
+    }
+    let base = if parts.first() == Some(&"characters") && parts.len() >= 3 {
+        state.user.character_dir()
+    } else if parts.starts_with(&["user", "images"]) && parts.len() >= 4 {
+        state.user.root.join("user/images")
+    } else {
+        return Err(actix_web::error::ErrorNotFound("resource not found"));
+    };
+    let base = base.canonicalize().map_err(actix_web::error::ErrorNotFound)?;
+    let target = state.user.root.join(relative).canonicalize().map_err(actix_web::error::ErrorNotFound)?;
+    if !target.starts_with(&base) || !target.is_file() {
+        return Err(actix_web::error::ErrorNotFound("resource not found"));
+    }
+    let extension = target.extension().and_then(|v| v.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif", "mp3", "wav", "ogg", "mp4", "webm"].contains(&extension.as_str()) {
+        return Err(actix_web::error::ErrorNotFound("unsupported resource"));
+    }
+    Ok(actix_files::NamedFile::open(target)?.use_last_modified(true))
+}
+
 /// %XX 百分号解码（UTF-8 字节序列重组，兼容 '+' 不处理——encodeURIComponent 不产生 '+'）。
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
@@ -121,9 +153,10 @@ async fn main() -> std::io::Result<()> {
 
     let user =
         nast_storage::UserData::new(&data_root, "default-user").expect("init user data");
-    let settings = user
+    let mut settings = user
         .read_settings()
         .unwrap_or_else(|_| serde_json::json!({}));
+    nast_model::settings::normalize_settings(&mut settings);
     let secrets = user
         .read_secrets()
         .unwrap_or_else(|_| serde_json::json!({}));
@@ -148,6 +181,14 @@ async fn main() -> std::io::Result<()> {
             .route("/ws", web::get().to(ws::ws_route))
             .route("/upload", web::post().to(upload))
             .route("/thumbnail", web::get().to(thumbnail))
+            .route("/assets/{path:.*}", web::get().to(card_asset))
+            .service(web::scope("/api/tts")
+                .app_data(web::JsonConfig::default().limit(12 * 1024 * 1024))
+                .route("/voices", web::post().to(tts::voices))
+                .route("/models", web::post().to(tts::models))
+                .route("/synthesize", web::post().to(tts::synthesize))
+                .route("/voices/add", web::post().to(tts::add_voice))
+                .route("/manage", web::post().to(tts::manage)))
             .service(Files::new("/", &web_dist).index_file("index.html"))
     })
     .bind((bind_host.as_str(), port))?

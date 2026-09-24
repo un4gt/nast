@@ -106,7 +106,7 @@ export function ChatActionsMenu({ avatar }: { avatar: string }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="size-8">
+        <Button variant="ghost" size="icon" className="size-9 shrink-0" aria-label="聊天操作" title="聊天操作">
           <MoreVertical />
         </Button>
       </DropdownMenuTrigger>

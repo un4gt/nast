@@ -28,6 +28,7 @@ export interface ChatMessage {
 
 export interface ChatMetadata {
   world?: string;
+  world_info?: string;
   persona?: string;
   note_prompt?: string;
   note_interval?: number;
@@ -53,6 +54,10 @@ export interface Settings {
     openai_model?: string;
     openai_max_context?: number;
     openai_max_tokens?: number;
+    temp_openai?: number;
+    top_p_openai?: number;
+    freq_pen_openai?: number;
+    pres_pen_openai?: number;
     temperature?: number;
     top_p?: number;
     frequency_penalty?: number;
@@ -103,7 +108,7 @@ interface AppState {
   createGroup: (name: string, members: string[]) => Promise<void>;
   saveGroup: (group: Group) => Promise<void>;
   deleteGroup: (groupId: string) => Promise<void>;
-  sendGroup: (text: string, member?: string) => Promise<boolean>;
+  sendGroup: (text: string, member?: string, type?: 'normal' | 'regenerate' | 'swipe' | 'continue') => Promise<boolean>;
   importFile: (file: File) => Promise<void>;
   deleteCharacter: (avatar: string) => Promise<void>;
   deleteMessage: (index: number) => Promise<void>;
@@ -206,7 +211,7 @@ export const useStore = create<AppState>((set, get) => ({
     });
   },
 
-  sendGroup: async (text, member) => {
+  sendGroup: async (text, member, type = 'normal') => {
     const { activeGroupId, groups, generating } = get();
     const g = groups.find((x) => x.id === activeGroupId);
     if (!g || generating) return false;
@@ -217,6 +222,7 @@ export const useStore = create<AppState>((set, get) => ({
         id: g.id,
         chat_id: g.chat_id,
         user_message: text,
+        type,
         ...(member ? { member } : {}),
       });
       const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: g.chat_id });
@@ -272,7 +278,7 @@ export const useStore = create<AppState>((set, get) => ({
     const bin = Array.from(new Uint8Array(buf), (b) => String.fromCharCode(b)).join('');
     const data_base64 = btoa(bin);
     try {
-      await rpc.call('characters.import', { data_base64 });
+      await rpc.call('characters.import', { data_base64, filename: file.name });
       await get().loadAll();
       pushToast('已导入 ' + file.name, 'success');
     } catch (e) {
@@ -325,6 +331,15 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   reloadChat: async () => {
+    const { activeGroupId, groups } = get();
+    if (activeGroupId) {
+      const group = groups.find((item) => item.id === activeGroupId);
+      if (!group) return;
+      const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: group.chat_id });
+      const { messages, metadata } = parseChat(raw);
+      set({ messages, chatMetadata: metadata });
+      return;
+    }
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName) return;
     const raw = await rpc.call<any[]>('chats.get', { avatar: activeAvatar, file_name: activeChatName });
@@ -356,17 +371,18 @@ export const useStore = create<AppState>((set, get) => ({
 
   swipe: async (direction) => {
     const { activeAvatar, activeChatName, generating } = get();
-    if (!activeAvatar || !activeChatName || generating) return;
+    if (!activeAvatar || !activeChatName || generating) return false;
     const last = get().messages[get().messages.length - 1];
     const total = last?.swipes?.length ?? 0;
     const idx = last?.swipe_id ?? 0;
     // ST 语义：left 总是导航；right 在末位时生成新 swipe，否则导航
     const isNav =
       direction === 'left' ? idx > 0 : idx < total - 1;
+    if (direction === 'left' && !isNav) return false;
     if (isNav && total > 1) {
       await rpc.call('chats.swipe', { avatar: activeAvatar, file_name: activeChatName, direction });
       await get().reloadChat();
-      return;
+      return true;
     }
     set({ generating: true, streamingText: '', streamingReasoning: '' });
     let ok = true;
@@ -384,7 +400,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   regenerate: async () => {
     const { activeAvatar, activeChatName } = get();
-    if (!activeAvatar || !activeChatName || get().generating) return;
+    if (!activeAvatar || !activeChatName || get().generating) return false;
     set({ generating: true, streamingText: '', streamingReasoning: '' });
     let ok = true;
     try {
@@ -417,7 +433,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   continueGen: async () => {
     const { activeAvatar, activeChatName } = get();
-    if (!activeAvatar || !activeChatName || get().generating) return;
+    if (!activeAvatar || !activeChatName || get().generating) return false;
     set({ generating: true, streamingText: '', streamingReasoning: '' });
     let ok = true;
     try {

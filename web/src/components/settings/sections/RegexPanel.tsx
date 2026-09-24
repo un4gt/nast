@@ -188,9 +188,9 @@ function RegexEditDialog({
   const [draft, setDraft] = useState<RegexScript | null>(script);
   const [sample, setSample] = useState('');
   useEffect(() => setDraft(script), [script]);
+  const result = useMemo(() => draft ? tryRun(draft, sample) : '', [draft, sample]);
   if (!draft) return null;
   const set = (p: Partial<RegexScript>) => setDraft({ ...draft, ...p });
-  const result = useMemo(() => tryRun(draft, sample), [draft, sample]);
 
   const togglePlacement = (v: number, on: boolean) => {
     const next = on ? [...draft.placement, v] : draft.placement.filter((p) => p !== v);
@@ -202,7 +202,7 @@ function RegexEditDialog({
       <DialogContent className="max-h-[88vh] max-w-lg overflow-y-auto">
         <DialogHeader>
           <DialogTitle>编辑正则脚本</DialogTitle>
-          <DialogDescription>findRegex 为裸正则（无斜杠，大小写不敏感请用 (?i)）；替换支持 $1、{{match}}。</DialogDescription>
+          <DialogDescription>findRegex 为裸正则（无斜杠，大小写不敏感请用 (?i)）；替换支持 $1、{'{{match}}'}。</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-1.5">

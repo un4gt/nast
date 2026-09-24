@@ -1,43 +1,61 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
-import { Textarea } from '@/components/ui/textarea';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Spinner } from '@/components/ui/spinner';
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from '@/components/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
-  ChevronLeft, ChevronRight, RefreshCw, Wand2, ArrowRightToLine, Square, SendHorizontal,
+  ChevronLeft,
+  ChevronRight,
+  RefreshCw,
+  Wand2,
+  ArrowRightToLine,
+  MessageSquarePlus,
 } from 'lucide-react';
 import { rpc } from '../../rpc';
 import { runSlashCommand } from '../../commands';
 import { useStore } from '../../store';
 import { MessageBubble } from './MessageBubble';
 import { StreamingBubble } from './StreamingBubble';
+import { ChatTranscript } from './ChatTranscript';
+import { ChatComposer } from './ChatComposer';
+import { useChatDraft } from '@/hooks/use-chat-draft';
 
 const draftKey = (avatar: string | null, chat: string | null) =>
   `nast:draft:${avatar ?? ''}:${chat ?? ''}`;
 
 export function ChatArea() {
   const {
-    activeAvatar, activeChatName,
-    messages, streamingText, streamingReasoning, generating, send, swipe, regenerate, continueGen, impersonate,
-    stopGeneration, appendStreamToken, appendStreamReasoning,
+    activeAvatar,
+    activeChatName,
+    characters,
+    connected,
+    newChat,
+    messages,
+    streamingText,
+    streamingReasoning,
+    generating,
+    send,
+    swipe,
+    regenerate,
+    continueGen,
+    impersonate,
+    stopGeneration,
+    appendStreamToken,
+    appendStreamReasoning,
   } = useStore();
-  const [input, setInput] = useState('');
+  const [input, setInput] = useChatDraft(draftKey(activeAvatar, activeChatName));
   const [tokenStats, setTokenStats] = useState<{ total: number; budget: number } | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
-
-  // 草稿按聊天持久化（切聊天/生成不丢）
-  useEffect(() => {
-    setInput(localStorage.getItem(draftKey(activeAvatar, activeChatName)) ?? '');
-  }, [activeAvatar, activeChatName]);
-
-  useEffect(() => {
-    const key = draftKey(activeAvatar, activeChatName);
-    if (input) localStorage.setItem(key, input);
-    else localStorage.removeItem(key);
-  }, [input, activeAvatar, activeChatName]);
+  const sending = useRef(false);
+  const [pending, setPending] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const character = characters.find((c) => c.avatar === activeAvatar);
 
   // token 计量（切聊天 / 消息变化时刷新）
   useEffect(() => {
@@ -76,10 +94,6 @@ export function ChatArea() {
     };
   }, [appendStreamToken, appendStreamReasoning]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, streamingText]);
-
   const lastMsg = messages[messages.length - 1];
   const canSwipe = lastMsg && !lastMsg.is_user;
   const swipeIdx = lastMsg?.swipe_id ?? 0;
@@ -87,114 +101,122 @@ export function ChatArea() {
 
   const doSend = async () => {
     const text = input.trim();
-    if (!text) return;
-    // ST 语义：斜杠命令在发送前拦截——内置命令本地执行、未知命令拦截、
-    // 自定义命令展开为文本、插件命令透传
-    if (text.startsWith('/')) {
-      const r = await runSlashCommand(text, { setInput });
-      if (r.status === 'handled') {
-        setInput('');
-        return;
+    if (!text || generating || !connected || !activeChatName || sending.current) return;
+    sending.current = true;
+    setPending(true);
+    try {
+      // ST 语义：斜杠命令在发送前拦截——内置命令本地执行、未知命令拦截、
+      // 自定义命令展开为文本、插件命令透传
+      if (text.startsWith('/')) {
+        let commandChangedInput = false;
+        const r = await runSlashCommand(text, {
+          setInput: (value) => {
+            commandChangedInput = true;
+            setInput(value);
+          },
+        });
+        if (r.status === 'handled') {
+          if (!commandChangedInput) setInput('');
+          return;
+        }
+        if (r.status === 'unknown') return;
+        if (r.status === 'send') {
+          setInput('');
+          const ok = await send(r.text);
+          if (!ok) setInput(text); // 展开文本发送失败时回填原命令
+          return;
+        }
+        // passthrough：原样发送（服务端插件命令）
       }
-      if (r.status === 'unknown') return;
-      if (r.status === 'send') {
-        setInput('');
-        const ok = await send(r.text);
-        if (!ok) setInput(text); // 展开文本发送失败时回填原命令
-        return;
-      }
-      // passthrough：原样发送（服务端插件命令）
+      setInput('');
+      const ok = await send(text);
+      if (!ok) setInput(text); // 失败回填，避免用户文字丢失
+    } catch {
+      setInput(text);
+    } finally {
+      sending.current = false;
+      setPending(false);
     }
-    setInput('');
-    const ok = await send(text);
-    if (!ok) setInput(text); // 失败回填，避免用户文字丢失
   };
 
   const doImpersonate = async () => {
-    const text = await impersonate();
-    if (text) setInput(text);
+    try {
+      const text = await impersonate();
+      if (text) setInput(text);
+    } catch {
+      /* 全局错误提示保留当前草稿。 */
+    }
   };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-4 p-4 pb-2">
-          {messages.map((m, i) => {
-            const isLastAi = i === messages.length - 1 && !m.is_user;
-            if (isLastAi && generating && streamingText !== null) return null;
-            return <MessageBubble key={i} m={m} index={i} />;
-          })}
-          {generating && streamingText !== null && (
-            <StreamingBubble
-              name={messages[messages.length - 1]?.name ?? ''}
-              text={streamingText}
-              reasoning={streamingReasoning}
-            />
-          )}
-          <div ref={bottomRef} />
-        </div>
-      </ScrollArea>
-
-      <footer className="shrink-0 border-t bg-background p-3">
-        <div className="mx-auto flex max-w-3xl flex-col gap-2">
-          {tokenStats && tokenStats.budget > 0 && (
-            <div className="flex items-center gap-2">
-              <Progress
-                value={Math.min(100, (tokenStats.total / tokenStats.budget) * 100)}
-                className="h-1 flex-1"
-              />
-              <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
-                {tokenStats.total} / {tokenStats.budget} tok
-              </span>
-            </div>
-          )}
-          <div className="flex items-end gap-2">
-            <Textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  doSend();
-                }
-              }}
-              placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"
-              rows={2}
-              disabled={generating}
-              className="min-h-0 resize-none"
-            />
-            {generating ? (
-              <Button
-                variant="destructive"
-                size="icon"
-                className="size-10 shrink-0"
-                onClick={stopGeneration}
-                title="停止生成"
-              >
-                <Square />
-              </Button>
-            ) : (
-              <Button
-                size="icon"
-                className="size-10 shrink-0"
-                onClick={doSend}
-                disabled={!input.trim()}
-                title="发送"
-              >
-                <SendHorizontal />
-              </Button>
+      <ChatTranscript>
+        {messages.length === 0 && !generating && (
+          <Empty className="py-12">
+            <EmptyHeader>
+              <EmptyTitle>与 {character?.name} 的故事</EmptyTitle>
+              <EmptyDescription>
+                {activeChatName
+                  ? '写下第一句话，让故事继续。'
+                  : '创建一段聊天，从角色的开场白开始。'}
+              </EmptyDescription>
+            </EmptyHeader>
+            {!activeChatName && (
+              <EmptyContent>
+                <Button
+                  disabled={!connected || creating}
+                  onClick={async () => {
+                    if (!activeAvatar || creating) return;
+                    setCreating(true);
+                    try {
+                      await newChat(activeAvatar);
+                    } catch {
+                      /* 全局错误提示 */
+                    } finally {
+                      setCreating(false);
+                    }
+                  }}
+                >
+                  {creating ? <Spinner /> : <MessageSquarePlus />}开始聊天
+                </Button>
+              </EmptyContent>
             )}
-          </div>
-          <div className="flex items-center gap-1">
+          </Empty>
+        )}
+        {messages.map((m, i) => {
+          const isLastAi = i === messages.length - 1 && !m.is_user;
+          if (isLastAi && generating && streamingText !== null) return null;
+          return <MessageBubble key={i} m={m} index={i} />;
+        })}
+        {generating && streamingText !== null && (
+          <StreamingBubble
+            name={character?.name ?? ''}
+            text={streamingText}
+            reasoning={streamingReasoning}
+          />
+        )}
+      </ChatTranscript>
+      <ChatComposer
+        input={input}
+        onInput={setInput}
+        onSend={() => void doSend()}
+        onStop={() => void stopGeneration().catch(() => {})}
+        generating={generating}
+        pending={pending}
+        disabled={!connected || !activeChatName}
+        placeholder={`回应 ${character?.name ?? '角色'}…`}
+        toolbar={
+          <>
             {canSwipe && (
               <>
                 <Button
                   variant="ghost"
                   size="icon"
                   className="size-7"
-                  disabled={generating || swipeIdx <= 0}
-                  onClick={() => swipe('left')}
+                  disabled={!connected || generating || pending || swipeIdx <= 0}
+                  onClick={() => void swipe('left').catch(() => {})}
                   title="上一个 swipe"
+                  aria-label="上一个回复版本"
                 >
                   <ChevronLeft />
                 </Button>
@@ -207,18 +229,26 @@ export function ChatArea() {
                   variant="ghost"
                   size="icon"
                   className="size-7"
-                  disabled={generating}
-                  onClick={() => swipe('right')}
-                  title={swipeTotal > 0 && swipeIdx < swipeTotal - 1 ? '下一个 swipe' : '生成新 swipe'}
+                  disabled={!connected || generating || pending}
+                  onClick={() => void swipe('right').catch(() => {})}
+                  title={
+                    swipeTotal > 0 && swipeIdx < swipeTotal - 1 ? '下一个 swipe' : '生成新 swipe'
+                  }
+                  aria-label="下一个回复版本"
                 >
                   <ChevronRight />
                 </Button>
               </>
             )}
-            <div className="flex-1" />
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" disabled={generating || !canSwipe} onClick={regenerate}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="px-2"
+                  disabled={!connected || generating || pending || !canSwipe}
+                  onClick={() => void regenerate().catch(() => {})}
+                >
                   {generating ? <Spinner /> : <RefreshCw />}
                   重生成
                 </Button>
@@ -227,7 +257,13 @@ export function ChatArea() {
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" disabled={generating || !canSwipe} onClick={continueGen}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="px-2"
+                  disabled={!connected || generating || pending || !canSwipe}
+                  onClick={() => void continueGen().catch(() => {})}
+                >
                   <ArrowRightToLine />
                   续写
                 </Button>
@@ -236,30 +272,38 @@ export function ChatArea() {
             </Tooltip>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button variant="ghost" size="sm" disabled={generating} onClick={doImpersonate}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="px-2"
+                  disabled={!connected || !activeChatName || generating || pending}
+                  onClick={doImpersonate}
+                >
                   <Wand2 />
                   代入
                 </Button>
               </TooltipTrigger>
               <TooltipContent>以用户身份生成发言（填入输入框）</TooltipContent>
             </Tooltip>
-          </div>
-        </div>
-      </footer>
+          </>
+        }
+        status={
+          tokenStats &&
+          tokenStats.budget > 0 && (
+            <div className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground">
+              <span>上下文</span>
+              <Progress
+                aria-label="上下文用量"
+                value={Math.min(100, (tokenStats.total / tokenStats.budget) * 100)}
+                className="h-1 flex-1"
+              />
+              <span className="tabular-nums">
+                {tokenStats.total.toLocaleString()} / {tokenStats.budget.toLocaleString()} tokens
+              </span>
+            </div>
+          )
+        }
+      />
     </div>
   );
-}
-
-function formatTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return '';
-  }
 }

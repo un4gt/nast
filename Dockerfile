@@ -7,10 +7,11 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
+COPY resources/ /resources/
 RUN npm run build
 
 # ---------- Rust 构建 ----------
-FROM rust:1-slim AS build
+FROM rust:1-slim-bookworm AS build
 WORKDIR /build/nast
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
@@ -26,6 +27,7 @@ RUN apt-get update \
 COPY --from=build /usr/local/bin/nast /usr/local/bin/
 COPY --from=web /web/dist /app/web/dist
 COPY --from=build /build/nast/plugins /app/plugins
+COPY resources/NOTICE.md /app/resources/NOTICE.md
 WORKDIR /app
 ENV NAST_BIND=0.0.0.0 \
     NAST_PORT=8000 \

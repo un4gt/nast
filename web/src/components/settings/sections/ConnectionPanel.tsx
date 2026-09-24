@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+  Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import {
   Accordion, AccordionContent, AccordionItem, AccordionTrigger,
@@ -100,27 +100,26 @@ export function ConnectionPanel({
       <div>
         <h3 className="mb-1 text-sm font-semibold">API 连接</h3>
         <p className="text-xs text-muted-foreground">
-          生成走服务端转发。OpenAI 兼容源覆盖 OpenRouter / DeepSeek / SiliconFlow / new-api / 本地 vLLM 等一切
-          <code className="mx-1 rounded bg-secondary px-1">/v1/chat/completions</code>
-          服务；密钥保存在服务端 secrets.json，不再依赖环境变量。
+          连接你喜欢的模型服务，支持 OpenRouter、DeepSeek 等 OpenAI 兼容接口。填写端点与模型后，点击下方保存更改。
         </p>
       </div>
 
       <div className="flex flex-col gap-1.5">
         <Label>API 类型</Label>
         <Select value="custom" onValueChange={() => {}}>
-          <SelectTrigger>
+          <SelectTrigger aria-label="API 类型">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="custom">自定义（OpenAI 兼容）</SelectItem>
+            <SelectGroup><SelectItem value="custom">自定义（OpenAI 兼容）</SelectItem></SelectGroup>
           </SelectContent>
         </Select>
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <Label>自定义端点（含 /v1）</Label>
+        <Label htmlFor="api-endpoint">自定义端点（含 /v1）</Label>
         <Input
+          id="api-endpoint"
           value={oai.custom_url ?? ''}
           onChange={(e) => patchOai('custom_url', e.target.value)}
           placeholder="https://openrouter.ai/api/v1"
@@ -131,10 +130,12 @@ export function ConnectionPanel({
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <Label>API 密钥</Label>
+        <Label htmlFor="api-key">API 密钥</Label>
         <div className="flex items-center gap-2">
           <KeyRound className="size-4 shrink-0 text-muted-foreground" />
           <Input
+            id="api-key"
+            className="min-w-0"
             type="password"
             value={keyInput}
             onChange={(e) => setKeyInput(e.target.value)}
@@ -164,8 +165,9 @@ export function ConnectionPanel({
               <Button
                 variant="outline"
                 role="combobox"
+                aria-label="选择模型"
                 aria-expanded={modelOpen}
-                className="w-full justify-between font-normal"
+                className="min-w-0 flex-1 justify-between font-normal"
               >
                 <span className="truncate">{currentModel || '选择或输入模型…'}</span>
                 <ChevronsUpDown className="size-4 shrink-0 opacity-50" />
@@ -218,6 +220,7 @@ export function ConnectionPanel({
           ；获取按钮同时校验 URL 与密钥。
         </p>
         <Input
+          aria-label="模型 ID"
           value={oai.custom_model ?? ''}
           onChange={(e) => patchOai('custom_model', e.target.value)}
           placeholder="或手动填写模型 ID（如 deepseek-chat）"

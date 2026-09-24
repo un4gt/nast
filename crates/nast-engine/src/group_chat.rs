@@ -186,6 +186,23 @@ pub fn activate_members(
 
 // ---------- 卡片合并（APPEND 模式） ----------
 
+/// ST's FIELDNAME is the field label; character macros use each contributing member.
+pub fn append_field(group: &Group, members: &[(GroupMember, Character)], selected: &str,
+    label: &str, field: fn(&Character) -> &str) -> String {
+    members.iter().filter(|(member,_)| member.avatar == selected || group.generation_mode == 2
+        || !group.disabled_members.contains(&member.avatar)).filter_map(|(member, character)| {
+        let mut value = field(character).trim().to_string();
+        if value.is_empty() { return None; }
+        if label == "Example Messages" && !value.starts_with("<START>") { value = format!("<START>\n{value}"); }
+        let transform = |text: &str| {
+            let field_re = regex::Regex::new("(?i)<FIELDNAME>").unwrap();
+            field_re.replace_all(text, label).replace("{{char}}", &member.name)
+        };
+        Some(format!("{}{}{}", transform(group.generation_mode_join_prefix.as_deref().unwrap_or("")),
+            transform(&value), transform(group.generation_mode_join_suffix.as_deref().unwrap_or(""))))
+    }).collect::<Vec<_>>().join("\n")
+}
+
 /// 合并成员卡片字段（getGroupCharacterCards 语义）。
 /// 每个成员字段用 join_prefix/suffix 包裹，<FIELDNAME> 替换为成员名，宏由调用方处理。
 pub fn append_cards(
@@ -221,13 +238,20 @@ pub fn group_depth_prompts(
     group: &Group,
     members: &[(GroupMember, Character)],
 ) -> Vec<(i64, String, String)> {
+    group_depth_prompts_for(group, members, None)
+}
+
+pub fn group_depth_prompts_for(
+    group: &Group, members: &[(GroupMember, Character)], current_avatar: Option<&str>,
+) -> Vec<(i64, String, String)> {
     // (depth, role, prompt)
     if group.generation_mode == 0 {
         return vec![]; // SWAP：不收
     }
     let mut out = Vec::new();
     for (member, ch) in members {
-        if group.disabled_members.contains(&member.avatar) && group.generation_mode != 2 {
+        if group.disabled_members.contains(&member.avatar) && group.generation_mode != 2
+            && current_avatar != Some(member.avatar.as_str()) {
             continue;
         }
         if let Some(dp) = &ch.data.extensions.depth_prompt {

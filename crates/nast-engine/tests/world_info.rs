@@ -73,6 +73,35 @@ fn basic_activation_and_order_desc() {
 }
 
 #[test]
+fn timed_effects_rewind_expire_and_keep_macro_identity() {
+    let settings = WiSettings::default();
+    let mut timed = TimedWorldInfo::default();
+    let mut e = entry(0, &["trigger"], "@@activate\n{{char}} lights the tower");
+    e.sticky = 3;
+    e.cooldown = 2;
+    let b = book(e);
+    run(Some(b.clone()), &["trigger"], &settings, &mut timed, 2, 4096);
+    assert_eq!(timed.sticky["chat.0"].start, 2);
+    assert!(!timed.sticky["chat.0"].protected);
+    assert_eq!(timed.cooldown["chat.0"].end, 4);
+    let hash = timed.sticky["chat.0"].hash;
+    run(Some(b.clone()), &["next"], &settings, &mut timed, 3, 4096);
+    assert_eq!(timed.sticky["chat.0"].hash, hash);
+    assert_eq!(timed.sticky["chat.0"].start, 2, "decorators/macros must not re-arm sticky each turn");
+    let result = run(Some(b.clone()), &["next"], &settings, &mut timed, 5, 4096);
+    assert_eq!(result.activated_count, 0);
+    assert!(timed.sticky.is_empty());
+    assert_eq!(timed.cooldown["chat.0"].start, 5);
+    assert!(timed.cooldown["chat.0"].protected);
+    run(None, &["next"], &settings, &mut timed, 7, 4096);
+    assert!(timed.cooldown.is_empty(), "missing character books must still expire");
+    run(Some(b), &["trigger"], &settings, &mut timed, 8, 4096);
+    run(None, &["rewind"], &settings, &mut timed, 8, 4096);
+    assert!(timed.sticky.is_empty());
+    assert!(timed.cooldown.is_empty());
+}
+
+#[test]
 fn secondary_logic_not_any() {
     let settings = WiSettings::default();
     let mut timed = TimedWorldInfo::default();
@@ -442,8 +471,6 @@ fn json_roundtrip_of_entry() {
     assert_eq!(e.uid, 3);
     assert_eq!(e.key.len(), 2);
 }
-
-
 
 
 
