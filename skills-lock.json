@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "ui-sift": {
+      "source": "Ciao1019/ui-sift",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "66ded6345cd6f403ed165d874ed8462592ccf409c5b3f1fc8e1499bf208d9a88"
+    }
+  }
+}
