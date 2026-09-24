@@ -1,0 +1,19 @@
+# 目录
+
+[简介](./intro.md)
+
+- [快速开始](./getting-started.md)
+- [架构总览](./architecture.md)
+- [功能手册](./guide/README.md)
+  - [连接与模型](./guide/connection.md)
+  - [聊天操作](./guide/chat.md)
+  - [语音朗读（TTS）](./guide/tts.md)
+  - [世界书](./guide/world-info.md)
+  - [预设 · Prompt Manager · 正则](./guide/prompt-regex.md)
+  - [群聊](./guide/group.md)
+  - [斜杠命令](./guide/commands.md)
+- [插件系统（Lua）](./plugins.md)
+- [IM 桥接（nast-bridges）](./bridges.md)
+- [数据布局与 ST 兼容](./data.md)
+- [测试](./testing.md)
+- [开发指南](./development.md)

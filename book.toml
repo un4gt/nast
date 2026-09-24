@@ -1,0 +1,14 @@
+[book]
+title = "nast 文档"
+description = "Not A SillyTavern —— 服务端重写的 SillyTavern 兼容角色扮演聊天平台"
+authors = ["nast contributors"]
+language = "zh-CN"
+src = "docs/src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+# 推送到 GitHub Pages（https://<user>.github.io/<repo>/）时改为 "/<repo>/"，
+# 本地 `mdbook serve` 预览时可临时改回 "/"。
+site-url = "/nast/"

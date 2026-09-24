@@ -2,6 +2,8 @@
 
 把 SillyTavern 浏览器端的核心生成逻辑全部移入 Rust 服务端的重新实现（非移植，按行为语义重写）。
 
+[使用手册](docs/src/intro.md) · [ST 对齐实施与验收](docs/ST_PARITY_IMPLEMENTATION.md) · [功能缺口审计](docs/ST_PARITY_AUDIT.md)
+
 ## 架构
 
 ```
@@ -18,7 +20,7 @@ nast/
 │   ├── nast-engine/      # 宏引擎、ChatCompletion 拼装、世界书引擎、正则引擎、群聊调度、token 计数
 │   ├── nast-providers/   # OpenAI 兼容 / Anthropic / Gemini + 统一 StreamEvent
 │   └── nast-plugin/      # mlua 插件：事件钩子 + KV 存储
-├── tests/                # 端到端冒烟脚本（Node）
+├── tests/                # Node 冒烟 + Python 模型服务与真实 ST 差分验收
 └── web/                  # rsbuild + react + tailwind + zustand
 ```
 
@@ -61,7 +63,7 @@ cargo build --release && ./target/release/nast
 ### 前端开发模式（HMR）
 
 两个终端：API 服务（8000）+ rsbuild devserver（3000，热更新）。devserver 把
-`/ws`（WebSocket）与 `/upload` 代理到 8000，前端代码改动即时生效，无需构建：
+`/ws`（WebSocket）、`/upload` 与 `/api/tts` 代理到 8000，前端代码改动即时生效，无需构建：
 
 ```bash
 # 终端 1
@@ -104,10 +106,13 @@ cd web && npm run dev   # → http://localhost:3000
 - **群聊**：NATURAL（提及+talkativeness+禁连发+兜底）/LIST/MANUAL/POOLED；
   SWAP/APPEND/APPEND_DISABLED 卡片合并（join prefix/suffix + `<FIELDNAME>`）；
   成员 depth_prompt；随机开场白；`group chats/` 平铺 + gen_id 批次。
+- **语音朗读（TTS）**：设置 → 语音朗读；接入参考版本的 28 个服务商，支持消息 / 整段会话朗读、
+  自动与流式分段朗读、角色 / 分段音色、文本过滤、暂停继续和 `/speak`。
+  兼容 `extension_settings.tts` 配置；服务前提、验证范围和差异见 [TTS 手册](docs/src/guide/tts.md)。
 
 ## 已知范围外（对照 ST）
 
-文本补全路径（instruct/context 模板）、Claude/Gemini 原生源 UI、向量/RAG、图像生成、TTS、
+文本补全路径（instruct/context 模板）、Claude/Gemini 原生源 UI、向量/RAG、图像生成、
 翻译、多用户账号。当前阶段模型接入仅 OpenAI 兼容 /chat/completions（自定义 baseURL，
 覆盖 OpenRouter/DeepSeek/中转/本地 vLLM）；密钥存服务端 secrets.json（UI 可配）。
 
@@ -145,4 +150,10 @@ node tests/m6_reconnect_smoke.js     # 断线重连与生成恢复
 node tests/smoke.js       # RPC 冒烟（需先启动服务 + npm i ws）
 node tests/gen_smoke.js   # 生成链路冒烟（内置 mock provider）
 node tests/group_smoke.js # 群聊冒烟
+
+# TTS（ws / playwright 可通过 NAST_WS_MODULE / NAST_PLAYWRIGHT_MODULE 指定安装路径）
+node tests/tts_smoke.cjs          # 25 个 HTTP 服务商契约 + 服务管理，自动创建隔离服务
+node tests/tts_browser.cjs        # Edge 浏览器播放、单聊群聊、设置和手机布局
+node tests/tts_local_browser.cjs  # 可选：真实下载 Kokoro / SpeechT5 并合成，需要外网
+cd web && npm run test:tts       # 文本过滤 / 分段 / 旧配置兼容
 ```

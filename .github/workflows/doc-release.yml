@@ -1,0 +1,55 @@
+# 文档发布：main 分支推送（或手动触发）→ mdBook 构建 → GitHub Pages
+# 首次使用：仓库 Settings → Pages → Source 选 "GitHub Actions"；
+# 仓库名非 nast 时同步修改 book.toml 的 site-url。
+name: doc-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/src/**"
+      - "book.toml"
+      - ".github/workflows/doc-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: "0.4.40"
+
+      - name: Build book
+        run: mdbook build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: "book"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
