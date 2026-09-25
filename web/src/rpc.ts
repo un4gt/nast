@@ -10,17 +10,33 @@ class RpcClient {
   private handlers = new Map<string, Set<Handler>>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retries = 0;
+  private stopped = false;
+
+  disconnect() {
+    this.stopped = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+    for (const pending of this.pending.values()) pending.reject(new Error('连接已关闭'));
+    this.pending.clear();
+    this.emit('$disconnected', null);
+  }
 
   connect() {
     if (this.ws) return;
+    this.stopped = false;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     this.ws = ws;
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.retries = 0;
       this.emit('$connected', null);
     };
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       const msg = JSON.parse(ev.data as string);
       if (msg.event) {
         this.emit(msg.event, msg.data);
@@ -36,18 +52,25 @@ class RpcClient {
       } else p.resolve(msg.result);
     };
     ws.onclose = () => {
+      if (this.ws !== ws) return;
       this.ws = null;
       for (const pending of this.pending.values()) pending.reject(new Error('连接已断开；已提交的生成不会自动重发'));
       this.pending.clear();
       this.emit('$disconnected', null);
-      if (!this.retryTimer) {
+      void fetch('/api/auth/session', { cache: 'no-store' }).then(async response => {
+        if (response.ok && !(await response.json()).authenticated && !this.stopped) {
+          this.disconnect();
+          window.dispatchEvent(new Event('nast:auth-required'));
+        }
+      }).catch(() => {});
+      if (!this.retryTimer && !this.stopped) {
         // 指数退避 + 抖动：0.5s 起、上限 10s
         const backoff = Math.min(10000, 500 * 2 ** this.retries);
         const delay = backoff * (0.75 + Math.random() * 0.5);
         this.retries = Math.min(this.retries + 1, 15);
         this.retryTimer = setTimeout(() => {
           this.retryTimer = null;
-          this.connect();
+          if (!this.stopped) this.connect();
         }, delay);
       }
     };

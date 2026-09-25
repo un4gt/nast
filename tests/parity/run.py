@@ -147,7 +147,7 @@ async def execute(args):
                 "--port", str(st_port), "--browserLaunchEnabled", "false"], ST, os.environ.copy()),
             ("nast", [str(binary)], artifact, {**os.environ, "NAST_PORT": str(nast_port),
                 "NAST_DATA": str(nast_data), "NAST_WEB": str(ROOT / "web" / "dist"),
-                "NAST_BIND": "127.0.0.1", "OPENAI_API_KEY": "", "NAST_OPENAI_BASE": ""}),
+                "NAST_BIND": "127.0.0.1", 'NAST_USERNAME':'', 'NAST_PASSWORD':'', 'NAST_BRIDGE_TOKEN':'', 'NAST_PUBLIC_ORIGIN':'', 'NAST_ALLOW_ANONYMOUS':'true', "OPENAI_API_KEY": "", "NAST_OPENAI_BASE": ""}),
         ]:
             log = (artifact / f"{app}.log").open("w", encoding="utf-8")
             logs.append(log)

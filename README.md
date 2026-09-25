@@ -27,7 +27,7 @@ nast/
 ## Docker 部署（核心服务）
 
 ```bash
-cp .env.example .env        # 可选：改端口
+cp .env.example .env        # 填写 NAST_USERNAME 和 NAST_PASSWORD
 docker compose up -d --build
 ```
 
@@ -36,7 +36,9 @@ docker compose up -d --build
   插件位于镜像内 `/app/plugins`，如需本机管理可挂载 `./plugins:/app/plugins`
 - 网络命名为 `nast-net`，供 IM 桥接栈（独立仓库 `nast-bridges`：QQ/Discord/飞书）接入
 
-环境变量（`.env`）：`NAST_PORT`、`NAST_PLUGIN_TIMEOUT_SECS`。
+部署必须填写 `NAST_USERNAME`、`NAST_PASSWORD`，没有默认密码。桥接另设 `NAST_BRIDGE_TOKEN`。
+首次升级到带认证版本前先补齐环境变量；已有数据卷保留。网页、上传、头像、TTS 和 WebSocket 均由服务端认证保护。
+详见[登录与部署认证](docs/src/guide/authentication.md)、[QQ 与多平台桥接接入](docs/src/bridges.md)。
 
 ### GHCR 预构建镜像
 
@@ -52,12 +54,15 @@ PR 只构建和测试；镜像通过隔离数据目录的启动、升级迁移�
 替换下方 `<owner>/<repo>` 为实际 GitHub 仓库的小写名称：
 
 ```bash
+docker network create nast-net    # 已存在时跳过
 docker volume create nast-data
 docker run -d --name nast --restart unless-stopped \
+  --network nast-net --env-file .env \
   -p 8000:8000 -v nast-data:/app/data \
   ghcr.io/<owner>/<repo>:latest
 ```
 
+`docker run --env-file` 的环境文件值不要包裹引号；Compose 的 `.env` 支持单引号。
 首次发布后，如需允许匿名拉取，在 GitHub Packages 中将包可见性设为 Public；
 私有包则先使用有 `read:packages` 权限的令牌执行 `docker login ghcr.io`。
 精确部署版本可使用工作流摘要中的 `ghcr.io/<owner>/<repo>@sha256:…`。
@@ -71,6 +76,8 @@ docker run -d --name nast --restart unless-stopped \
 cd web && npm install && npm run build && cd ..
 
 # 2. 启动（单端口：http://127.0.0.1:8000 同时服务前端与 /ws）
+export NAST_USERNAME=admin
+export NAST_PASSWORD='替换为你自己的长密码'
 cargo run            # 服务端在根包 nast-server，无需 -p
 
 # 或 release 模式
@@ -103,6 +110,11 @@ cd web && npm run dev   # → http://localhost:3000
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `NAST_PORT` | 8000 | 监听端口 |
+| `NAST_USERNAME` / `NAST_PASSWORD` | 必填 | 部署级登录账号，没有默认密码 |
+| `NAST_BRIDGE_TOKEN` | 空 | 独立桥接令牌（至少 32 字符） |
+| `NAST_PUBLIC_ORIGIN` | 空 | 反向代理后的站点源，例如 https://chat.example.com |
+| `NAST_COOKIE_SECURE` | false | HTTPS 部署启用安全 Cookie |
+| `NAST_ALLOW_ANONYMOUS` | false | 仅隔离测试／本机开发使用；账号为空时显式关闭认证 |
 | `NAST_BIND` | 127.0.0.1 | 绑定地址（容器内需 0.0.0.0，compose 已设置） |
 | `NAST_DATA` | ./data | 数据目录（可直接指向现有 ST data/） |
 | `NAST_WEB` | ./web/dist | 前端静态资源 |

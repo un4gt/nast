@@ -31,6 +31,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/u
 import { cn } from '@/lib/utils';
 import {
   MessageSquare,
+  LogOut,
   PanelLeftClose,
   Search,
   Settings,
@@ -52,7 +53,7 @@ function chatGroup(fileName: string, others: string[]): string {
   return newest.includes(fileName) ? '最新' : '更早';
 }
 
-export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) {
+export function LeftSidebar({ onOpenSettings, onLogout }: { onOpenSettings: () => void; onLogout?: () => void }) {
   const {
     characters,
     groups,
@@ -401,6 +402,11 @@ export function LeftSidebar({ onOpenSettings }: { onOpenSettings: () => void }) 
               <span>设置</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {onLogout && <SidebarMenuItem>
+            <SidebarMenuButton onClick={onLogout} tooltip="退出登录">
+              <LogOut /><span>退出登录</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>}
         </SidebarMenu>
         <p className="px-2 pt-1 text-[11px] text-muted-foreground group-data-[collapsible=icon]:hidden">
           Ctrl / ⌘ + B 收起侧栏

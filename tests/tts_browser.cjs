@@ -53,7 +53,7 @@ async function main() {
   await new Promise((r) => mock.listen(0, '127.0.0.1', r));
   const port = await freePort(), origin = `http://127.0.0.1:${port}`, mockBase = `http://127.0.0.1:${mock.address().port}`;
   const binary = process.env.NAST_TEST_BIN || path.join(root, 'target/debug', process.platform === 'win32' ? 'nast.exe' : 'nast');
-  const child = spawn(binary, [], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NAST_DATA: path.join(output, 'data'), NAST_PORT: String(port), NAST_WEB: path.join(root, 'web/dist') } });
+  const child = spawn(binary, [], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NAST_DATA: path.join(output, 'data'), NAST_USERNAME: '', NAST_PASSWORD: '', NAST_BRIDGE_TOKEN: '', NAST_PUBLIC_ORIGIN: '', NAST_ALLOW_ANONYMOUS: 'true', NAST_PORT: String(port), NAST_WEB: path.join(root, 'web/dist') } });
   let logs = ''; child.stdout.on('data', (b) => { logs += b; }); child.stderr.on('data', (b) => { logs += b; });
   let browser, rpc, page;
   try {

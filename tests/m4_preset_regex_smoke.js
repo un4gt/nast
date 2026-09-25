@@ -63,7 +63,7 @@ async function main() {
   await new Promise((r) => mock.listen(MOCK_PORT, r));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nast-m4-'));
   const child = spawn(path.join(__dirname, '..', 'target', 'debug', 'nast.exe'), [], {
-    env: { ...process.env, NAST_PORT: String(NAST_PORT), NAST_DATA: tmp, OPENAI_API_KEY: '', NAST_OPENAI_BASE: '' },
+    env: { ...process.env, NAST_USERNAME: '', NAST_PASSWORD: '', NAST_BRIDGE_TOKEN: '', NAST_PUBLIC_ORIGIN: '', NAST_ALLOW_ANONYMOUS: 'true', NAST_PORT: String(NAST_PORT), NAST_DATA: tmp, OPENAI_API_KEY: '', NAST_OPENAI_BASE: '' },
     cwd: tmp, stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (d) => process.env.M4_VERBOSE && process.stderr.write(d));

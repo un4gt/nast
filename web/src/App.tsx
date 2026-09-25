@@ -19,7 +19,7 @@ import { WelcomeScreen } from './components/layout/WelcomeScreen';
 import { TtsControls } from './components/chat/TtsControls';
 import { useAutoTts } from './tts/use-auto-tts';
 
-export default function App() {
+export default function App({ onLogout }: { onLogout?: () => void }) {
   const {
     characters,
     groups,
@@ -111,6 +111,7 @@ export default function App() {
     return () => {
       onConnect();
       onDisconnect();
+      rpc.disconnect();
     };
   }, []);
 
@@ -129,7 +130,7 @@ export default function App() {
       className="app-shell"
       style={{ '--sidebar-width': '17rem' } as React.CSSProperties}
     >
-      <LeftSidebar onOpenSettings={() => setShowSettings(true)} />
+      <LeftSidebar onOpenSettings={() => setShowSettings(true)} onLogout={onLogout} />
 
       <SidebarInset className="min-w-0 overflow-hidden">
         <div

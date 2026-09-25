@@ -17,6 +17,11 @@ services:
     environment:
       NAST_BIND: 0.0.0.0
       NAST_PORT: 8000
+      NAST_USERNAME: ${NAST_USERNAME:?Set NAST_USERNAME in .env}
+      NAST_PASSWORD: ${NAST_PASSWORD:?Set NAST_PASSWORD in .env}
+      NAST_BRIDGE_TOKEN: ${NAST_BRIDGE_TOKEN:-}
+      NAST_PUBLIC_ORIGIN: ${NAST_PUBLIC_ORIGIN:-}
+      NAST_COOKIE_SECURE: ${NAST_COOKIE_SECURE:-false}
       NAST_PLUGIN_TIMEOUT_SECS: ${NAST_PLUGIN_TIMEOUT_SECS:-10}
     ports:
       - "${NAST_PORT:-8000}:8000"
@@ -25,7 +30,7 @@ services:
       - nast-data:/app/data
       # 如需本机管理插件可直接挂载：./plugins:/app/plugins
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
       interval: 10s
       timeout: 3s
       retries: 12

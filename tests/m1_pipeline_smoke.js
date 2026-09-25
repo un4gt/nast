@@ -106,7 +106,7 @@ async function main() {
   const child = spawn(path.join(__dirname, '..', 'target', 'debug', 'nast.exe'), [], {
     env: {
       ...process.env,
-      NAST_PORT: String(NAST_PORT),
+      NAST_USERNAME: '', NAST_PASSWORD: '', NAST_BRIDGE_TOKEN: '', NAST_PUBLIC_ORIGIN: '', NAST_ALLOW_ANONYMOUS: 'true', NAST_PORT: String(NAST_PORT),
       NAST_DATA: tmp,
       OPENAI_API_KEY: '',
       NAST_OPENAI_BASE: '',

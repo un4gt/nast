@@ -4,7 +4,7 @@
 use crate::rpc;
 use crate::state::SharedState;
 use actix_web::web::{self, Payload};
-use actix_web::HttpRequest;
+use actix_web::{HttpRequest, HttpMessage};
 use actix_ws::{AggregatedMessage, Session};
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -14,6 +14,8 @@ pub async fn ws_route(
     stream: Payload,
     state: web::Data<SharedState>,
 ) -> Result<actix_web::HttpResponse, actix_web::Error> {
+    let grant = req.extensions().get::<crate::auth::Grant>().cloned()
+        .ok_or_else(||actix_web::error::ErrorUnauthorized("请先登录"))?;
     // 响应必须立即返回（101 握手），会话循环放入后台任务
     let (response, session, msg_stream) = actix_ws::handle(&req, stream)?;
     // 大消息（卡片 PNG base64 可达数 MB）：放宽 64KB 默认帧上限并聚合分片
@@ -26,9 +28,15 @@ pub async fn ws_route(
 
     // 广播任务：把事件推给本连接
     let mut broadcast_session = session.clone();
+    let broadcast_grant = grant.clone();
     let broadcast = actix_web::rt::spawn(async move {
         loop {
-            match hub_rx.recv().await {
+            let event = tokio::select! {
+                _ = broadcast_grant.revoked() => break,
+                event = hub_rx.recv() => event,
+            };
+            if !broadcast_grant.valid() { break; }
+            match event {
                 Ok(text) => {
                     if broadcast_session.text(text).await.is_err() {
                         break;
@@ -44,7 +52,13 @@ pub async fn ws_route(
     actix_web::rt::spawn(async move {
         let mut session = session;
         // 读循环
-        while let Some(Ok(msg)) = msg_stream.next().await {
+        loop {
+            let msg = tokio::select! {
+                _ = grant.revoked() => break,
+                msg = msg_stream.next() => msg,
+            };
+            let Some(Ok(msg)) = msg else { break; };
+            if !grant.valid() { break; }
             match msg {
                 AggregatedMessage::Ping(bytes) => {
                     let _ = session.pong(&bytes).await;

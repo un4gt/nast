@@ -1,6 +1,7 @@
 //! nast 单端口服务入口：静态资源 + /ws + /upload。
 
 mod connection;
+mod auth;
 mod model_catalog;
 mod routing;
 mod events;
@@ -153,6 +154,7 @@ async fn main() -> std::io::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("./web/dist"));
 
+    let auth = web::Data::new(auth::Auth::from_env().map_err(std::io::Error::other)?);
     let user =
         nast_storage::UserData::new(&data_root, "default-user").expect("init user data");
     let mut settings = user
@@ -179,7 +181,15 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         let web_dist = web_dist.clone();
         App::new()
+            .app_data(auth.clone())
             .app_data(web::Data::new(state.clone()))
+            .wrap(actix_web::middleware::from_fn(auth::guard))
+            .route("/healthz", web::get().to(|| async { HttpResponse::Ok().body("ok") }))
+            .service(web::scope("/api/auth")
+                .app_data(web::JsonConfig::default().limit(4096))
+                .route("/session", web::get().to(auth::status))
+                .route("/login", web::post().to(auth::login))
+                .route("/logout", web::post().to(auth::logout)))
             .route("/ws", web::get().to(ws::ws_route))
             .route("/upload", web::post().to(upload))
             .route("/thumbnail", web::get().to(thumbnail))

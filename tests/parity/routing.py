@@ -30,7 +30,7 @@ async def main():
     plugins = artifact/'plugins';plugins.mkdir()
     (plugins/'counter.lua').write_text('for _, event in ipairs({"user_input", "prompt_built"}) do nast.on(event, function() nast.set_var(event, tostring(tonumber(nast.get_var(event) or "0") + 1)) end) end',encoding='utf-8')
     http_port = port()
-    env = {**os.environ,'NAST_PORT':str(http_port),'NAST_DATA':str(artifact/'data'),'NAST_WEB':str(ROOT/'web'/'dist'),'NAST_BIND':'127.0.0.1'}
+    env = {**os.environ,'NAST_PORT':str(http_port),'NAST_DATA':str(artifact/'data'),'NAST_WEB':str(ROOT/'web'/'dist'),'NAST_BIND':'127.0.0.1', 'NAST_USERNAME':'', 'NAST_PASSWORD':'', 'NAST_BRIDGE_TOKEN':'', 'NAST_PUBLIC_ORIGIN':'', 'NAST_ALLOW_ANONYMOUS':'true'}
     binary = ROOT/'target'/'debug'/('nast.exe' if os.name=='nt' else 'nast')
     log = (artifact/'server.log').open('w',encoding='utf-8')
     process = subprocess.Popen([str(binary)],cwd=artifact,env=env,stdout=log,stderr=log)

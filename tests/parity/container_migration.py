@@ -18,7 +18,7 @@ def main(image):
     original_settings=(user/'settings.json').read_bytes()
     original_secrets=(user/'secrets.json').read_bytes()
     name='nast-model-migration-'+uuid.uuid4().hex[:10]
-    subprocess.run(['docker','run','-d','--name',name,'--mount',f'type=bind,source={root},target=/app/data',image],check=True,capture_output=True)
+    subprocess.run(['docker','run','-d','--name',name,'-e','NAST_USERNAME=migration-test','-e','NAST_PASSWORD=isolated-test-password','--mount',f'type=bind,source={root},target=/app/data',image],check=True,capture_output=True)
     try:
         for _ in range(100):
             if (user/'models.json').exists(): break
@@ -33,12 +33,14 @@ def main(image):
         subprocess.run(['docker','restart',name],check=True,capture_output=True)
         # Verify the server actually finishes restarting, rather than merely observing old files.
         for _ in range(100):
-            result=subprocess.run(['docker','exec',name,'curl','-fsS','http://127.0.0.1:8000/'],capture_output=True)
+            result=subprocess.run(['docker','exec',name,'curl','-fsS','http://127.0.0.1:8000/healthz'],capture_output=True)
             if result.returncode==0: break
             time.sleep(.1)
         assert result.returncode==0
+        status=subprocess.check_output(['docker','exec',name,'curl','-s','-o','/dev/null','-w','%{http_code}','http://127.0.0.1:8000/ws']).decode()
+        assert status=='401',status
         assert first==(user/'models.json').read_bytes()
-        (root/'report.json').write_text(json.dumps({'image':image,'migration':True,'credentials':True,'backup':True,'restart_idempotent':True}),encoding='utf-8')
+        (root/'report.json').write_text(json.dumps({'image':image,'migration':True,'credentials':True,'backup':True,'restart_idempotent':True,'auth_required':True}),encoding='utf-8')
         print('PASS isolated container migration, credentials, exact backups and restart:',root)
     finally:
         subprocess.run(['docker','rm','-f',name],check=True,capture_output=True)

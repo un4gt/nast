@@ -3,6 +3,7 @@
 [简介](./intro.md)
 
 - [快速开始](./getting-started.md)
+- [登录与部署认证](./guide/authentication.md)
 - [架构总览](./architecture.md)
 - [功能手册](./guide/README.md)
   - [连接与模型](./guide/connection.md)

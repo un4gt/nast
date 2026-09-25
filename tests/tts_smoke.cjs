@@ -84,7 +84,7 @@ async function main() {
   const serverPort = await port();
   const data = fs.mkdtempSync(path.join(os.tmpdir(), 'nast-tts-test-'));
   const binary = process.env.NAST_TEST_BIN || path.join(root, 'target', 'debug', process.platform === 'win32' ? 'nast.exe' : 'nast');
-  const server = spawn(binary, [], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NAST_PORT: String(serverPort), NAST_BIND: '127.0.0.1', NAST_DATA: data, NAST_WEB: path.join(root, 'web/dist') } });
+  const server = spawn(binary, [], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NAST_USERNAME: '', NAST_PASSWORD: '', NAST_BRIDGE_TOKEN: '', NAST_PUBLIC_ORIGIN: '', NAST_ALLOW_ANONYMOUS: 'true', NAST_PORT: String(serverPort), NAST_BIND: '127.0.0.1', NAST_DATA: data, NAST_WEB: path.join(root, 'web/dist') } });
   let log = ''; server.stdout.on('data', (v) => { log += v; }); server.stderr.on('data', (v) => { log += v; });
   let rpc;
   try {

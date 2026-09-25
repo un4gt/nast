@@ -67,6 +67,14 @@ npm --prefix web run test:tts     # 文本过滤、分段与旧配置兼容
 任何聊天链路改动要求：`cargo test --workspace` 全绿 + 对应冒烟通过；
 涉及 ST 对齐的修复同时在 `docs/ST_PARITY_AUDIT.md` 更新状态并注明提交。
 
+## 部署认证验收
+
+运行 `cargo test --workspace`，以及构建前后端后的 `.cache/st-parity-venv/Scripts/python.exe tests/parity/auth.py`。
+验证未登录 HTTP／WebSocket 拒绝访问、错误密码、跨站请求拒绝、桥接请求头、Cookie 属性、刷新保持登录及退出后多标签页失效。
+浏览器检查覆盖明暗主题、390／1440 像素宽度和键盘提交，截图与报告在脚本打印的隔离 Evidence 目录中。
+`tests/parity/container_migration.py` 现在以测试账号启动容器，同时验证未登录 `/ws` 返回 401。
+同级 `nast-bridges` 的工作区测试验证桥接每次重连均携带令牌。
+
 ## 多模型路由验收
 
 构建最新服务端和网页后，使用现有 parity 虚拟环境执行：
