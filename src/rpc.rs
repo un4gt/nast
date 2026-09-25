@@ -19,6 +19,10 @@ pub enum RpcError {
     BadRequest(String),
     #[error("integrity")]
     Integrity,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{}", .0.get("message").and_then(Value::as_str).unwrap_or("上游请求失败"))]
+    Generation(Value),
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -33,11 +37,20 @@ impl From<nast_storage::StorageError> for RpcError {
     }
 }
 
+impl RpcError {
+    pub fn generation(error: String) -> Self { match serde_json::from_str::<Value>(&error) { Ok(v) if v.is_object()=>Self::Generation(v), _=>Self::BadRequest(error) } }
+}
+
 pub type RpcResult = Result<Value, RpcError>;
 
 /// 主分发器。
 pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcResult {
     match method {
+        "model_catalog.get" => crate::model_catalog::get(state).await,
+        "model_catalog.save" => crate::model_catalog::save(state, params).await,
+        "conversation_model.get" => crate::model_catalog::conversation(state, params, false).await,
+        "conversation_model.set" => crate::model_catalog::conversation(state, params, true).await,
+        "model.command" => model_command(state, params).await,
         "settings.get" => settings_get(state).await,
         "settings.save" => settings_save(state, params).await,
         "secrets.get" => secrets_get(state).await,
@@ -68,7 +81,7 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "plugins.list" => plugins_list(state),
         "plugins.reload" => plugins_reload(state),
         "generate.run" => generate_run(state, params).await,
-        "generate.stop" => generate_stop(state).await,
+        "generate.stop" => generate_stop(state, params).await,
         "generate.status" => generate_status(state).await,
         "groups.create" => groups_create(state, params),
         "groups.edit" => groups_edit(state, params),
@@ -155,6 +168,7 @@ async fn secrets_get(state: SharedState) -> RpcResult {
 /// 写入单密钥（单条目形态，保持 ST 数组兼容）。value 为空 = 清除。
 async fn secrets_set(state: SharedState, params: Value) -> RpcResult {
     let key = param_str(&params, "key")?.to_string();
+    if key.starts_with("api_key_route_") { return Err(RpcError::BadRequest("路由凭据请通过 model_catalog.save 修改".into())); }
     let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
     if !key.starts_with("api_key_") && !matches!(key.as_str(), "minimax_group_id" | "volcengine_app_id" | "volcengine_access_key") {
         return Err(RpcError::BadRequest("key must be an api_key_* name".into()));
@@ -179,6 +193,16 @@ async fn secrets_set(state: SharedState, params: Value) -> RpcResult {
 
 /// 模型列表：默认用已保存配置；连接测试可传 url/key 覆盖（不必先保存）。
 async fn models_list(state: SharedState, params: Value) -> RpcResult {
+    if let Some(route_id) = params["route_id"].as_str() {
+        let (route,secrets) = {
+            let secrets = state.secrets.read().await;
+            let catalog = state.catalog.lock().unwrap();
+            let route = catalog.models.iter().flat_map(|m| &m.routes).find(|r|r.id == route_id).cloned().ok_or_else(||RpcError::NotFound("route not found".into()))?;
+            (route,secrets.clone())
+        };
+        let data = crate::model_catalog::provider(&route,&secrets).list_models().await.map_err(|e|RpcError::Generation(json!({"message":e.to_string(),"retryable":e.retryable(),"detail":e})))?;
+        return Ok(json!({"data":data}));
+    }
     let oai: nast_model::preset::OaiSettings = serde_json::from_value(
         state.settings.read().await.get("oai_settings").cloned().unwrap_or(json!({})),
     )
@@ -456,7 +480,16 @@ fn chats_save(state: SharedState, params: Value) -> RpcResult {
         .get("chat")
         .and_then(|v| v.as_array())
         .ok_or_else(|| RpcError::BadRequest("missing chat array".into()))?;
-    let chat = ChatFile(lines.clone());
+    let mut chat = ChatFile(lines.clone());
+    let existing = state.user.read_chat(avatar,file_name);
+    if let Ok(previous) = existing {
+        if !params["imported"].as_bool().unwrap_or(false) {
+            if let Some(selection) = previous.0.first().and_then(|h|h.pointer("/chat_metadata/nast_model")) {
+                if let Some(header) = chat.0.first_mut() { header["chat_metadata"]["nast_model"] = selection.clone(); }
+            }
+        }
+        crate::model_catalog::bind(&mut chat,&state.catalog.lock().unwrap().default_model,params["imported"].as_bool().unwrap_or(false));
+    } else { crate::model_catalog::bind(&mut chat,&state.catalog.lock().unwrap().default_model,true); }
     state.user.save_chat(&avatar, &file_name, &chat, force)?;
     Ok(json!({"ok": true}))
 }
@@ -785,11 +818,12 @@ fn chats_new(state: SharedState, params: Value) -> RpcResult {
         "swipe_id": 0,
         "swipe_info": [{"send_date": nast_storage::message_time_stamp()}],
     });
-    let chat = ChatFile(vec![
+    let mut chat = ChatFile(vec![
         serde_json::to_value(&header).map_err(|e| RpcError::Internal(e.to_string()))?,
         greeting_msg,
     ]);
 
+    crate::model_catalog::bind(&mut chat, &state.catalog.lock().unwrap().default_model, false);
     // 文件名：humanizedDateTime（ST 语义）
     let file_name = format!("{} - {}.jsonl", character.name, nast_storage::humanized_date_time());
     state.user.save_chat(avatar, &file_name, &chat, false)?;
@@ -918,7 +952,10 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         other => return Err(RpcError::BadRequest(format!("unknown type {other}"))),
     };
     let character = read_character(&state, &avatar)?;
-
+    let conversation = crate::model_catalog::Conversation::Private { avatar:avatar.clone(), chat_file:chat_file.clone() };
+    if let Some(command) = builtin_model_command(&params) { return model_command(state, json!({"conversation":conversation,"argument":command})).await; }
+    let task_id = crate::routing::task_id(&params);
+    let routing;
     let abort = tokio_util::sync::CancellationToken::new();
     {
         let mut guard = state.generation.write().await;
@@ -926,6 +963,9 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         if guard.abort.is_some() {
             return Err(RpcError::BadRequest("generation already in progress".into()));
         }
+        routing = crate::routing::Routing::prepare(&state, conversation, &params, task_id.clone()).await?;
+        guard.phase = routing.phase.clone();
+        guard.reasoning = routing.reasoning.clone();
         guard.abort = Some(abort.clone());
         guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         guard.info = Some(crate::state::GenerationInfo {
@@ -933,15 +973,15 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
             avatar: avatar.clone(),
             chat_file: chat_file.clone(),
             is_group: false,
+            task_id: task_id.clone(),
         });
     }
     let progress = state.generation.read().await.text.clone();
 
-    let oai: nast_model::preset::OaiSettings =
+    let mut oai: nast_model::preset::OaiSettings =
         serde_json::from_value(state.settings.read().await.get("oai_settings").cloned().unwrap_or(json!({})))
             .unwrap_or_default();
-    let secrets_snapshot = state.secrets.read().await.clone();
-    let provider = crate::connection::provider(&oai, &secrets_snapshot);
+    routing.configure_prompt(&mut oai);
 
     let settings_snapshot = state.settings.read().await.clone();
     let session = GenerateSession {
@@ -951,7 +991,7 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         hub: &state.hub,
         oai,
         settings_json: &settings_snapshot,
-        provider,
+        routing,
         abort: abort.clone(),
         plugins: &state.plugins,
         progress,
@@ -979,28 +1019,30 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
         guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     }
     result
-        .map(|r| json!({"text": r.text, "saved": r.saved}))
-        .map_err(RpcError::Internal)
+        .map(|r| json!({"text": r.text, "saved": r.saved,"reasoning":r.reasoning,"task_id":task_id,"routing":r.routing}))
+        .map_err(RpcError::generation)
 }
 
 /// 生成状态（断线重连恢复流式气泡）。
 async fn generate_status(state: SharedState) -> RpcResult {
     let guard = state.generation.read().await;
-    let running = guard
-        .abort
-        .as_ref()
-        .map(|a| !a.is_cancelled())
-        .unwrap_or(false);
+    let running = guard.abort.is_some();
     let text = guard.text.lock().map(|t| t.clone()).unwrap_or_default();
     Ok(json!({
         "running": running,
         "text": text,
+        "reasoning": *guard.reasoning.lock().unwrap(),
+        "cancelling": guard.abort.as_ref().is_some_and(|a|a.is_cancelled()),
         "info": guard.info,
+        "route_state": *guard.phase.lock().unwrap(),
     }))
 }
 
-async fn generate_stop(state: SharedState) -> RpcResult {
+async fn generate_stop(state: SharedState, params: Value) -> RpcResult {
     let guard = state.generation.read().await;
+    if let Some(task_id) = params["task_id"].as_str() {
+        if guard.info.as_ref().map(|i|i.task_id.as_str()) != Some(task_id) { return Ok(json!({"ok":false,"reason":"task_mismatch"})); }
+    }
     if let Some(abort) = &guard.abort {
         abort.cancel();
     }
@@ -1010,3 +1052,25 @@ async fn generate_stop(state: SharedState) -> RpcResult {
 
 #[allow(dead_code)]
 fn unused(_: CardSpec, _: Uuid) {}
+
+
+pub fn builtin_model_command(params: &Value) -> Option<String> {
+    let message = params["user_message"].as_str()?.trim();
+    let mut parts = message.splitn(2, char::is_whitespace);
+    if !parts.next()?.eq_ignore_ascii_case("/model") { return None; }
+    Some(parts.next().unwrap_or("").trim().to_string())
+}
+pub(crate) async fn model_command(state: SharedState, params: Value) -> RpcResult {
+    let argument = params["argument"].as_str().unwrap_or("").trim();
+    let set = !argument.is_empty() && argument != "info";
+    let view = crate::model_catalog::conversation(state.clone(),json!({"conversation":params["conversation"],"model_id":argument}),set).await?;
+    let catalog = state.catalog.lock().unwrap();
+    let current = view["model"]["display_name"].as_str().unwrap_or("模型已删除，请重新选择");
+    let id = view["state"]["selected_model"].as_str().unwrap_or("");
+    let text = if argument == "info" {
+        let active = view["state"]["active_route"].as_str();
+        let route = view["state"].get("active_route_info").filter(|_|active.is_some()).or_else(||view["model"]["routes"].as_array().and_then(|routes| routes.iter().find(|r|r["id"].as_str() == active.or_else(||view["candidate_route"].as_str()))));
+        format!("当前模型：{current} ({id})\n{}：{}\n上游模型：{}",if active.is_some(){"已成功使用的路由"}else{"下次候选路由"},route.and_then(|r|r["id"].as_str()).unwrap_or("不可用"),route.and_then(|r|r["upstream_model"].as_str()).unwrap_or("不可用"))
+    } else { format!("当前模型：{current} ({id})\n可选模型：\n{}",catalog.models.iter().map(|m|format!("/model {} — {}",m.id,m.display_name)).collect::<Vec<_>>().join("\n")) };
+    Ok(json!({"text":text,"saved":false,"command":true,"view":view}))
+}

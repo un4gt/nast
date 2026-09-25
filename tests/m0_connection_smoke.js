@@ -1,4 +1,4 @@
-// M0 连接闭环验收：UI 等价的 settings.save + secrets.set 即可生成（无环境变量）。
+// M0 连接闭环验收：UI 等价的 model_catalog.save 配置路由后即可生成（无环境变量）。
 // 前置：target/debug/nast.exe 已构建；ws 模块来自 D:/temp/nast-smoke。
 // 运行：node tests/m0_connection_smoke.js
 const http = require('http');
@@ -103,7 +103,8 @@ async function main() {
   if (!rpc) { console.error('FAIL 无法连接服务端'); process.exit(1); }
 
   try {
-    // 1. UI 语义的配置：settings.save + secrets.set（无任何环境变量）
+    // 1. UI 语义的配置：独立模型目录 + settings.save + 旧密钥接口兼容（无任何环境变量）
+    await require('./model_catalog_helper')(rpc.call.bind(rpc), `http://127.0.0.1:${MOCK_PORT}/v1`, 'mock-a', 'sk-m0-test');
     await rpc.call('settings.save', {
       settings: {
         oai_settings: {

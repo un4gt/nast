@@ -4,7 +4,7 @@
 //! 现阶段 UI 仅暴露 OpenAI 兼容（custom）源；claude/makersuite 保留代码路径走 env。
 
 use nast_model::preset::OaiSettings;
-use nast_providers::{Provider, ProviderKind};
+use nast_providers::ProviderKind;
 use serde_json::Value;
 
 pub const SECRET_CUSTOM: &str = "api_key_custom";
@@ -58,10 +58,6 @@ pub fn provider_kind(oai: &OaiSettings, secrets: &Value) -> ProviderKind {
             api_key: secret_or_env(secrets, SECRET_CUSTOM, "OPENAI_API_KEY"),
         },
     }
-}
-
-pub fn provider(oai: &OaiSettings, secrets: &Value) -> Provider {
-    Provider::new(provider_kind(oai, secrets))
 }
 
 /// 按源选择模型字段（ST openai.js：每源独立 model 字段；空则回落 openai_model）。

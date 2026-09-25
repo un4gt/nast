@@ -45,12 +45,15 @@ pub struct GenerationControl {
     pub abort: Option<tokio_util::sync::CancellationToken>,
     /// 已累积的流式文本
     pub text: std::sync::Arc<std::sync::Mutex<String>>,
+    pub reasoning: std::sync::Arc<std::sync::Mutex<String>>,
     /// 本次生成目标（generate.status 展示）
     pub info: Option<GenerationInfo>,
+    pub phase: Arc<std::sync::Mutex<Value>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GenerationInfo {
+    pub task_id: String,
     pub kind: String,
     pub avatar: String,
     pub chat_file: String,
@@ -58,6 +61,7 @@ pub struct GenerationInfo {
 }
 
 pub struct AppState {
+    pub catalog: std::sync::Mutex<crate::model_catalog::Catalog>,
     pub user: UserData,
     pub hub: EventHub,
     /// 插件宿主（Lua 插件 + Rust 钩子）；Mutex 因 mlua 非线程安全句柄
@@ -72,7 +76,8 @@ pub struct AppState {
 pub type SharedState = Arc<AppState>;
 
 impl AppState {
-    pub fn new(user: UserData, settings: Value, secrets: Value) -> Self {
+    pub fn new(user: UserData, settings: Value, mut secrets: Value) -> Self {
+        let catalog = crate::model_catalog::initialize(&user, &settings, &mut secrets).expect("load or migrate model catalog");
         let hub = EventHub::new();
         // 插件宿主：专用线程 + KV 落盘 + toast 接线到事件总线
         let host = nast_plugin::PluginHost::new(
@@ -96,6 +101,7 @@ impl AppState {
             _ => {}
         }
         Self {
+            catalog: std::sync::Mutex::new(catalog),
             user,
             hub,
             plugins: std::sync::Mutex::new(host),

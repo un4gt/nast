@@ -208,13 +208,14 @@ export const useStore = create<AppState>((set, get) => ({
     set({ generating: true, streamingText: '', streamingReasoning: '' });
     let ok = true;
     try {
-      await rpc.call('generate.group', {
+      const result = await rpc.call<{ replies?: { routing?: { status?: string } }[] }>('generate.group', {
         id: g.id,
         chat_id: g.chat_id,
         user_message: text,
         type,
         ...(member ? { member } : {}),
       });
+      if (result.replies?.some(reply => reply.routing?.status === 'incomplete')) ok = false;
       const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: g.chat_id });
       set({ messages: raw.slice(1), chatMetadata: raw[0]?.chat_metadata ?? null });
     } catch {
@@ -407,11 +408,12 @@ export const useStore = create<AppState>((set, get) => ({
     if (!activeAvatar || !activeChatName || get().generating) return;
     set({ generating: true });
     try {
-      const r = await rpc.call<{ text: string; saved: boolean }>('generate.run', {
+      const r = await rpc.call<{ text: string; saved: boolean; routing?: { status?: string } }>('generate.run', {
         avatar: activeAvatar,
         chat_file: activeChatName,
         type: 'impersonate',
       });
+      if (r.routing?.status === 'incomplete') pushToast('代入生成未完成，已保留部分文本', 'info');
       return r.text;
     } finally {
       set({ generating: false });

@@ -1,3 +1,5 @@
+import { currentConversation } from '@/models';
+import { ModelSelector } from './ModelSelector';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Settings2, VolumeX } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
@@ -64,10 +66,12 @@ export function GroupChatArea() {
       setCurrentMember(name);
       useStore.setState({ streamingText: '', streamingReasoning: '' });
     });
-    const offToken = rpc.on('stream_token_received', (data: { text: string }) => {
+    const offToken = rpc.on('stream_token_received', (data: { text: string; conversation?: unknown }) => {
+      if (data.conversation && JSON.stringify(data.conversation) !== JSON.stringify(currentConversation())) return;
       if (useStore.getState().generating) appendStreamToken(data.text);
     });
-    const offReasoning = rpc.on('stream_reasoning_received', (data: { text: string }) => {
+    const offReasoning = rpc.on('stream_reasoning_received', (data: { text: string; conversation?: unknown }) => {
+      if (data.conversation && JSON.stringify(data.conversation) !== JSON.stringify(currentConversation())) return;
       if (useStore.getState().generating) appendStreamReasoning(data.text);
     });
     return () => {
@@ -92,7 +96,7 @@ export function GroupChatArea() {
     setPending(true);
     setInput('');
     try {
-      if (/^\/(speak|tts-stop)(?:\s|$)/i.test(text)) {
+      if (/^\/(model|speak|tts-stop)(?:\s|$)/i.test(text)) {
         await runSlashCommand(text);
         return;
       }
@@ -136,6 +140,7 @@ export function GroupChatArea() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <ModelSelector />
       {/* 成员行：点击触发单成员回复 */}
       <div className="flex shrink-0 items-center gap-2 border-b px-4 py-3 sm:px-6">
         <div className="flex flex-1 items-center gap-1.5 overflow-x-auto">

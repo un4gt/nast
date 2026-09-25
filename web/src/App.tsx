@@ -37,6 +37,11 @@ export default function App() {
   const [showWorlds, setShowWorlds] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [settingsSection, setSettingsSection] = useState<string>();
+  useEffect(() => {
+    const open = () => { setSettingsSection('connection'); setShowSettings(true); };
+    window.addEventListener('nast:open-model-settings', open);
+    return () => window.removeEventListener('nast:open-model-settings', open);
+  }, []);
   const [showInspectorSheet, setShowInspectorSheet] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(() => {
     return localStorage.getItem('nast:inspector_collapsed') === '1';
@@ -64,6 +69,7 @@ export default function App() {
         .call<{
           running: boolean;
           text: string;
+          reasoning?: string;
           info?: { avatar: string; chat_file: string; is_group: boolean } | null;
         }>('generate.status', {})
         .then((st) => {
@@ -71,12 +77,12 @@ export default function App() {
             useStore.setState({
               generating: true,
               streamingText: st.text ?? '',
-              streamingReasoning: '',
+              streamingReasoning: st.reasoning ?? '',
             });
             // 生成实际由旧连接发起；轮询直至结束
             const poll = setInterval(() => {
               rpc
-                .call<{ running: boolean; text: string }>('generate.status', {})
+                .call<{ running: boolean; text: string; reasoning?: string }>('generate.status', {})
                 .then((s) => {
                   if (!s.running) {
                     clearInterval(poll);
@@ -92,7 +98,7 @@ export default function App() {
                       if (g) void useStore.getState().openGroup(g.id);
                     }
                   } else {
-                    useStore.setState({ streamingText: s.text ?? '' });
+                    useStore.setState({ streamingText: s.text ?? '', streamingReasoning: s.reasoning ?? '' });
                   }
                 })
                 .catch(() => {});

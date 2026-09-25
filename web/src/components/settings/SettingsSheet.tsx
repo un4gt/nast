@@ -38,7 +38,7 @@ import {
   Save,
   Headphones,
 } from 'lucide-react';
-import { ConnectionPanel } from './sections/ConnectionPanel';
+import { ModelsPanel } from './sections/ModelsPanel';
 import { SamplingPanel } from './sections/SamplingPanel';
 import { AiResponsePanel } from './sections/AiResponsePanel';
 import { PersonaPanel } from './sections/PersonaPanel';
@@ -53,7 +53,7 @@ import { CustomCommandsPanel } from './sections/CustomCommandsPanel';
 import { TtsPanel } from './sections/TtsPanel';
 
 const SECTIONS = [
-  { id: 'connection', icon: Plug, label: '连接' },
+  { id: 'connection', icon: Plug, label: '模型' },
   { id: 'tts', icon: Headphones, label: '语音朗读' },
   { id: 'preset', icon: FolderOpen, label: '预设' },
   { id: 'prompts', icon: ListOrdered, label: '提示词管理' },
@@ -139,7 +139,7 @@ export function SettingsSheet({
       >
         <SheetHeader className="shrink-0 border-b px-5 py-5 sm:px-6">
           <SheetTitle>设置</SheetTitle>
-          <SheetDescription>调整连接、角色与偏好，让对话更合心意。</SheetDescription>
+          <SheetDescription>调整模型、角色与偏好，让对话更合心意。</SheetDescription>
         </SheetHeader>
 
         <div className="shrink-0 border-b px-4 py-3 sm:hidden">
@@ -181,9 +181,9 @@ export function SettingsSheet({
           </nav>
 
           {/* 右侧内容 */}
-          <ScrollArea className="min-w-0 flex-1" key={section}>
+          <ScrollArea className="min-w-0 flex-1">
             <fieldset disabled={saving} className="min-w-0 border-0 p-5 sm:p-7">
-              {section === 'connection' && <ConnectionPanel oai={oai} patchOai={patchOai} />}
+              <div hidden={section !== 'connection'}><ModelsPanel /></div>
               {section === 'tts' && <TtsPanel draft={draft} patch={patch} />}
               {section === 'preset' && (
                 <PresetPanel oai={oai} applyToOai={(m) => patch('oai_settings', m)} />
@@ -201,7 +201,7 @@ export function SettingsSheet({
             </fieldset>
           </ScrollArea>
         </div>
-        <footer className="safe-bottom flex shrink-0 items-center justify-between gap-3 border-t bg-card px-5 pt-3">
+        {section !== 'connection' && <footer className="safe-bottom flex shrink-0 items-center justify-between gap-3 border-t bg-card px-5 pt-3">
           <span
             className={cn(
               'flex items-center gap-2 text-xs',
@@ -219,7 +219,7 @@ export function SettingsSheet({
           <Button disabled={!dirty || saving} onClick={() => void save()}>
             {saving ? <Spinner /> : <Save data-icon="inline-start" />}保存更改
           </Button>
-        </footer>
+        </footer>}
       </SheetContent>
     </Sheet>
   );

@@ -16,13 +16,19 @@ use rand::SeedableRng;
 use nast_model::group::Group;
 use serde_json::{json, Value};
 
-pub async fn generate_group(state: SharedState, params: Value) -> RpcResult {
+pub async fn generate_group(state: SharedState, mut params: Value) -> RpcResult {
+    if let Some(command) = crate::rpc::builtin_model_command(&params) {
+        return crate::rpc::model_command(state, json!({"conversation":{"kind":"group","group_id":params["id"],"chat_id":params["chat_id"]},"argument":command})).await;
+    }
+    let task_id = crate::routing::task_id(&params);
+    params["task_id"] = json!(task_id);
     let abort = tokio_util::sync::CancellationToken::new();
     {
         let mut guard = state.generation.write().await;
         if guard.abort.is_some() {
             return Err(RpcError::BadRequest("generation already in progress".into()));
         }
+        guard.info = Some(crate::state::GenerationInfo { kind:"group".into(),avatar:params["id"].as_str().unwrap_or_default().into(),chat_file:params["chat_id"].as_str().unwrap_or_default().into(),is_group:true,task_id:task_id.clone() });
         guard.abort = Some(abort.clone());
         guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     }
@@ -63,12 +69,16 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
     }
 
     // 读群聊天文件（无则用成员开场白初始化）
-    let mut chat = match state.user.read_group_chat(chat_id) {
-        Ok(c) => c,
-        Err(nast_storage::StorageError::NotFound(_)) => init_group_chat(&state, &group, chat_id)?,
+    match state.user.read_group_chat(chat_id) {
+        Ok(_) => {},
+        Err(nast_storage::StorageError::NotFound(_)) => { init_group_chat(&state, &group, chat_id)?; },
         Err(error) => return Err(error.into()),
     };
 
+    let task_id = crate::routing::task_id(&params);
+    let routing = crate::routing::Routing::prepare(&state, crate::model_catalog::Conversation::Group { group_id:group_id.into(), chat_id:chat_id.into() }, &params, task_id.clone()).await?;
+    // prepare persisted the initial model binding; use that same header below.
+    let mut chat = state.user.read_group_chat(chat_id)?;
     let generation_type = match params["type"].as_str().unwrap_or("normal") {
         "normal" => GenerationType::Normal,
         "regenerate" => GenerationType::Regenerate,
@@ -232,10 +242,13 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
             avatar: group.id.clone(),
             chat_file: chat_id.to_string(),
             is_group: true,
+            task_id: task_id.clone(),
         });
+        guard.phase = routing.phase.clone();
+        guard.reasoning = routing.reasoning.clone();
     }
     let progress = state.generation.read().await.text.clone();
-    let oai: nast_model::preset::OaiSettings = serde_json::from_value(
+    let mut oai: nast_model::preset::OaiSettings = serde_json::from_value(
         state
             .settings
             .read()
@@ -245,17 +258,16 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
             .unwrap_or(json!({})),
     )
     .unwrap_or_default();
-    let secrets_snapshot = state.secrets.read().await.clone();
-    let provider = crate::connection::provider(&oai, &secrets_snapshot);
+    routing.configure_prompt(&mut oai);
     let settings_snapshot = state.settings.read().await.clone();
-    let session = GenerateSession {
+    let mut session = GenerateSession {
         shared_settings: &state.settings,
         global_variables: std::cell::RefCell::new(settings_snapshot.pointer("/extension_settings/variables/global").and_then(Value::as_object).cloned().unwrap_or_default()),
         user: &state.user,
         hub: &state.hub,
         oai,
         settings_json: &settings_snapshot,
-        provider,
+        routing,
         abort,
         plugins: &state.plugins,
         progress,
@@ -292,11 +304,14 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
             character: member_ch.clone(),
             is_group: true,
         };
-        let result = session.run_content(&p).await.map_err(RpcError::Internal)?;
-        replies.push(json!({"name":member_ch.name,"text":result.text}));
+        session.oai = serde_json::from_value(settings_snapshot["oai_settings"].clone()).unwrap_or_default();
+        session.routing.configure_prompt(&mut session.oai);
+        let result = session.run_content(&p).await.map_err(RpcError::generation)?;
+        replies.push(json!({"name":member_ch.name,"text":result.text,"reasoning":result.reasoning,"routing":result.routing}));
+        if result.routing["status"] == "incomplete" { break; }
         if session.abort.is_cancelled() { break; }
     }
-    Ok(json!({"activated": activated, "replies": replies, "chat_id": chat_id}))
+    Ok(json!({"activated": activated, "replies": replies, "chat_id": chat_id, "task_id":task_id}))
 }
 
 pub(crate) fn init_group_chat(
@@ -335,6 +350,7 @@ pub(crate) fn init_group_chat(
             chat.0.push(msg);
         }
     }
+    crate::model_catalog::bind(&mut chat, &state.catalog.lock().unwrap().default_model, false);
     state.user.save_group_chat(chat_id, &chat, false)?;
     Ok(chat)
 }

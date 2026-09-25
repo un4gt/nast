@@ -42,7 +42,9 @@ pub async fn manage(state: SharedState, method: &str, params: Value) -> RpcResul
                     if !message["mes"].is_string() || !message["name"].is_string() { return Err(bad("invalid chat message")); }
                 }
                 values[0]["chat_metadata"]["integrity"] = json!(uuid::Uuid::new_v4().to_string());
-                state.user.save_group_chat(&name, &ChatFile(values), false)?;
+                let mut imported = ChatFile(values);
+                crate::model_catalog::bind(&mut imported,&state.catalog.lock().unwrap().default_model,true);
+                state.user.save_group_chat(&name, &imported, false)?;
             } else { crate::group_gen::init_group_chat(&state, &group, &name)?; }
             group.chats.push(name.clone()); group.chat_id = name;
         }

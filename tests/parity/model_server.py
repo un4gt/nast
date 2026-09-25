@@ -8,6 +8,8 @@ import argparse
 import hashlib
 import json
 import threading
+import socket
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -36,20 +38,27 @@ class ModelServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
         self.captures: list[dict] = []
         self.lock = threading.Lock()
+        self.plans: dict[str, list[dict]] = {}
         self.output = output
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def setup(self):
+        super().setup()
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
     def log_message(self, *_):
         pass
 
-    def send_json(self, status: int, body: object):
+    def send_json(self, status: int, body: object, headers=None):
         data = canonical(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, str(value))
         self.end_headers()
         self.wfile.write(data)
 
@@ -66,61 +75,96 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": {"message": "Unknown endpoint"}})
 
     def do_POST(self):
-        if not self.path.endswith("/chat/completions"):
-            self.send_json(404, {"error": {"message": "Unknown endpoint"}})
+        protocol = 'anthropic' if self.path.endswith('/messages') else 'gemini' if ':generateContent' in self.path or ':streamGenerateContent' in self.path else 'openai'
+        if protocol == 'openai' and not self.path.endswith('/chat/completions'):
+            self.send_json(404, {'error': {'message': 'Unknown endpoint'}})
             return
         try:
-            size = int(self.headers.get("Content-Length", "0"))
+            size = int(self.headers.get('Content-Length', '0'))
             if not 0 < size <= 16 * 1024 * 1024:
-                raise ValueError("Invalid request size")
-            raw = self.rfile.read(size).decode("utf-8")
+                raise ValueError('Invalid request size')
+            raw = self.rfile.read(size).decode('utf-8')
             body = json.loads(raw)
-            if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
-                raise ValueError("messages must be an array")
+            if not isinstance(body, dict) or not isinstance(body.get('contents' if protocol == 'gemini' else 'messages'), list):
+                raise ValueError('messages/contents must be an array')
         except (ValueError, UnicodeError) as error:
-            self.send_json(400, {"error": {"message": str(error)}})
+            self.send_json(400, {'error': {'message': str(error)}})
             return
         answer = reply_for(body)
-        capture = {"path": self.path, "raw": raw, "body": body, "reply": answer}
+        route = self.path.split('/')[1]
+        auth = self.headers.get('Authorization') or self.headers.get('x-api-key') or self.headers.get('x-goog-api-key') or ''
+        capture = {'path': self.path, 'route': route, 'protocol': protocol, 'raw': raw, 'body': body, 'reply': answer,
+                   'credential_hash': hashlib.sha256(auth.encode()).hexdigest()}
         with self.server.lock:
             self.server.captures.append(capture)
+            plan = self.server.plans.get(route, [])
+            action = plan.pop(0) if plan else {}
             if self.server.output:
                 self.server.output.parent.mkdir(parents=True, exist_ok=True)
-                with self.server.output.open("a", encoding="utf-8") as stream:
-                    stream.write(canonical(capture) + "\n")
-        if "/error/" in self.path:
-            self.send_json(503, {"error": {"message": "Scripted model failure"}})
+                with self.server.output.open('a', encoding='utf-8') as output:
+                    output.write(canonical(capture) + '\n')
+        time.sleep(action.get('delay', 0))
+        status = action.get('status', 503 if '/error/' in self.path else 200)
+        if status != 200:
+            self.send_json(status, {'error': {'type': action.get('error_type','scripted_error'), 'message': action.get('message','Scripted model failure')}},
+                           {'Retry-After': action['retry_after']} if 'retry_after' in action else None)
             return
-        common = {"id": "chatcmpl-parity", "created": 0, "model": body.get("model", "gpt-4o")}
-        if not body.get("stream", False):
-            self.send_json(200, {**common, "object": "chat.completion", "choices": [{
-                "index": 0, "message": {"role": "assistant", "content": answer,
-                                        "reasoning_content": "核对上下文"},
-                "finish_reason": "stop"}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+        if action.get('invalid_json'):
+            self.send_json(200, {'invalid': True})
+            return
+        stream = ':streamGenerateContent' in self.path if protocol == 'gemini' else body.get('stream', False)
+        common = {'id': 'chatcmpl-parity', 'created': 0, 'model': body.get('model', 'gpt-4o')}
+        if not stream:
+            if protocol == 'anthropic':
+                response = {'type':'message','content':[{'type':'text','text':answer},{'type':'thinking','thinking':'核对上下文'}], 'stop_reason':'end_turn','usage':{'input_tokens':1,'output_tokens':1}}
+            elif protocol == 'gemini':
+                response = {'candidates':[{'content':{'parts':[{'text':'核对上下文','thought':True},{'text':answer}]},'finishReason':'STOP'}]}
+            else:
+                response = {**common, 'object':'chat.completion','choices':[{'index':0,'message':{'role':'assistant','content':answer,'reasoning_content':'核对上下文'},'finish_reason':'stop'}], 'usage':{'prompt_tokens':1,'completion_tokens':1,'total_tokens':2}}
+            self.send_json(200,response)
             return
         self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
+        self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Connection', 'close')
         self.end_headers()
         self.close_connection = True
-        deltas = [{"role": "assistant", "reasoning_content": "核对上下文"}]
-        deltas.extend({"content": answer[i:i + 3]} for i in range(0, len(answer), 3))
+        cutoff = action.get('cutoff', 'reasoning' if '/abort/' in self.path else '')
+        if cutoff == 'before':
+            return
+        def frame(content):
+            wire = ('data: '+(content if isinstance(content,str) else canonical(content))+'\n\n').encode()
+            for start in range(0,len(wire),7):
+                self.wfile.write(wire[start:start+7]); self.wfile.flush()
+        def delta(text, reasoning=False):
+            if protocol == 'anthropic':
+                return {'type':'content_block_delta','delta':{'type':'thinking_delta' if reasoning else 'text_delta', 'thinking' if reasoning else 'text':text}}
+            if protocol == 'gemini':
+                return {'candidates':[{'content':{'parts':[{'text':text,**({'thought':True} if reasoning else {})}]}}]}
+            return {**common,'object':'chat.completion.chunk','choices':[{'index':0,'delta':{'reasoning_content' if reasoning else 'content':text},'finish_reason':None}]}
         try:
-            for delta in deltas:
-                frame = ("data: " + canonical({**common, "object": "chat.completion.chunk",
-                    "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}) + "\n\n").encode()
-                # Deliberately split UTF-8 characters and SSE framing across writes.
-                for start in range(0, len(frame), 7):
-                    self.wfile.write(frame[start:start + 7])
-                    self.wfile.flush()
-                if "/abort/" in self.path:
+            if 'stream_error' in action:
+                frame({'error':{'type':action['stream_error']}})
+                return
+            if not action.get('no_reasoning'):
+                frame(delta('核对上下文',True))
+            if cutoff == 'reasoning':
+                return
+            for index in range(0,len(answer),3):
+                time.sleep(action.get('chunk_delay',0))
+                frame(delta(answer[index:index+3]))
+                if cutoff == 'body':
                     return
-            self.wfile.write(("data: " + canonical({**common, "choices": [
-                {"index": 0, "delta": {}, "finish_reason": "stop"}]}) + "\n\ndata: [DONE]\n\n").encode())
-            self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
+            if cutoff == 'no_done':
+                return
+            if protocol == 'anthropic':
+                frame({'type':'message_stop'})
+            elif protocol == 'gemini':
+                frame({'candidates':[{'finishReason':'STOP'}]})
+            else:
+                frame({**common,'choices':[{'index':0,'delta':{},'finish_reason':'stop'}]})
+                frame('[DONE]')
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
 
 

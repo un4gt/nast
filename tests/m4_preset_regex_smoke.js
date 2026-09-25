@@ -89,6 +89,7 @@ async function main() {
     const created = await rpc.call('chats.new', { avatar: imp.avatar, greeting_index: 0 });
 
     // 3. 全局正则脚本（AI_OUTPUT 默认 pass 删除 secret-token）+ 自定义提示词顺序
+    await require('./model_catalog_helper')(rpc.call.bind(rpc), `http://127.0.0.1:${MOCK_PORT}/v1`, 'mock-a');
     await rpc.call('settings.save', {
       settings: {
         oai_settings: {

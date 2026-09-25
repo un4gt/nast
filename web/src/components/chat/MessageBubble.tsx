@@ -118,6 +118,8 @@ export function MessageBubble({
           </time>
         </div>
 
+        {m.extra?.nast_model?.status === 'incomplete' && <p role="status" className="text-xs text-destructive">未完成 · 已保留收到的内容</p>}
+        {m.extra?.nast_model && <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">模型调用信息</summary><p className="break-all">模型：{m.extra.nast_model.logical_model} · 路由：{m.extra.nast_model.route} · 上游：{m.extra.model} · {m.extra.nast_model.status === 'complete' ? '已完成' : '未完成'}</p></details>}
         {reasoning && !editing && (
           <Collapsible className="w-full">
             <CollapsibleTrigger className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted">

@@ -31,12 +31,14 @@ class RpcClient {
       this.pending.delete(msg.id);
       if (msg.error) {
         // 所有 RPC 错误统一走 rpc_error 事件（全局 toast），调用方仍可 catch 覆盖
-        this.emit('$rpc_error', { method: p.method, code: msg.error.code, message: msg.error.message });
+        this.emit('$rpc_error', { method: p.method, code: msg.error.code, message: msg.error.message, diagnostic: msg.error.diagnostic });
         p.reject(new Error(`${msg.error.code}: ${msg.error.message}`));
       } else p.resolve(msg.result);
     };
     ws.onclose = () => {
       this.ws = null;
+      for (const pending of this.pending.values()) pending.reject(new Error('连接已断开；已提交的生成不会自动重发'));
+      this.pending.clear();
       this.emit('$disconnected', null);
       if (!this.retryTimer) {
         // 指数退避 + 抖动：0.5s 起、上限 10s

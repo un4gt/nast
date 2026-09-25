@@ -100,6 +100,7 @@ async function main() {
   if (!rpc) { console.error('FAIL 无法连接服务端'); process.exit(1); }
 
   try {
+    await require('./model_catalog_helper')(rpc.call.bind(rpc), `http://127.0.0.1:${MOCK_PORT}/v1`, 'mock-a');
     await rpc.call('settings.save', {
       settings: {
         oai_settings: {

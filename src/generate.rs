@@ -11,11 +11,10 @@
 //! - 错误不写入消息文本（toast 事件），流式保留半截文本
 //! - continue：nudge 模式（末尾 [Continue...] 提示）为默认；Claude prefill 可选
 
-use futures_util::StreamExt;
 use nast_model::chat::{ChatFile, ChatMessage as Msg, GenerationType, MessageExtra, SwipeInfo};
 use nast_model::preset::{OaiSettings, CC_DUMMY_ID};
 use nast_providers::{
-    ChatMessage as ProviderMessage, GenRequest, Provider, StreamEvent,
+    ChatMessage as ProviderMessage, GenRequest,
 };
 use serde_json::{json, Value};
 
@@ -63,6 +62,8 @@ struct AnNote {
 pub struct GenerateResult {
     pub text: String,
     pub saved: bool,
+    pub routing: Value,
+    pub reasoning: String,
 }
 
 pub struct GenerateSession<'a> {
@@ -72,7 +73,7 @@ pub struct GenerateSession<'a> {
     pub shared_settings: &'a tokio::sync::RwLock<Value>,
     pub global_variables: std::cell::RefCell<serde_json::Map<String, Value>>,
     pub settings_json: &'a serde_json::Value,
-    pub provider: Provider,
+    pub routing: crate::routing::Routing,
     pub abort: tokio_util::sync::CancellationToken,
     /// 插件宿主（Lua + Rust 钩子）
     pub plugins: &'a std::sync::Mutex<nast_plugin::PluginHost>,
@@ -105,14 +106,14 @@ impl<'a> GenerateSession<'a> {
     pub async fn run(&self, params: GenerateParams) -> Result<GenerateResult, String> {
         self.hub.emit(
             "generation_started",
-            json!({"type": params.generation_type.as_str()}),
+            json!({"type": params.generation_type.as_str(),"task_id":self.routing.task_id,"conversation":self.routing.conversation}),
         );
         self.dispatch_plugin(
             "generation_started",
             &json!({"type": params.generation_type.as_str()}),
         );
         let result = self.run_content(&params).await;
-        self.hub.emit("generation_ended", json!({}));
+        self.hub.emit("generation_ended", json!({"task_id":self.routing.task_id,"conversation":self.routing.conversation}));
         self.dispatch_plugin("generation_ended", &json!({}));
         result
     }
@@ -163,7 +164,7 @@ impl<'a> GenerateSession<'a> {
                     if applied.is_empty() {
                         self.hub
                             .emit("toast", json!({"message": "command handled", "type": "info"}));
-                        return Ok(GenerateResult { text: String::new(), saved: false });
+                        return Ok(GenerateResult { text: String::new(), saved: false, routing: Value::Null, reasoning:String::new() });
                     }
                     effective = applied;
                 }
@@ -245,64 +246,16 @@ impl<'a> GenerateSession<'a> {
             extra_body: crate::connection::extra_body(&self.oai),
         };
 
-        // 流式接收
-        let stream = tokio::select! {
-            biased;
-            _ = self.abort.cancelled() => return Ok(GenerateResult { text: String::new(), saved: false }),
-            result = self.provider.generate_stream(&gen_req) => result.map_err(|e| e.to_string())?,
-        };
-        tokio::pin!(stream);
-
-        let mut streamed = String::new();
-        let mut reasoning_streamed = String::new();
-        let mut reasoning_started: Option<std::time::Instant> = None;
-        let mut first_token_at: Option<std::time::Instant> = None;
-        let mut errored: Option<String> = None;
-        loop {
-            let ev = tokio::select! {
-                biased;
-                _ = self.abort.cancelled() => break,
-                event = stream.next() => match event { Some(event) => event, None => break },
-            };
-            match ev {
-                Ok(StreamEvent::Token(t)) => {
-                    if first_token_at.is_none() {
-                        first_token_at = Some(std::time::Instant::now());
-                    }
-                    streamed.push_str(&t);
-                    if let Ok(mut p) = self.progress.lock() {
-                        *p = streamed.clone();
-                    }
-                    self.hub.emit("stream_token_received", json!({"text": t}));
-                }
-                Ok(StreamEvent::Reasoning(r)) => {
-                    if reasoning_started.is_none() {
-                        reasoning_started = Some(std::time::Instant::now());
-                    }
-                    reasoning_streamed.push_str(&r);
-                    self.hub.emit("stream_reasoning_received", json!({"text": r}));
-                }
-                Ok(StreamEvent::Error(e)) => {
-                    errored = Some(e);
-                    break;
-                }
-                Ok(StreamEvent::Done) => break,
-                Ok(_) => {}
-                Err(e) => {
-                    errored = Some(e.to_string());
-                    break;
-                }
-            }
+        let outcome = self.routing.execute(&gen_req, self.hub, &self.abort, &self.progress, true).await;
+        let route_metadata = outcome.metadata(&self.routing);
+        if !outcome.complete && outcome.text.is_empty() && outcome.reasoning.is_empty() {
+            return Err(outcome.error.unwrap_or(json!({"message":"generation incomplete"})).to_string());
         }
-
-        if let Some(e) = errored {
-            // 错误不写入消息（ST 1.18.0：toastr only）；已流出的半截文本保留
-            self.hub.emit("toast", json!({"message": e, "type": "error"}));
-            if streamed.is_empty() {
-                self.hub.emit("generation_stopped", json!({}));
-                return Err(e);
-            }
-        }
+        self.routing.commit(&mut chat, &outcome);
+        let first_token_at = outcome.first_token_at;
+        let reasoning_started = outcome.reasoning_started;
+        let streamed = outcome.text;
+        let reasoning_streamed = outcome.reasoning;
 
         // auto_parse：从正文剥离 <think>…</think> 进 reasoning（reasoning.js:1517+）
         let auto_parse = self.power_bool("reasoning", "auto_parse", false);
@@ -377,6 +330,9 @@ impl<'a> GenerateSession<'a> {
                 message.mes.push_str(&streamed);
                 // Render from the full updated text; stale display_text must not hide the continuation.
                 message.extra.display_text = None;
+                message.extra.api = Some(match outcome.route.protocol.as_str() { "anthropic"=>"claude", "gemini"=>"makersuite", _=>"custom" }.into());
+                message.extra.model = Some(outcome.route.upstream_model.clone());
+                message.extra.other.insert("nast_model".into(), route_metadata.clone());
                 if !reasoning.is_empty() {
                     let previous = message.extra.reasoning.take().unwrap_or_default();
                     message.extra.reasoning = Some(format!("{previous}{reasoning}"));
@@ -405,8 +361,9 @@ impl<'a> GenerateSession<'a> {
                 extra.reasoning = None;
                 extra.reasoning_duration = None;
                 extra.reasoning_type = None;
-                extra.api = Some(self.oai.chat_completion_source.clone());
-                extra.model = Some(crate::connection::model_for(&self.oai));
+                extra.api = Some(match outcome.route.protocol.as_str() { "anthropic"=>"claude", "gemini"=>"makersuite", _=>"custom" }.into());
+                extra.model = Some(outcome.route.upstream_model.clone());
+                extra.other.insert("nast_model".into(), route_metadata.clone());
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
                 extra.display_text = Some(display_text.clone());
@@ -440,8 +397,9 @@ impl<'a> GenerateSession<'a> {
             _ => {
                 // normal/regenerate：新消息 + setFirstSwipe 镜像
                 let mut extra = MessageExtra::default();
-                extra.api = Some(self.oai.chat_completion_source.clone());
-                extra.model = Some(crate::connection::model_for(&self.oai));
+                extra.api = Some(match outcome.route.protocol.as_str() { "anthropic"=>"claude", "gemini"=>"makersuite", _=>"custom" }.into());
+                extra.model = Some(outcome.route.upstream_model.clone());
+                extra.other.insert("nast_model".into(), route_metadata.clone());
                 extra.gen_started = Some(gen_started.clone());
                 extra.gen_finished = Some(now.clone());
                 extra.display_text = Some(display_text.clone());
@@ -481,11 +439,12 @@ impl<'a> GenerateSession<'a> {
             }
         }
         self.save_chat_for(p, &chat)?;
+        if route_metadata["status"] == "complete" { self.hub.emit("conversation_model_changed", json!({"conversation":self.routing.conversation,"state":chat.0[0]["chat_metadata"]["nast_model"]})); }
         let chat_id = chat.0.len() as i64 - 1;
         self.hub.emit("message_received", json!(chat_id));
         self.hub.emit("character_message_rendered", json!(chat_id));
         self.dispatch_plugin("message_saved", &json!({"index": chat_id}));
-        Ok(GenerateResult { text: streamed, saved: true })
+        Ok(GenerateResult { text: streamed, saved: true, routing: route_metadata, reasoning })
     }
 
     // ---------- impersonate：不落消息 ----------
@@ -509,7 +468,12 @@ impl<'a> GenerateSession<'a> {
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
-        let text = self.call_provider(&assembled, None).await?;
+        let outcome = self.call_provider(&assembled, None).await?;
+        self.routing.commit(&mut chat, &outcome);
+        self.save_chat_for(p, &chat)?;
+        let routing = outcome.metadata(&self.routing);
+        if outcome.complete { self.hub.emit("conversation_model_changed", json!({"conversation":self.routing.conversation,"state":chat.0[0]["chat_metadata"]["nast_model"]})); }
+        let text = outcome.text;
         // cleanUpMessage（isImpersonate：USER_INPUT 正则 pass + 停止串剥离）
         let metadata = chat.metadata();
         let scripts = self.collect_regex_scripts(&p.character, &metadata);
@@ -523,7 +487,7 @@ impl<'a> GenerateSession<'a> {
             &scripts,
         );
         self.hub.emit("impersonate_ready", json!(text));
-        Ok(GenerateResult { text, saved: false })
+        Ok(GenerateResult { text, saved: false, routing, reasoning:outcome.reasoning })
     }
 
     // ---------- quiet：不落消息不流式 ----------
@@ -542,8 +506,13 @@ impl<'a> GenerateSession<'a> {
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
-        let text = self.call_provider(&assembled, None).await?;
-        Ok(GenerateResult { text, saved: false })
+        let outcome = self.call_provider(&assembled, None).await?;
+        self.routing.commit(&mut chat, &outcome);
+        self.save_chat_for(p, &chat)?;
+        let routing = outcome.metadata(&self.routing);
+        if outcome.complete { self.hub.emit("conversation_model_changed", json!({"conversation":self.routing.conversation,"state":chat.0[0]["chat_metadata"]["nast_model"]})); }
+        let text = outcome.text;
+        Ok(GenerateResult { text, saved: false, routing, reasoning:outcome.reasoning })
     }
 
 
@@ -1013,7 +982,7 @@ impl<'a> GenerateSession<'a> {
         &self,
         assembled: &AssembleOutput,
         prefill: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<crate::routing::Outcome, String> {
         if let Some(error) = &assembled.error { return Err(error.clone()); }
         let provider_msgs: Vec<ProviderMessage> = assembled
             .chat
@@ -1039,11 +1008,9 @@ impl<'a> GenerateSession<'a> {
             extra_headers: crate::connection::extra_headers(&self.oai),
             extra_body: crate::connection::extra_body(&self.oai),
         };
-        tokio::select! {
-            biased;
-            _ = self.abort.cancelled() => Err("generation cancelled".into()),
-            result = self.provider.generate(&gen_req) => result.map_err(|e| e.to_string()),
-        }
+        let outcome = self.routing.execute(&gen_req, self.hub, &self.abort, &self.progress, false).await;
+        if !outcome.complete && outcome.text.is_empty() && outcome.reasoning.is_empty() { return Err(outcome.error.unwrap_or(Value::Null).to_string()); }
+        Ok(outcome)
     }
 
     /// 派发插件事件（无转换返回）。

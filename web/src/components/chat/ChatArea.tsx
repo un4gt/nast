@@ -1,3 +1,5 @@
+import { currentConversation } from '@/models';
+import { ModelSelector } from './ModelSelector';
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -82,10 +84,12 @@ export function ChatArea() {
 
   // P1：接通后端流式事件——逐 token 追加到 streamingText / streamingReasoning
   useEffect(() => {
-    const off1 = rpc.on('stream_token_received', (data: { text: string }) => {
+    const off1 = rpc.on('stream_token_received', (data: { text: string; conversation?: unknown }) => {
+      if (data.conversation && JSON.stringify(data.conversation) !== JSON.stringify(currentConversation())) return;
       appendStreamToken(data.text);
     });
-    const off2 = rpc.on('stream_reasoning_received', (data: { text: string }) => {
+    const off2 = rpc.on('stream_reasoning_received', (data: { text: string; conversation?: unknown }) => {
+      if (data.conversation && JSON.stringify(data.conversation) !== JSON.stringify(currentConversation())) return;
       appendStreamReasoning(data.text);
     });
     return () => {
@@ -150,6 +154,7 @@ export function ChatArea() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
+      <ModelSelector />
       <ChatTranscript>
         {messages.length === 0 && !generating && (
           <Empty className="py-12">

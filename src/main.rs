@@ -1,6 +1,8 @@
 //! nast 单端口服务入口：静态资源 + /ws + /upload。
 
 mod connection;
+mod model_catalog;
+mod routing;
 mod events;
 mod generate;
 mod group_gen;
@@ -155,11 +157,11 @@ async fn main() -> std::io::Result<()> {
         nast_storage::UserData::new(&data_root, "default-user").expect("init user data");
     let mut settings = user
         .read_settings()
-        .unwrap_or_else(|_| serde_json::json!({}));
+        .map_err(std::io::Error::other)?;
     nast_model::settings::normalize_settings(&mut settings);
     let secrets = user
         .read_secrets()
-        .unwrap_or_else(|_| serde_json::json!({}));
+        .map_err(std::io::Error::other)?;
     let state: SharedState = std::sync::Arc::new(AppState::new(user, settings, secrets));
 
     // 预热 tokenizer（首次构建 o200k/cl100k BPE 约需数秒，避免拖慢首个请求）

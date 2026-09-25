@@ -66,3 +66,29 @@ npm --prefix web run test:tts     # 文本过滤、分段与旧配置兼容
 
 任何聊天链路改动要求：`cargo test --workspace` 全绿 + 对应冒烟通过；
 涉及 ST 对齐的修复同时在 `GAPS.md` 销号并注明提交。
+
+## 多模型路由验收
+
+构建最新服务端和网页后，使用现有 parity 虚拟环境执行：
+
+```powershell
+cargo test --workspace
+cargo build --bin nast
+npx tsc --noEmit -p web/tsconfig.json
+npm --prefix web run build
+.cache/st-parity-venv/Scripts/python.exe tests/parity/routing.py
+.cache/st-parity-venv/Scripts/python.exe tests/parity/run.py --stage all
+```
+
+`routing.py` 使用临时数据目录，记录三协议请求、迁移、版本冲突和保存失败、准确重试次数、黏性隔离、Retry-After、取消与总预算、部分正文／思考落盘、命令和各生成入口。打印的 Evidence 目录保留 report.json、请求及服务端日志。虚拟服务 `plans[route]` 支持 status、retry_after、delay、chunk_delay、cutoff（before/reasoning/body/no_done）、invalid_json、stream_error。不访问生产模型或真实用户数据。
+
+同级桥接仓库运行 `cargo test --workspace`，覆盖持久化会话与已提交生成断线不重发。升级迁移另外用新构建镜像、隔离 bind mount 检查备份、密钥引用和重复启动，不替换生产容器。
+
+容器迁移可重复运行：
+
+```powershell
+docker build -t nast:model-routing-test .
+python tests/parity/container_migration.py --image nast:model-routing-test
+```
+
+脚本只创建独立临时数据目录和随机名称的测试容器，退出后移除该测试容器，保留备份与报告。它验证原文件逐字节备份、密钥迁移以及重启后目录不变。

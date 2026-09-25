@@ -90,10 +90,13 @@ async fn handle_rpc(state: SharedState, mut session: Session, raw: String) {
             let code = match &e {
                 rpc::RpcError::NotFound(_) => "not_found",
                 rpc::RpcError::BadRequest(_) => "bad_request",
+                rpc::RpcError::Conflict(_) => "conflict",
+                rpc::RpcError::Generation(_) => "upstream",
                 rpc::RpcError::Integrity => "integrity",
                 rpc::RpcError::Internal(_) => "internal",
             };
-            serde_json::json!({"id": id, "error": {"code": code, "message": e.to_string()}})
+            let diagnostic = match &e { rpc::RpcError::Generation(v)=>v.clone(), _=>Value::Null };
+            serde_json::json!({"id": id, "error": {"code": code, "message": e.to_string(),"diagnostic":diagnostic}})
         }
     };
     let _ = session.text(reply.to_string()).await;

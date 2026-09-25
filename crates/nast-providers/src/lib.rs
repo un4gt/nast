@@ -12,16 +12,66 @@ use futures_util::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, serde::Serialize, thiserror::Error)]
+#[serde(tag="type", content="data", rename_all="snake_case")]
 pub enum ProviderError {
     #[error("http {status}: {body}")]
-    Http { status: u16, body: String },
+    Http { status: u16, body: String, retry_after: Option<u64> },
+    #[error("timeout: {0}")]
+    Timeout(String),
+    #[error("invalid response: {0}")]
+    InvalidResponse(String),
+    #[error("stream disconnected before completion")]
+    Disconnected,
+    #[error("upstream {kind}: {message}")]
+    Upstream { kind: String, message: String, status: Option<u16>, retry_after: Option<u64> },
     #[error("network: {0}")]
     Network(String),
     #[error("aborted")]
     Aborted,
     #[error("config: {0}")]
     Config(String),
+}
+
+impl ProviderError {
+    fn redact(&mut self, api_key: &str) {
+        match self {
+            Self::Upstream { kind,message,.. }=> { *kind=redact_text(kind,api_key); *message=redact_text(message,api_key); },
+            Self::Http { body,.. }=>*body=redact_text(body,api_key),
+            Self::Network(s)|Self::Timeout(s)|Self::Config(s)|Self::InvalidResponse(s)=>*s=redact_text(s,api_key),
+            _=>{},
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Http { status, .. } => matches!(status, 429 | 502 | 503 | 504),
+            Self::Timeout(_) | Self::Disconnected => true,
+            Self::Network(kind) => matches!(kind.as_str(), "connect" | "reset" | "temporary"),
+            Self::Upstream { kind, status, .. } => matches!(status, Some(429 | 502 | 503 | 504)) || matches!(kind.as_str(), "overloaded_error" | "rate_limit_error" | "RESOURCE_EXHAUSTED" | "UNAVAILABLE" | "DEADLINE_EXCEEDED"),
+            _ => false,
+        }
+    }
+    pub fn retry_after(&self) -> Option<u64> { match self { Self::Http { retry_after, .. } | Self::Upstream { retry_after, .. } => *retry_after, _ => None } }
+    fn network(error: reqwest::Error) -> Self {
+        if error.is_timeout() { return Self::Timeout("upstream".into()); }
+        if error.is_builder() { return Self::Config("invalid request configuration".into()); }
+        // The error chain exposes IO error kinds; never classify by error prose.
+        let mut source = std::error::Error::source(&error);
+        while let Some(e) = source {
+            if let Some(io) = e.downcast_ref::<std::io::Error>() {
+                if matches!(io.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotConnected | std::io::ErrorKind::AddrNotAvailable) { return Self::Network("connect".into()); }
+                if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) { return Self::Network("temporary".into()); }
+                if matches!(io.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::UnexpectedEof) { return Self::Network("reset".into()); }
+            }
+            source = e.source();
+        }
+        Self::Network("unclassified transport error".into())
+    }
+}
+fn upstream_error(value: &Value) -> ProviderError {
+    let error = value.get("error").unwrap_or(value);
+    ProviderError::Upstream { kind: error.get("type").or_else(|| error.get("status")).or_else(|| error.get("code")).and_then(Value::as_str).unwrap_or("unknown").to_string(), message: error["message"].as_str().unwrap_or("upstream error").to_string(), status: error["code"].as_u64().and_then(|n| u16::try_from(n).ok()), retry_after:None }
 }
 
 /// 统一流事件。
@@ -34,7 +84,7 @@ pub enum StreamEvent {
     /// 归一化的 usage（若上游提供）
     Usage { input: Option<i64>, output: Option<i64> },
     /// 上游报错（流中）
-    Error(String),
+    Error(ProviderError),
     /// 流结束
     Done,
 }
@@ -81,15 +131,24 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 pub struct Provider {
     kind: ProviderKind,
     client: reqwest::Client,
+    endpoint: Option<String>,
+    remove_parameters: Vec<String>,
 }
 
 impl Provider {
+    fn api_key(&self)->&str { match &self.kind { ProviderKind::OpenAiCompat { api_key,.. } | ProviderKind::Anthropic { api_key } | ProviderKind::Gemini { api_key }=>api_key } }
+
     pub fn new(kind: ProviderKind) -> Self {
         let client = reqwest::Client::builder()
             .timeout(DEFAULT_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("build reqwest client");
-        Self { kind, client }
+        Self { kind, client, endpoint: None, remove_parameters: vec![] }
+    }
+
+    pub fn configured(kind: ProviderKind, endpoint: String, connect_secs: u64, remove_parameters: Vec<String>) -> Self {
+        Self { kind, client: reqwest::Client::builder().connect_timeout(Duration::from_secs(connect_secs)).build().expect("HTTP client"), endpoint: Some(endpoint), remove_parameters }
     }
 
     /// 非流式生成。
@@ -114,7 +173,7 @@ impl Provider {
             match ev {
                 Ok(StreamEvent::Token(t)) => text.push_str(&t),
                 Ok(StreamEvent::Error(e)) => {
-                    return Err(ProviderError::Http { status: 500, body: e })
+                    return Err(e)
                 }
                 Ok(StreamEvent::Done) => break,
                 Err(ProviderError::Aborted) => return Err(ProviderError::Aborted),
@@ -163,20 +222,20 @@ impl Provider {
             .bearer_auth(api_key)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(ProviderError::network)?;
         let status = resp.status();
         let body = resp
             .text()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(ProviderError::network)?;
         if !status.is_success() {
             return Err(ProviderError::Http {
                 status: status.as_u16(),
-                body,
+                body: diagnostic_body(&body,api_key), retry_after: None,
             });
         }
         let parsed: Value = serde_json::from_str(&body)
-            .map_err(|e| ProviderError::Http { status: 200, body: format!("invalid json: {e}") })?;
+            .map_err(|e| ProviderError::InvalidResponse(format!("invalid json: {e}")))?;
         let mut out = Vec::new();
         if let Some(arr) = parsed.get("data").and_then(|d| d.as_array()) {
             for m in arr {
@@ -235,11 +294,7 @@ impl Provider {
         if !req.stop.is_empty() {
             body["stop"] = json!(req.stop);
         }
-        if let Some(extra) = req.extra_body.as_object() {
-            for (k, v) in extra {
-                body[k] = v.clone();
-            }
-        }
+        merge_parameters(&mut body, &req.extra_body)?;
         let mut headers = vec![("Authorization".to_string(), format!("Bearer {api_key}"))];
         headers.extend(req.extra_headers.clone());
         Ok((url, headers, body))
@@ -253,7 +308,7 @@ impl Provider {
         let ProviderKind::Anthropic { api_key } = &self.kind else {
             return Err(ProviderError::Config("not anthropic".into()));
         };
-        let url = "https://api.anthropic.com/v1/messages".to_string();
+        let url = format!("{}/messages", self.endpoint.as_deref().unwrap_or("https://api.anthropic.com/v1").trim_end_matches('/'));
         // system = 前导 system 消息串（prompt-converters 语义：仅前导 run 提取）
         let mut system_parts: Vec<String> = Vec::new();
         let mut msgs: Vec<Value> = Vec::new();
@@ -317,10 +372,12 @@ impl Provider {
         if (req.top_p - 1.0).abs() > f64::EPSILON {
             body["top_p"] = json!(req.top_p);
         }
-        let headers = vec![
+        let mut headers = vec![
             ("x-api-key".to_string(), api_key.clone()),
             ("anthropic-version".to_string(), "2023-06-01".to_string()),
         ];
+        headers.extend(req.extra_headers.clone());
+        merge_parameters(&mut body, &req.extra_body)?;
         Ok((url, headers, body))
     }
 
@@ -366,10 +423,7 @@ impl Provider {
         }
         let method =
             if stream { "streamGenerateContent?alt=sse" } else { "generateContent" };
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:{}?key={}",
-            req.model, method, api_key
-        );
+        let url = format!("{}/models/{}:{}", self.endpoint.as_deref().unwrap_or("https://generativelanguage.googleapis.com/v1beta").trim_end_matches('/'), req.model, method);
         let mut body = json!({
             "contents": merged,
             "generationConfig": {
@@ -386,7 +440,10 @@ impl Provider {
             let stops: Vec<String> = req.stop.iter().take(5).cloned().collect();
             body["generationConfig"]["stopSequences"] = json!(stops);
         }
-        Ok((url, vec![], body))
+        merge_parameters(&mut body, &req.extra_body)?;
+        let mut headers = vec![("x-goog-api-key".into(), api_key.clone())];
+        headers.extend(req.extra_headers.clone());
+        Ok((url, headers, body))
     }
 
     // ---------- SSE 发送与解析 ----------
@@ -395,8 +452,12 @@ impl Provider {
         &self,
         url: String,
         headers: Vec<(String, String)>,
-        body: Value,
+        mut body: Value,
     ) -> Result<std::pin::Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>, ProviderError> {
+        for key in &self.remove_parameters {
+            if protected(key) { return Err(ProviderError::Config(format!("reserved parameter {key}"))); }
+            if let Some(map) = body.as_object_mut() { map.remove(key); }
+        }
         let mut request = self.client.post(&url).json(&body);
         for (k, v) in headers {
             request = request.header(&k, &v);
@@ -404,16 +465,27 @@ impl Provider {
         let response = request
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(ProviderError::network)?;
         let status = response.status();
         if !status.is_success() {
+            let retry_after = response.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(parse_retry_after);
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Http { status: status.as_u16(), body });
+            if status.as_u16() == 529 && matches!(self.kind,ProviderKind::Anthropic { .. }) {
+                return Err(ProviderError::Upstream { kind:"overloaded_error".into(),message:diagnostic_body(&body,self.api_key()),status:Some(529),retry_after });
+            }
+            return Err(ProviderError::Http { status: status.as_u16(), body: diagnostic_body(&body,self.api_key()), retry_after });
         }
         let is_json = response.headers().get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("application/json"));
         if is_json {
-            let mut value: Value = response.json().await.map_err(|e| ProviderError::Network(e.to_string()))?;
+            let mut value: Value = response.json().await.map_err(|_| ProviderError::InvalidResponse("invalid JSON".into()))?;
+            if value.get("error").is_some() { let mut error=upstream_error(&value); error.redact(self.api_key()); return Err(error); }
+            let valid = match &self.kind {
+                ProviderKind::OpenAiCompat { .. } => value["choices"].as_array().is_some_and(|c| c.iter().any(|v| v["message"].is_object() && v["finish_reason"].is_string())),
+                ProviderKind::Anthropic { .. } => value["type"] == "message" && value["content"].is_array() && value["stop_reason"].is_string(),
+                ProviderKind::Gemini { .. } => value["candidates"].as_array().is_some_and(|c| c.iter().any(|v| v["finishReason"].is_string())),
+            };
+            if !valid { return Err(ProviderError::InvalidResponse("missing response or completion marker".into())); }
             if let Some(choices) = value.get_mut("choices").and_then(Value::as_array_mut) {
                 for choice in choices {
                     if let Some(message) = choice.get("message").cloned() { choice["delta"] = message; }
@@ -434,8 +506,36 @@ impl Provider {
             events.push(StreamEvent::Done);
             return Ok(Box::pin(futures_util::stream::iter(events.into_iter().map(Ok))));
         }
-        Ok(Box::pin(sse_events(response.bytes_stream())))
+        let api_key=self.api_key().to_string();
+        Ok(Box::pin(sse_events(response.bytes_stream()).map(move |event| match event {
+            Ok(StreamEvent::Error(mut error)) => { error.redact(&api_key); Ok(StreamEvent::Error(error)) },
+            Err(mut error) => { error.redact(&api_key); Err(error) },
+            other => other,
+        })))
     }
+}
+
+fn protected(key: &str) -> bool { matches!(key, "model" | "messages" | "stream" | "contents" | "system" | "systemInstruction") }
+fn merge_parameters(body: &mut Value, extra: &Value) -> Result<(), ProviderError> {
+    if let Some(extra) = extra.as_object() { for (k,v) in extra {
+        if protected(k) { return Err(ProviderError::Config(format!("reserved parameter {k}"))); }
+        if let (Some(target), Some(source)) = (body[k].as_object_mut(), v.as_object()) { target.extend(source.clone()); }
+        else { body[k] = v.clone(); }
+    } } Ok(())
+}
+fn redact_text(text: &str, api_key: &str) -> String {
+    let redacted=if api_key.is_empty() { text.to_string() } else { text.replace(api_key,"[REDACTED]") };
+    redacted.chars().take(2000).collect()
+}
+fn diagnostic_body(body: &str, api_key: &str) -> String {
+    // Keep actionable upstream details, but never the route credential or arbitrary echoed request bodies.
+    serde_json::from_str::<Value>(body).ok().map(|v| {
+        let e = v.get("error").unwrap_or(&v);
+        ["type","code","status","param","message"].iter().filter_map(|k| e.get(k).map(|v| format!("{k}={}", v.as_str().map(|text|redact_text(text,api_key)).unwrap_or_else(||v.to_string())))).collect::<Vec<_>>().join(", ")
+    }).filter(|s| !s.is_empty()).map(|s| redact_text(&s,api_key)).unwrap_or_else(|| "upstream rejected request".into())
+}
+fn parse_retry_after(value: &str) -> Option<u64> {
+    value.parse().ok().or_else(|| httpdate::parse_http_date(value).ok().map(|t| t.duration_since(std::time::SystemTime::now()).unwrap_or_default().as_secs()))
 }
 
 /// 字节流 → SSE data 行 → 归一化 StreamEvent。
@@ -458,7 +558,7 @@ fn sse_events(
                     let bytes: Vec<u8> = buf.drain(..pos + length).collect();
                     let event = match std::str::from_utf8(&bytes[..pos]) {
                         Ok(event) => event,
-                        Err(error) => return Some((Err(ProviderError::Network(error.to_string())),
+                        Err(error) => return Some((Err(ProviderError::InvalidResponse(error.to_string())),
                             (stream, buf, pending, true))),
                     };
                     let data = event.lines().filter_map(|line| line.strip_prefix("data:")
@@ -468,8 +568,8 @@ fn sse_events(
                         done = true;
                     } else if !data.trim().is_empty() {
                         match serde_json::from_str::<Value>(&data) {
-                            Ok(value) => pending.extend(normalize(value)),
-                            Err(error) => return Some((Err(ProviderError::Network(format!("invalid SSE JSON: {error}"))),
+                            Ok(value) => { let events = normalize(value); done = events.iter().any(|e| matches!(e, StreamEvent::Done | StreamEvent::Error(_))); pending.extend(events); },
+                            Err(error) => return Some((Err(ProviderError::InvalidResponse(format!("invalid SSE JSON: {error}"))),
                                 (stream, buf, pending, true))),
                         }
                     }
@@ -477,16 +577,9 @@ fn sse_events(
                 }
                 match stream.next().await {
                     Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
-                    Some(Err(error)) => return Some((Err(ProviderError::Network(error.to_string())),
+                    Some(Err(error)) => return Some((Err(ProviderError::network(error)),
                         (stream, buf, pending, true))),
-                    None => {
-                        if !buf.is_empty() {
-                            return Some((Err(ProviderError::Network("incomplete SSE frame".into())),
-                                (stream, buf, pending, true)));
-                        }
-                        pending.push_back(StreamEvent::Done);
-                        done = true;
-                    }
+                    None => return Some((Err(ProviderError::Disconnected), (stream, buf, pending, true))),
                 }
             }
         },
@@ -498,11 +591,7 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
     let mut out = Vec::new();
     // 错误传播
     if let Some(err) = v.get("error") {
-        let msg = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("upstream error");
-        out.push(StreamEvent::Error(msg.to_string()));
+        out.push(StreamEvent::Error(upstream_error(err)));
         out.push(StreamEvent::Done);
         return out;
     }
@@ -568,12 +657,7 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
                 out.push(StreamEvent::Done);
             }
             "error" => {
-                let msg = v
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("anthropic error");
-                out.push(StreamEvent::Error(msg.to_string()));
+                out.push(StreamEvent::Error(upstream_error(&v)));
                 out.push(StreamEvent::Done);
             }
             _ => {}
@@ -590,6 +674,7 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
             {
                 for part in parts {
                     if part.get("thought").and_then(|t| t.as_bool()) == Some(true) {
+                        if let Some(text) = part["text"].as_str() { out.push(StreamEvent::Reasoning(text.into())); }
                         continue;
                     }
                     if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
@@ -611,12 +696,35 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
         }
         return out;
     }
-    out
+    vec![StreamEvent::Error(ProviderError::InvalidResponse("unknown event format".into()))]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_error_variant_has_serializable_diagnostics() {
+        for error in [ProviderError::InvalidResponse("bad JSON".into()),ProviderError::Timeout("budget".into()),ProviderError::Network("reset".into()),ProviderError::Aborted,ProviderError::Disconnected,ProviderError::Config("limit".into()),ProviderError::Http{status:503,body:String::new(),retry_after:Some(2)},upstream_error(&json!({"error":{"type":"overloaded_error"}}))] {
+            let value=serde_json::to_value(error).unwrap(); assert!(value["type"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn eof_without_protocol_end_is_failure_even_after_reasoning() {
+        let wire = format!("data: {}\n\n",json!({"choices":[{"delta":{"reasoning_content":"thinking"}}]}));
+        let stream=sse_events(futures_util::stream::iter(vec![Ok::<_,reqwest::Error>(bytes::Bytes::from(wire))]));
+        tokio::pin!(stream);
+        assert!(matches!(stream.next().await,Some(Ok(StreamEvent::Reasoning(_)))));
+        assert!(matches!(stream.next().await,Some(Err(ProviderError::Disconnected))));
+    }
+    #[test]
+    fn retry_classification_is_structured_and_terminal_by_default() {
+        for status in [400,401,403,404,413,422,500] { assert!(!ProviderError::Http{status,body:"temporarily unavailable".into(),retry_after:None}.retryable()); }
+        for status in [429,502,503,504] { assert!(ProviderError::Http{status,body:String::new(),retry_after:None}.retryable()); }
+        assert!(upstream_error(&json!({"error":{"type":"overloaded_error"}})).retryable());
+        assert!(!upstream_error(&json!({"error":{"message":"overloaded_error"}})).retryable());
+    }
 
     #[tokio::test]
     async fn fragmented_utf8_and_all_events_in_one_frame_survive() {
@@ -688,14 +796,14 @@ mod tests {
     #[test]
     fn normalize_gemini_thought_skipped() {
         let v = json!({"candidates": [{"content": {"parts": [{"text": "t", "thought": true}]}}]});
-        assert!(normalize(v).is_empty());
+        assert!(matches!(&normalize(v)[0], StreamEvent::Reasoning(t) if t == "t"));
     }
 
     #[test]
     fn normalize_error() {
         let v = json!({"error": {"message": "quota"}});
         let evs = normalize(v);
-        assert!(matches!(&evs[0], StreamEvent::Error(m) if m == "quota"));
+        assert!(matches!(&evs[0], StreamEvent::Error(ProviderError::Upstream { .. })));
         assert!(matches!(evs.last(), Some(StreamEvent::Done)));
     }
 
@@ -786,7 +894,7 @@ mod tests {
         };
         let (url, _, body) = p.gemini_request(&req, true).unwrap();
         assert!(url.contains("streamGenerateContent?alt=sse"));
-        assert!(url.contains("key=g"));
+        assert!(!url.contains("key="));
         assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be nice");
         assert_eq!(body["contents"][0]["role"], "user");
         assert_eq!(body["contents"][1]["role"], "model");

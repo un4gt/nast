@@ -137,6 +137,7 @@ async function main() {
     await rpc.call('worlds.save', { name: 'PB', book: book([entry(0, ['dragon'], 'PB-CONTENT')]) });
 
     // 2. settings：连接 + WI 激活 + persona + 停止串 + names_behavior
+    await require('./model_catalog_helper')(rpc.call.bind(rpc), `http://127.0.0.1:${MOCK_PORT}/v1`, 'mock-a');
     await rpc.call('settings.save', {
       settings: {
         oai_settings: {

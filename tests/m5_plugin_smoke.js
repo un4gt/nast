@@ -116,6 +116,7 @@ async function main() {
     check('plugins.list 含钩子/命令信息', !!smoke && smoke.commands.includes('ping') && smoke.hooks.includes('prompt_built'),
       JSON.stringify(list));
 
+    await require('./model_catalog_helper')(rpc.call.bind(rpc), `http://127.0.0.1:${MOCK_PORT}/v1`, 'mock-a');
     await rpc.call('settings.save', {
       settings: {
         oai_settings: {

@@ -3,6 +3,7 @@
 // 插件命令（plugins.list 注册的）→ 透传给服务端执行；未知命令 → 拦截提示。
 
 import { rpc } from './rpc';
+import { currentConversation } from './models';
 import { pushToast } from './toasts';
 import { useStore } from './store';
 import { ttsPlayer } from './tts/player';
@@ -24,6 +25,7 @@ const NL = String.fromCharCode(10);
 
 const HELP = [
   '内置命令（本地执行，不触发生成）：',
+  '  /model [id|info]        切换当前会话模型或查看实际线路',
   '  /help                    本帮助',
   '  /newchat [n]             新聊天（n=开场白序号，缺省随机）',
   '  /del <n>                 删除第 n 条消息（0 起，最新消息可省略 n）',
@@ -50,6 +52,15 @@ export async function runSlashCommand(
   helpers: { setInput: (v: string) => void } = { setInput: () => {} },
 ): Promise<CommandResult> {
   const store = useStore.getState();
+  const modelCommand = input.match(/^\/model(?:\s+(.*))?$/i);
+  if (modelCommand) {
+    const conversation = currentConversation();
+    if (!conversation) { pushToast('请先打开聊天', 'info'); return { status: 'handled' }; }
+    const argument = modelCommand[1]?.trim() ?? '';
+    if (!argument) window.dispatchEvent(new CustomEvent('nast:select-model'));
+    else { const result = await rpc.call('model.command', { conversation, argument }); pushToast(result.text, 'info'); }
+    return { status: 'handled' };
+  }
   const ttsCommand = input.match(/^\/(speak|tts-stop)(?:\s+([\s\S]*))?$/i);
   if (ttsCommand) {
     if (ttsCommand[1].toLowerCase() === 'tts-stop') ttsPlayer.cancel();

@@ -167,6 +167,13 @@ async def execute(args):
                 await nast_page.goto(f"http://127.0.0.1:{nast_port}")
                 settings = {"oai_settings": {**oai, "custom_url": model_url + "/nast/v1"},
                             "power_user": {"username": "User"}}
+                catalog = await rpc(nast_page, 'model_catalog.get')
+                route = catalog['models'][0]['routes'][0]
+                route['config']['endpoint'] = model_url + '/nast/v1'
+                route['config']['context_limit'] = None
+                route['config']['output_limit'] = None
+                route['upstream_model'] = oai.get('custom_model') or oai.get('openai_model', 'gpt-4o')
+                await rpc(nast_page, 'model_catalog.save', {'catalog':catalog})
                 from cases import run_cases
                 await run_cases(st_page, nast_page, server, artifact, report, settings, args.stage)
                 report["browser_errors"] = errors

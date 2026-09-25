@@ -31,8 +31,8 @@ cp .env.example .env        # 可选：改端口
 docker compose up -d --build
 ```
 
-- **Web UI**：http://127.0.0.1:8000 （导入角色卡、配置 API 连接同上）
-- 数据：named volume `nast-data`（settings/secrets/角色卡/聊天/世界书/预设）；
+- **Web UI**：http://127.0.0.1:8000 （导入角色卡、在「设置 → 模型」配置逻辑模型与线路）
+- 数据：named volume `nast-data`（settings/models/secrets/角色卡/聊天/世界书/预设）；
   插件位于镜像内 `/app/plugins`，如需本机管理可挂载 `./plugins:/app/plugins`
 - 网络命名为 `nast-net`，供 IM 桥接栈（独立仓库 `nast-bridges`：QQ/Discord/飞书）接入
 
@@ -40,7 +40,7 @@ docker compose up -d --build
 
 ## 运行（本机裸跑）
 
-入口在 `crates/nast-server`（根目录无包，这是 Cargo workspace）。
+入口在根包 `nast-server` 的 `src/main.rs`，其余库位于 `crates/`。
 
 ```bash
 # 1. 首次：构建前端（产物 web/dist，服务端自动托管）
@@ -112,9 +112,9 @@ cd web && npm run dev   # → http://localhost:3000
 
 ## 已知范围外（对照 ST）
 
-文本补全路径（instruct/context 模板）、Claude/Gemini 原生源 UI、向量/RAG、图像生成、
-翻译、多用户账号。当前阶段模型接入仅 OpenAI 兼容 /chat/completions（自定义 baseURL，
-覆盖 OpenRouter/DeepSeek/中转/本地 vLLM）；密钥存服务端 secrets.json（UI 可配）。
+文本补全路径（instruct/context 模板）、向量/RAG、图像生成、翻译、多用户账号。
+模型接入支持 OpenAI 兼容、Anthropic 和 Gemini 三种协议，均可配置自定义端点；
+模型目录保存在服务端 models.json，线路密钥隔离存入 secrets.json（UI 可配）。
 
 ## 插件（服务端 Lua）
 
@@ -157,3 +157,5 @@ node tests/tts_browser.cjs        # Edge 浏览器播放、单聊群聊、设置
 node tests/tts_local_browser.cjs  # 可选：真实下载 Kokoro / SpeechT5 并合成，需要外网
 cd web && npm run test:tts       # 文本过滤 / 分段 / 旧配置兼容
 ```
+
+模型选择、会话黏性、三协议路由、迁移和 RPC 见[模型配置文档](docs/src/guide/connection.md)。
