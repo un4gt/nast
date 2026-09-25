@@ -1,11 +1,27 @@
-/target
-web/node_modules
-web/dist
-data/
-refrence/
+# Build output and dependency caches
+/target/
+/web/node_modules/
+/web/dist/
+/book/
+/.cache/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+
+# Local configuration and runtime data
+.env
+.env.*
+!.env.example
+secrets.json
+credentials.json
+/data/
+/refrence/
+
+# Agent scratch files and test evidence
+/.zcode/
+/tests/parity/artifacts/
+
+# Logs and OS metadata
 *.log
 .DS_Store
-/book
-/.cache/
-/tests/parity/artifacts/
-__pycache__/
+Thumbs.db
