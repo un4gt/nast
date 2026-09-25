@@ -1,3 +1,11 @@
 .git
 target
+.env
+.env.*
+data
+.cache
+**/credentials.json
+**/secrets.json
+**/qqbot-credentials.json
+*.log
 *.md

@@ -2,14 +2,16 @@
 # 构建上下文 = nast-bridges 仓库；额外上下文 qqbot = ../qqbot-connector。
 # 一个镜像，含 bridge-qq / bridge-discord / bridge-feishu 三个二进制。
 
-FROM rust:1-slim AS build
+FROM rust:1-slim-bookworm AS build
 WORKDIR /build
-COPY --from=qqbot / /build/qqbot-connector/
+COPY --from=qqbot /Cargo.toml /build/qqbot-connector/Cargo.toml
+COPY --from=qqbot /src /build/qqbot-connector/src
+COPY --from=qqbot /examples /build/qqbot-connector/examples
 COPY . /build/nast-bridges/
 WORKDIR /build/nast-bridges
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/nast-bridges/target \
-    cargo build --release -p bridge-qq -p bridge-discord -p bridge-feishu \
+    cargo build --locked --release -p bridge-qq -p bridge-discord -p bridge-feishu \
     && cp target/release/bridge-qq target/release/bridge-discord target/release/bridge-feishu /usr/local/bin/
 
 FROM debian:bookworm-slim AS runtime

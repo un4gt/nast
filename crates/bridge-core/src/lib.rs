@@ -81,6 +81,7 @@ pub struct Session {
 
 pub struct NastClient {
     url: String,
+    token: Option<String>,
     inner: tokio::sync::Mutex<Option<NastConn>>,
     next_id: std::sync::atomic::AtomicU64,
 }
@@ -93,8 +94,12 @@ struct NastConn {
 
 impl NastClient {
     pub fn new(url: String) -> Self {
+        Self::with_token(url, std::env::var("BRIDGE_NAST_TOKEN").ok().filter(|s|!s.is_empty()))
+    }
+    pub fn with_token(url: String, token: Option<String>) -> Self {
         Self {
             url,
+            token,
             inner: tokio::sync::Mutex::new(None),
             next_id: std::sync::atomic::AtomicU64::new(1),
         }
@@ -112,12 +117,25 @@ impl NastClient {
             }
             let mut guard = self.inner.lock().await;
             if guard.is_none() {
-                match tokio_tungstenite::connect_async(self.url.as_str()).await {
+                use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::header};
+                let mut request = self.url.as_str().into_client_request().map_err(|_|"无效 BRIDGE_NAST_SERVER".to_string())?;
+                if request.uri().authority().is_some_and(|a| a.as_str().contains('@')) {
+                    return Err("不要把凭据放入 URL，请使用 BRIDGE_NAST_TOKEN".into());
+                }
+                if let Some(token) = &self.token {
+                    let mut value = header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_|"BRIDGE_NAST_TOKEN 包含无效字符".to_string())?;
+                    value.set_sensitive(true);
+                    request.headers_mut().insert(header::AUTHORIZATION, value);
+                }
+                match tokio_tungstenite::connect_async(request).await {
                     Ok((ws, _)) => {
-                        tracing::info!("nast RPC connected: {}", self.url);
+                        tracing::info!("nast RPC connected");
                         *guard = Some(NastConn { ws });
                     }
                     Err(e) => {
+                        if matches!(&e, tokio_tungstenite::tungstenite::Error::Http(response) if matches!(response.status().as_u16(), 401 | 403)) {
+                            return Err("NAST 认证失败：请检查 BRIDGE_NAST_TOKEN 与服务端 NAST_BRIDGE_TOKEN 是否一致".into());
+                        }
                         last_err = format!("connect nast: {e}");
                         drop(guard);
                         continue;
@@ -686,6 +704,30 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn bridge_token_is_sent_on_every_reconnect() {
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_hdr_async(stream, |request: &Request, response: Response| {
+                    assert_eq!(request.headers()["authorization"], "Bearer isolated-test-token");
+                    assert_eq!(request.uri().path(), "/ws");
+                    assert!(request.uri().query().is_none());
+                    Ok(response)
+                }).await.unwrap();
+                let request: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+                if attempt == 1 {
+                    socket.send(Message::Text(json!({"id":request["id"],"result":[]}).to_string())).await.unwrap();
+                }
+            }
+        });
+        let client = NastClient::with_token(format!("ws://{address}/ws"), Some("isolated-test-token".into()));
+        assert_eq!(client.call("characters.all",json!({})).await.unwrap(),json!([]));
+        server.await.unwrap();
+    }
 
     #[test]
     fn session_mapping_survives_restart_and_rejects_wrong_server() {

@@ -3,8 +3,8 @@
 # 前置：nast 侧 compose 已把网络命名为 nast-net（external 引用）。
 #
 # 使用：
-#   docker compose up -d                              # 只启动 QQ（默认）
-#   docker compose --profile discord --profile feishu up -d   # 追加启用其他平台
+#   docker compose --profile qq up -d --build         # 只启动 QQ
+#   discord / feishu 是占位适配器，完成实现后再启用对应 profile
 #   docker compose stop qq                            # 单独停某平台
 #
 # 凭据在各平台独立 volume 中（QQ 扫码缓存重启免扫；Discord/飞书用 env 密钥）。
@@ -19,7 +19,8 @@ x-bridge: &bridge
   restart: unless-stopped
   networks: [nast-net]
   environment: &bridge-env
-    BRIDGE_NAST_SERVER: ws://nast:8000/ws
+    BRIDGE_NAST_SERVER: ${BRIDGE_NAST_SERVER:-ws://nast:8000/ws}
+    BRIDGE_NAST_TOKEN: ${BRIDGE_NAST_TOKEN:?Set BRIDGE_NAST_TOKEN in .env}
     BRIDGE_AVATAR: ${BRIDGE_AVATAR:-}
     BRIDGE_MAX_CHARS: ${BRIDGE_MAX_CHARS:-1500}
     BRIDGE_GEN_TIMEOUT_SECS: ${BRIDGE_GEN_TIMEOUT_SECS:-240}
@@ -29,6 +30,7 @@ x-bridge: &bridge
 services:
   qq:
     <<: *bridge
+    profiles: ["qq"]
     container_name: nast-bridge-qq
     command: ["bridge-qq"]
     environment:
