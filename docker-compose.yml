@@ -22,7 +22,8 @@ x-bridge: &bridge
     BRIDGE_NAST_SERVER: ws://nast:8000/ws
     BRIDGE_AVATAR: ${BRIDGE_AVATAR:-}
     BRIDGE_MAX_CHARS: ${BRIDGE_MAX_CHARS:-1500}
-    BRIDGE_GEN_TIMEOUT_SECS: ${BRIDGE_GEN_TIMEOUT_SECS:-120}
+    BRIDGE_GEN_TIMEOUT_SECS: ${BRIDGE_GEN_TIMEOUT_SECS:-240}
+    BRIDGE_SESSIONS_PATH: /data/bridge-sessions.json
     RUST_LOG: info
 
 services:
@@ -41,6 +42,8 @@ services:
     profiles: ["discord"]
     container_name: nast-bridge-discord
     command: ["bridge-discord"]
+    volumes:
+      - discord-sessions:/data
     environment:
       <<: *bridge-env
       BRIDGE_DISCORD_TOKEN: ${DISCORD_TOKEN:-}
@@ -50,6 +53,8 @@ services:
     profiles: ["feishu"]
     container_name: nast-bridge-feishu
     command: ["bridge-feishu"]
+    volumes:
+      - feishu-sessions:/data
     environment:
       <<: *bridge-env
       BRIDGE_FEISHU_APP_ID: ${FEISHU_APP_ID:-}
@@ -61,3 +66,5 @@ networks:
 
 volumes:
   qq-creds:
+  discord-sessions:
+  feishu-sessions:

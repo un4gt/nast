@@ -51,7 +51,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .filter(|v| *v >= 10)
-                .unwrap_or(120),
+                .unwrap_or(240),
             platform_help: platform_help.to_string(),
         }
     }
@@ -104,6 +104,8 @@ impl NastClient {
     /// 业务错误（响应里的 error）不重试，直接返回。
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let mut last_err = String::new();
+        // Only explicitly read-only RPCs may be replayed after a possibly successful send.
+        let replayable = matches!(method, "characters.all" | "characters.chats" | "chats.get" | "settings.get" | "worlds.list" | "plugins.list" | "generate.status" | "model_catalog.get" | "conversation_model.get");
         for attempt in 0..3 {
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
@@ -131,6 +133,7 @@ impl NastClient {
             if let Err(e) = conn.ws.send(Message::Text(req.to_string())).await {
                 last_err = format!("send: {e}");
                 *guard = None;
+                if !replayable { return Err(format!("请求可能已提交，不自动重发：{last_err}")); }
                 continue;
             }
             let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
@@ -184,6 +187,7 @@ impl NastClient {
                 }
                 return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
+            if !replayable { return Err(format!("请求已提交，连接中断；不会自动重发：{last_err}")); }
         }
         Err(format!("nast RPC unreachable: {last_err}"))
     }
@@ -197,17 +201,25 @@ pub struct BridgeContext {
     /// 控制通道（独立连接）：generate.run 占住主连接时仍能发 generate.stop
     pub ctrl: Arc<NastClient>,
     sessions: Mutex<HashMap<String, Session>>,
+    session_path: std::path::PathBuf,
+    session_error: Option<String>,
+    session_operation: tokio::sync::Mutex<()>,
 }
 
 impl BridgeContext {
     pub fn new(cfg: Config) -> Arc<Self> {
         let nast = Arc::new(NastClient::new(cfg.nast_server.clone()));
         let ctrl = Arc::new(NastClient::new(cfg.nast_server.clone()));
+        let session_path = std::env::var_os("BRIDGE_SESSIONS_PATH").map(std::path::PathBuf::from).unwrap_or_else(|| "data/bridge-sessions.json".into());
+        let (sessions, session_error) = match read_sessions(&session_path, &cfg.nast_server) {
+            Ok(sessions) => (sessions,None), Err(e) => (HashMap::new(),Some(e)),
+        };
         Arc::new(Self {
+            session_path, session_error, session_operation:tokio::sync::Mutex::new(()),
             cfg,
             nast,
             ctrl,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(sessions),
         })
     }
 
@@ -227,6 +239,13 @@ impl BridgeContext {
                 None => (body.to_lowercase(), String::new()),
             };
             match cmd.as_str() {
+                "model" => {
+                    let result = match self.ensure_session(&msg.source_key).await {
+                        Ok(session) => self.nast.call("model.command",json!({"conversation":{"kind":"private","avatar":session.avatar,"chat_file":session.chat_file},"argument":args})).await.map(|r|r["text"].as_str().unwrap_or_default().to_string()),
+                        Err(e) => Err(e),
+                    };
+                    return Some(result.unwrap_or_else(|e|format!("模型操作失败：{e}")));
+                }
                 "help" => return Some(self.help_text()),
                 "chars" | "characters" => return Some(self.list_characters().await),
                 "character" | "char" => {
@@ -279,7 +298,10 @@ impl BridgeContext {
     /// 生成并截断；生成失败返回错误文案（仍回复给用户）。
     async fn generate_reply(&self, key: &str, text: &str) -> Option<String> {
         let out = self.generate_reply_raw(key, text).await?;
-        Some(truncate_chars(&out, self.cfg.max_chars))
+        const INCOMPLETE: &str = "\n（未完成：生成中断，已保留部分结果）";
+        if let Some(partial) = out.strip_suffix(INCOMPLETE) {
+            Some(format!("{}{INCOMPLETE}",truncate_chars(partial,self.cfg.max_chars.saturating_sub(INCOMPLETE.chars().count()))))
+        } else { Some(truncate_chars(&out, self.cfg.max_chars)) }
     }
 
     /// 生成不截断版本：None = 无文本产出（如插件命令被服务端吞掉）。
@@ -293,6 +315,7 @@ impl BridgeContext {
         };
         // 生成 + 超时守卫：超时则经控制通道 generate.stop 中止（释放 nast 的单生成锁）
         let timeout = Duration::from_secs(self.cfg.gen_timeout_secs);
+        let task_id = uuid::Uuid::new_v4().to_string();
         let gen_fut = self.nast.call(
             "generate.run",
             json!({
@@ -300,11 +323,14 @@ impl BridgeContext {
                 "chat_file": chat_file,
                 "type": "normal",
                 "user_message": text,
+                "task_id": task_id,
+                "time_budget_secs": self.cfg.gen_timeout_secs.saturating_sub(5).max(1),
             }),
         );
         match tokio::time::timeout(timeout, gen_fut).await {
             Ok(Ok(r)) => {
-                let out = r.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+                let mut out = r.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+                if r["routing"]["status"] == "incomplete" { out.push_str("\n（未完成：生成中断，已保留部分结果）"); }
                 if out.is_empty() && text.starts_with('/') {
                     None
                 } else {
@@ -322,9 +348,9 @@ impl BridgeContext {
                 );
                 let ctrl = self.ctrl.clone();
                 tokio::spawn(async move {
-                    let _ = ctrl.call("generate.stop", json!({})).await;
+                    let _ = ctrl.call("generate.stop", json!({"task_id":task_id})).await;
                 });
-                Some(format!("生成超时（超过 {} 秒），已中止本次生成，请稍后重试。", self.cfg.gen_timeout_secs))
+                Some(format!("生成超时（超过 {} 秒），已请求中止本次生成，请稍后重试。", self.cfg.gen_timeout_secs))
             }
         }
     }
@@ -332,10 +358,12 @@ impl BridgeContext {
     // ---------- 会话管理 ----------
 
     pub async fn ensure_session(&self, key: &str) -> Result<Session, String> {
+        let _operation = self.session_operation.lock().await;
+        if let Some(error) = &self.session_error { return Err(error.clone()); }
         if let Some(s) = self.sessions.lock().unwrap().get(key).cloned() {
             return Ok(s);
         }
-        self.reset_session(key, None).await
+        self.reset_session_inner(key, None, false).await
     }
 
     /// 建立或重置会话：选定角色（None = 保持当前/默认）并开新聊天文件。
@@ -344,22 +372,44 @@ impl BridgeContext {
         key: &str,
         avatar_hint: Option<&str>,
     ) -> Result<Session, String> {
+        let _operation = self.session_operation.lock().await;
+        if let Some(error) = &self.session_error { return Err(error.clone()); }
+        self.reset_session_inner(key, avatar_hint, avatar_hint.is_none()).await
+    }
+    async fn reset_session_inner(&self, key: &str, avatar_hint: Option<&str>, force_new: bool) -> Result<Session,String> {
+        let existing_avatar = self.sessions.lock().unwrap().get(key).map(|s|s.avatar.clone());
         let avatar = match avatar_hint {
             Some(frag) => self.find_avatar_by_name(frag).await?,
-            None => match self.sessions.lock().unwrap().get(key).map(|s| s.avatar.clone()) {
+            None => match existing_avatar {
                 Some(a) => a,
                 None => self.ensure_default_avatar().await?,
             },
         };
-        let chat_file = self.fresh_chat(&avatar, key).await?;
+        let cached = self.sessions.lock().unwrap().get(&format!("{key}::{avatar}")).cloned();
+        let chat_file = if force_new { self.fresh_chat(&avatar,key).await? }
+        else if let Some(session) = cached { session.chat_file }
+        else {
+            // Upgrade recovery: reuse the newest source thread, never create one just because the process restarted.
+            let list = self.nast.call("characters.chats",json!({"avatar":avatar})).await?;
+            let latest = list.as_array().into_iter().flatten().filter_map(Value::as_str).filter_map(|name| {
+                let stem=name.strip_suffix(".jsonl").unwrap_or(name);
+                if stem == key { Some((1,name.to_string())) }
+                else { stem.strip_prefix(&format!("{key}-")).and_then(|s|s.parse::<u64>().ok()).map(|n|(n,name.to_string())) }
+            }).max_by_key(|(n,_)|*n).map(|(_,name)|name);
+            match latest { Some(name)=>name, None=>self.fresh_chat(&avatar,key).await? }
+        };
         let sess = Session {
             avatar: avatar.clone(),
             chat_file: chat_file.clone(),
         };
-        self.sessions
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), sess.clone());
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            let mut updated = sessions.clone();
+            updated.insert(key.to_string(),sess.clone());
+            updated.insert(format!("{key}::{avatar}"),sess.clone());
+            save_sessions(&self.session_path, &self.cfg.nast_server, &updated)?;
+            *sessions = updated;
+        }
         tracing::info!("[{key}] 会话重置：{avatar} / {chat_file}");
         Ok(sess)
     }
@@ -609,8 +659,9 @@ impl BridgeContext {
         let mut lines = vec![
             "命令：".to_string(),
             "/help —— 本帮助".to_string(),
+            "/model [id|info] —— 当前会话模型与线路信息".to_string(),
             "/chars —— 列出全部角色卡".to_string(),
-            "/char <名字片段> —— 切换到该角色并开新聊天（/character 同义）".to_string(),
+            "/char <名字片段> —— 切换角色并恢复该来源会话（/character 同义）".to_string(),
             "/newchat —— 开一个新聊天（同一角色）".to_string(),
             "/worlds —— 列出全部世界书".to_string(),
             "/world <名称|none> —— 绑定/解绑本会话的世界书".to_string(),
@@ -637,6 +688,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_mapping_survives_restart_and_rejects_wrong_server() {
+        let directory = tempfile::tempdir().unwrap(); let path = directory.path().join("sessions.json");
+        let mut sessions = HashMap::new(); sessions.insert("qq-g-1".into(), Session { avatar:"a.png".into(),chat_file:"thread-2.jsonl".into() });
+        save_sessions(&path,"ws://test/ws",&sessions).unwrap();
+        save_sessions(&path,"ws://test/ws",&sessions).unwrap();
+        assert_eq!(read_sessions(&path,"ws://test/ws").unwrap()["qq-g-1"].chat_file,"thread-2.jsonl");
+        assert!(read_sessions(&path,"ws://other/ws").is_err());
+        std::fs::write(&path,b"broken").unwrap(); assert!(read_sessions(&path,"ws://test/ws").is_err());
+    }
+    #[tokio::test]
+    async fn submitted_generation_is_never_replayed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (stream,_)=listener.accept().await.unwrap();
+            let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request=ws.next().await.unwrap().unwrap();
+            assert!(request.to_text().unwrap().contains("generate.run"));
+            ws.close(None).await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_millis(1800),listener.accept()).await.is_err());
+        });
+        let client=NastClient::new(format!("ws://{address}/ws"));
+        let error=client.call("generate.run",json!({"task_id":"one"})).await.unwrap_err();
+        assert!(error.contains("不会自动重发")); server.await.unwrap();
+    }
+
+    fn test_context(url: String, directory: &std::path::Path, timeout: u64) -> BridgeContext {
+        let mut sessions=HashMap::new(); sessions.insert("qq-g-1".into(),Session {avatar:"actor.png".into(),chat_file:"thread.jsonl".into()});
+        BridgeContext { cfg:Config { nast_server:url.clone(),avatar:String::new(),max_chars:1500,gen_timeout_secs:timeout,platform_help:String::new() },
+            nast:Arc::new(NastClient::new(url.clone())),ctrl:Arc::new(NastClient::new(url)),sessions:Mutex::new(sessions),
+            session_path:directory.join("sessions.json"),session_error:None,session_operation:tokio::sync::Mutex::new(()) }
+    }
+    #[tokio::test]
+    async fn model_commands_use_current_conversation_without_generating() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (stream,_)=listener.accept().await.unwrap(); let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+            for argument in ["","second","info"] {
+                let request:Value=serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+                assert_eq!(request["method"],"model.command"); assert_eq!(request["params"]["argument"],argument);
+                assert_eq!(request["params"]["conversation"],json!({"kind":"private","avatar":"actor.png","chat_file":"thread.jsonl"}));
+                ws.send(Message::Text(json!({"id":request["id"],"result":{"text":"model reply"}}).to_string())).await.unwrap();
+            }
+        });
+        let directory=tempfile::tempdir().unwrap();let context=test_context(format!("ws://{address}/ws"),directory.path(),240);
+        for command in ["/model","/model second","/model info"] { assert_eq!(context.handle_inbound(InboundMessage {source_key:"qq-g-1".into(),text:command.into()}).await.as_deref(),Some("model reply")); }
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn timeout_cancel_uses_the_submitted_task_identity() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let server=tokio::spawn(async move {
+            let (stream,_)=listener.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+            let generate:Value=serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(generate["method"],"generate.run");assert_eq!(generate["params"]["time_budget_secs"],1);
+            let (stream,_)=tokio::time::timeout(Duration::from_secs(5),listener.accept()).await.unwrap().unwrap();
+            let mut ctrl=tokio_tungstenite::accept_async(stream).await.unwrap();
+            let cancel:Value=serde_json::from_str(ctrl.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(cancel["method"],"generate.stop");assert_eq!(cancel["params"]["task_id"],generate["params"]["task_id"]);
+            ctrl.send(Message::Text(json!({"id":cancel["id"],"result":{"ok":true}}).to_string())).await.unwrap();
+        });
+        let directory=tempfile::tempdir().unwrap();let context=test_context(format!("ws://{address}/ws"),directory.path(),1);
+        let reply=context.handle_inbound(InboundMessage {source_key:"qq-g-1".into(),text:"hello".into()}).await.unwrap();
+        assert!(reply.contains("生成超时"));server.await.unwrap();
+    }
+
+    #[test]
     fn truncates_by_chars() {
         let s = "很长".repeat(1000);
         assert_eq!(truncate_chars(&s, 10).chars().count(), 10);
@@ -651,8 +769,28 @@ mod tests {
             nast_server: String::new(),
             avatar: String::new(),
             max_chars: 0,
+            gen_timeout_secs: 240,
             platform_help: String::new(),
         };
         assert!(cfg.platform_help.is_empty());
     }
+}
+
+
+fn read_sessions(path: &std::path::Path, server: &str) -> Result<HashMap<String,Session>,String> {
+    let bytes = match std::fs::read(path) { Ok(b)=>b, Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(HashMap::new()), Err(e)=>return Err(format!("无法读取会话映射：{e}")) };
+    let value:Value=serde_json::from_slice(&bytes).map_err(|e|format!("会话映射损坏，拒绝自动新建聊天：{e}"))?;
+    if value["server"] != server { return Err("会话映射属于其他 NAST 服务，请使用不同 BRIDGE_SESSIONS_PATH".into()); }
+    value["sessions"].as_object().ok_or("无效会话映射")?.iter().map(|(key,v)|Ok((key.clone(),Session { avatar:v["avatar"].as_str().ok_or("缺少 avatar")?.into(),chat_file:v["chat_file"].as_str().ok_or("缺少 chat_file")?.into() }))).collect()
+}
+fn save_sessions(path: &std::path::Path, server: &str, sessions: &HashMap<String,Session>) -> Result<(),String> {
+    use std::io::Write;
+    let parent=path.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e|e.to_string())?;
+    let entries:serde_json::Map<String,Value>=sessions.iter().map(|(key,s)|(key.clone(),json!({"avatar":s.avatar,"chat_file":s.chat_file}))).collect();
+    let mut file=tempfile::NamedTempFile::new_in(parent).map_err(|e|e.to_string())?;
+    file.write_all(serde_json::to_string_pretty(&json!({"server":server,"sessions":entries})).unwrap().as_bytes()).map_err(|e|e.to_string())?;
+    file.as_file().sync_all().map_err(|e|e.to_string())?;
+    file.persist(path).map_err(|e|e.to_string())?;
+    Ok(())
 }
