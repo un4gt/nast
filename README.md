@@ -38,6 +38,30 @@ docker compose up -d --build
 
 环境变量（`.env`）：`NAST_PORT`、`NAST_PLUGIN_TIMEOUT_SECS`。
 
+### GHCR 预构建镜像
+
+`.github/workflows/images.yml` 在推送 `main`、推送 `v*` 标签或手动触发时，
+构建并发布 `ghcr.io/<owner>/<repo>`（名称自动转小写，目前提供 `linux/amd64`）。
+PR 只构建和测试；镜像通过隔离数据目录的启动、升级迁移与重启测试后才发布。
+工作流使用 `GITHUB_TOKEN`，无需额外配置 Docker 密钥；仓库／组织需允许 Actions 写入 Packages。
+
+- `latest`、`main`：默认 `main` 分支的最新构建。
+- `sha-<完整提交 SHA>`：定位具体代码版本。
+- `v1.2.3` 标签：同时发布 `v1.2.3`、`1.2.3`、`1.2`；预发布标签不更新稳定的 `1.2`。
+
+替换下方 `<owner>/<repo>` 为实际 GitHub 仓库的小写名称：
+
+```bash
+docker volume create nast-data
+docker run -d --name nast --restart unless-stopped \
+  -p 8000:8000 -v nast-data:/app/data \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+首次发布后，如需允许匿名拉取，在 GitHub Packages 中将包可见性设为 Public；
+私有包则先使用有 `read:packages` 权限的令牌执行 `docker login ghcr.io`。
+精确部署版本可使用工作流摘要中的 `ghcr.io/<owner>/<repo>@sha256:…`。
+
 ## 运行（本机裸跑）
 
 入口在根包 `nast-server` 的 `src/main.rs`，其余库位于 `crates/`。

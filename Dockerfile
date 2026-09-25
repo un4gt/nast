@@ -16,7 +16,7 @@ WORKDIR /build/nast
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/nast/target \
-    cargo build --release -p nast-server \
+    cargo build --locked --release -p nast-server \
     && cp target/release/nast /usr/local/bin/
 
 # ---------- 运行时 ----------
