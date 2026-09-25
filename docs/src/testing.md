@@ -65,7 +65,7 @@ npm --prefix web run test:tts     # 文本过滤、分段与旧配置兼容
 ## 验收口径
 
 任何聊天链路改动要求：`cargo test --workspace` 全绿 + 对应冒烟通过；
-涉及 ST 对齐的修复同时在 `GAPS.md` 销号并注明提交。
+涉及 ST 对齐的修复同时在 `docs/ST_PARITY_AUDIT.md` 更新状态并注明提交。
 
 ## 多模型路由验收
 

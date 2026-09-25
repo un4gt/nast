@@ -13,7 +13,7 @@ mdbook serve --open              # 本文档预览（http://localhost:3000）
 
 1. 行为疑问先查 `refrence/SillyTavern`（v1.18.0 检出）拿准语义；
 2. 实现时代码注释标注 ST 源码锚点（如 `openai.js:801 populationInjectionPrompts`）；
-3. `GAPS.md` 登记/销号（✅ 对齐 | ⚠️ 偏差 | ❌ 缺失）；
+3. 在 `docs/ST_PARITY_AUDIT.md` 登记差异，完成验证后更新状态；
 4. 加端到端冒烟覆盖（见[测试](./testing.md)）。
 
 ## 前端约定

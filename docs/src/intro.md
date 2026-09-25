@@ -11,7 +11,7 @@
 
 ## 它不是什么
 
-- 不是 SillyTavern 的 fork：没有复用 ST 前端，提示拼装语义以 ST v1.18.0 为基准逐条对齐（对照差异见仓库 `GAPS.md`）
+- 不是 SillyTavern 的 fork：没有复用 ST 前端，提示拼装语义以 ST v1.18.0 为基准逐条对齐（对照差异见仓库 `docs/ST_PARITY_AUDIT.md`）
 - 当前阶段模型接入仅 OpenAI 兼容 `/chat/completions`（自定义 baseURL，覆盖 OpenRouter / DeepSeek / 中转 / 本地 vLLM）
 
 ## 一分钟预览

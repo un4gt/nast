@@ -44,5 +44,5 @@ IM 桥接已拆分至独立仓库 `nast-bridges`（bridge-core + 平台适配器
 ## 与 ST 对齐的工作方式
 
 - 行为基准：仓库 `refrence/SillyTavern`（v1.18.0 检出）
-- 差异登记：`GAPS.md`（✅ 对齐 / ⚠️ 偏差 / ❌ 缺失），修复即销号
+- 差异登记：`docs/ST_PARITY_AUDIT.md`，完成验证后更新状态
 - 每个语义点落地时在代码注释标注 ST 源码锚点（如 `world-info.js:4899`）
