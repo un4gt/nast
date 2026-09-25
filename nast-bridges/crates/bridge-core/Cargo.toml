@@ -1,0 +1,16 @@
+[package]
+name = "bridge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "nast 桥接核心：WS RPC 客户端、会话管理、命令层、生成桥接（平台无关）"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-tungstenite = { workspace = true }
+futures-util.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+tempfile.workspace = true
+uuid = { version = "1", features = ["v4"] }

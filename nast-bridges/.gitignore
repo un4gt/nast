@@ -1,0 +1,13 @@
+/target
+.env
+.env.*
+!.env.example
+/data/
+/.cache/
+/.zcode/
+secrets.json
+credentials.json
+qqbot-credentials.json
+*.log
+.DS_Store
+Thumbs.db
