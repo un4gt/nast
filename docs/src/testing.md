@@ -73,7 +73,7 @@ npm --prefix web run test:tts     # 文本过滤、分段与旧配置兼容
 验证未登录 HTTP／WebSocket 拒绝访问、错误密码、跨站请求拒绝、桥接请求头、Cookie 属性、刷新保持登录及退出后多标签页失效。
 浏览器检查覆盖明暗主题、390／1440 像素宽度和键盘提交，截图与报告在脚本打印的隔离 Evidence 目录中。
 `tests/parity/container_migration.py` 现在以测试账号启动容器，同时验证未登录 `/ws` 返回 401。
-同级 `nast-bridges` 的工作区测试验证桥接每次重连均携带令牌。
+仓库根目录运行 `cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked`，验证桥接每次重连均携带令牌。
 
 ## 多模型路由验收
 
@@ -90,7 +90,7 @@ npm --prefix web run build
 
 `routing.py` 使用临时数据目录，记录三协议请求、迁移、版本冲突和保存失败、准确重试次数、黏性隔离、Retry-After、取消与总预算、部分正文／思考落盘、命令和各生成入口。打印的 Evidence 目录保留 report.json、请求及服务端日志。虚拟服务 `plans[route]` 支持 status、retry_after、delay、chunk_delay、cutoff（before/reasoning/body/no_done）、invalid_json、stream_error。不访问生产模型或真实用户数据。
 
-同级桥接仓库运行 `cargo test --workspace`，覆盖持久化会话与已提交生成断线不重发。升级迁移另外用新构建镜像、隔离 bind mount 检查备份、密钥引用和重复启动，不替换生产容器。
+桥接工作区运行 `cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked`，覆盖持久化会话与已提交生成断线不重发，并测试随附 QQ SDK；真实端点测试保持忽略。升级迁移另外用新构建镜像、隔离 bind mount 检查备份、密钥引用和重复启动，不替换生产容器。
 
 容器迁移可重复运行：
 

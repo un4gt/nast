@@ -5,6 +5,7 @@ members = [
     "crates/bridge-qq",
     "crates/bridge-discord",
     "crates/bridge-feishu",
+    "vendor/qqbot-connector",
 ]
 
 [workspace.package]

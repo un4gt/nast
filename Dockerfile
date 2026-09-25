@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# 构建上下文 = nast 仓库。IM 桥接（QQ/Discord/飞书）已拆分至 nast-bridges 仓库。
+# 构建上下文 = nast 仓库根。桥接镜像从 nast-bridges/ 单独构建。
 
 # ---------- 前端 ----------
 FROM node:20-slim AS web

@@ -1,0 +1,26 @@
+[package]
+name = "qqbot-connector"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "QQ Bot Connector SDK - 扫码连接 QQ 机器人，获取 AppID 与 AppSecret (Rust port of @tencent-connect/qqbot-connector)"
+license = "MIT OR Apache-2.0"
+keywords = ["qq", "qqbot", "tencent", "qr", "sdk"]
+categories = ["api-bindings"]
+
+[dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+getrandom = "0.3"
+qrcode = { version = "0.14", default-features = false, optional = true }
+
+[features]
+default = ["qr"]
+# 终端二维码渲染（qrcode crate）
+qr = ["dep:qrcode"]
+
+[[example]]
+name = "connect"
+required-features = ["qr"]

@@ -11,7 +11,7 @@ nast-server（单进程，actix-web）
  ├─ generate.rs       生成状态机（normal/swipe/regenerate/continue/impersonate/quiet）
  ├─ connection.rs     模型连接（settings+secrets → provider；custom_url/custom_model）
  ├─ plugin 线程       Lua 插件专用线程 + 限时派发
- └─ nast-bridges(独立仓库) 经同一 WS RPC 接入（QQ/Discord/飞书）
+ └─ nast-bridges/（同仓、独立镜像）经同一 WS RPC 接入
 ```
 
 ## Cargo workspace
@@ -26,7 +26,7 @@ nast-server（单进程，actix-web）
 | `nast-providers` | OpenAI 兼容流式接入，统一 StreamEvent（Token/Reasoning/Usage） |
 | `nast-plugin` | mlua 插件宿主（专用线程、KV 落盘、斜杠命令、toast） |
 
-IM 桥接已拆分至独立仓库 `nast-bridges`（bridge-core + 平台适配器），见[专门章节](./bridges.md)。
+IM 桥接位于同一仓库的 `nast-bridges/`（bridge-core + 平台适配器），保留独立 Cargo 工作区与运行容器，见[专门章节](./bridges.md)。
 
 ## 生成管线（单条消息的生命周期）
 

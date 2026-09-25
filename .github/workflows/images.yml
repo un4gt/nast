@@ -17,8 +17,21 @@ concurrency:
 
 jobs:
   publish:
+    name: ${{ matrix.image }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: nast
+            context: .
+            dockerfile: ./Dockerfile
+            suffix: ""
+          - image: nast-bridges
+            context: ./nast-bridges
+            dockerfile: ./nast-bridges/Dockerfile
+            suffix: "-bridges"
     permissions:
       contents: read
       packages: write
@@ -29,7 +42,9 @@ jobs:
       - name: Resolve image name
         id: image
         shell: bash
-        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        env:
+          IMAGE_SUFFIX: ${{ matrix.suffix }}
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}${IMAGE_SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -52,18 +67,32 @@ jobs:
       - name: Build test image
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           load: true
-          tags: nast:ci
+          tags: ${{ matrix.image }}:ci
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=nast-amd64
-          cache-to: type=gha,mode=max,scope=nast-amd64
+          cache-from: type=gha,scope=${{ matrix.image }}-amd64
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-amd64
 
       - name: Verify startup, migration and restart
+        if: matrix.image == 'nast'
         # The container writes private files as root in the disposable bind mount.
         run: sudo python3 tests/parity/container_migration.py --image nast:ci
+
+      - name: Verify bridge runtime libraries and licenses
+        if: matrix.image == 'nast-bridges'
+        run: |
+          docker run --rm --entrypoint sh nast-bridges:ci -ec '
+            for binary in bridge-qq bridge-discord bridge-feishu; do
+              result="$(ldd "/usr/local/bin/$binary")"
+              printf "%s\n" "$result"
+              case "$result" in *"not found"*) exit 1;; esac
+            done
+            test -s /usr/share/licenses/qqbot-connector/LICENSE-MIT
+            test -s /usr/share/licenses/qqbot-connector/LICENSE-APACHE
+          '
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
@@ -78,13 +107,13 @@ jobs:
         id: push
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=nast-amd64
+          cache-from: type=gha,scope=${{ matrix.image }}-amd64
 
       - name: Record published digest
         if: github.event_name != 'pull_request'

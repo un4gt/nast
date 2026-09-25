@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 bridge-core.workspace = true
-qqbot-connector = { path = "../../../qqbot-connector" }
+qqbot-connector = { path = "../../vendor/qqbot-connector" }
 tokio = { workspace = true, features = ["full"] }
 tokio-tungstenite.workspace = true
 futures-util.workspace = true

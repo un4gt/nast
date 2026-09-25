@@ -1,6 +1,6 @@
 # IM 桥接（nast-bridges）
 
-`nast-bridges` 是同级独立仓库。每个平台运行一个容器，通过 NAST 的 `/ws` RPC 连接同一个服务；角色、模型、世界书和聊天仍由 NAST 保存。
+`nast-bridges/` 位于当前 NAST 仓库内，统一提交与发布；保留独立的 Cargo 工作区和镜像。每个平台运行一个容器，通过 NAST 的 `/ws` RPC 连接同一个服务；角色、模型、世界书和聊天仍由 NAST 保存。
 
 ## 先确认平台支持状态
 
@@ -14,16 +14,19 @@
 
 ## 准备目录与 NAST
 
-当前桥接从源码构建，还依赖 `qqbot-connector` 的同级源码目录：
+一次克隆即可得到核心服务、桥接和 QQ SDK：
 
 ```text
-workspace/
-├── nast/
-├── nast-bridges/
-└── qqbot-connector/
+nast/
+├── Cargo.toml
+├── docker-compose.yml
+└── nast-bridges/
+    ├── Cargo.toml
+    ├── docker-compose.yml
+    └── vendor/qqbot-connector/
 ```
 
-`nast-bridges` 和 `qqbot-connector` 是独立源码项目，不包含在 `ghcr.io/un4gt/nast` 镜像中。先准备这两个项目；不要只复制桥接 Compose 文件，构建需要上述目录。使用支持 `build.additional_contexts` 的 Docker Compose v2。
+`ghcr.io/un4gt/nast` 运行核心服务，`ghcr.io/un4gt/nast-bridges` 运行桥接；两者由同一仓库的 `images.yml` 发布。QQ SDK 的源码、测试和许可证保存在 `nast-bridges/vendor/qqbot-connector/`，构建不再需要仓库外目录或额外 Docker 上下文。使用 Docker Compose v2。
 
 1. 按 [登录与认证](./guide/authentication.md) 部署 NAST，填写账号密码和独立的 `NAST_BRIDGE_TOKEN`。
 2. 在网页登录，导入至少一个角色，在「设置 → 模型」配置可用模型并测试聊天。
@@ -31,9 +34,10 @@ workspace/
 
 ## 只接 QQ
 
-进入 `nast-bridges`，复制环境文件：
+在仓库根目录进入 `nast-bridges/`，复制环境文件：
 
 ```bash
+cd nast-bridges
 cp .env.example .env
 ```
 
@@ -54,6 +58,15 @@ BRIDGE_GEN_TIMEOUT_SECS=240
 docker compose --profile qq up -d --build
 docker compose logs -f qq
 ```
+
+也可使用 GHCR 预构建镜像：在桥接 `.env` 中设置 `BRIDGE_IMAGE=ghcr.io/un4gt/nast-bridges:latest`，然后执行：
+
+```bash
+docker compose --profile qq pull
+docker compose --profile qq up -d --no-build
+```
+
+核心与桥接分别使用根目录和 `nast-bridges/` 的 `.env`，各自的用户名／令牌配置见上文。两份 Compose 保留独立服务和数据卷。从原同级目录迁移时，将原桥接 `.env` 一并移到本目录，并沿用原项目名与数据卷；默认项目名仍为 `nast-bridges`，已有扫码凭据可继续使用。如果以前使用 `-p` 或 `COMPOSE_PROJECT_NAME` 指定过项目名，迁移后继续使用同一名称。
 
 使用手机 QQ 扫描日志显示的二维码，按平台要求完成绑定。QQ群中 @机器人，或向机器人发送私聊；发送 `/help` 查看命令。
 
@@ -104,7 +117,7 @@ docker compose ps -a
 | Discord／飞书容器反复退出 | 当前是占位实现，请停止该服务；配置 Token 无法解决 |
 | 重启后要重新扫码 | 确认 `qq-creds` 卷仍在，不要用 `docker compose down -v` 删除凭据和会话 |
 
-升级桥接后使用 `docker compose --profile qq up -d --build`；修改 `.env` 后用 `up -d --force-recreate qq`，不要只执行 `restart`。已提交生成在断线后不会自动重发。映射文件损坏时会提示错误，不会悄悄新建线程覆盖已有会话。
+源码部署升级后使用 `docker compose --profile qq up -d --build`；镜像部署先 `pull`，再 `up -d --no-build`。修改 `.env` 后用 `up -d --force-recreate qq`，不要只执行 `restart`。已提交生成在断线后不会自动重发。映射文件损坏时会提示错误，不会悄悄新建线程覆盖已有会话。
 
 ## 新增平台适配器
 

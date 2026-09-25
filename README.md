@@ -21,6 +21,7 @@ nast/
 │   ├── nast-providers/   # OpenAI 兼容 / Anthropic / Gemini + 统一 StreamEvent
 │   └── nast-plugin/      # mlua 插件：事件钩子 + KV 存储
 ├── tests/                # Node 冒烟 + Python 模型服务与真实 ST 差分验收
+├── nast-bridges/         # 同仓管理的 IM 桥接、独立 Cargo 工作区与镜像（含 QQ SDK）
 └── web/                  # rsbuild + react + tailwind + zustand
 ```
 
@@ -34,7 +35,7 @@ docker compose up -d --build
 - **Web UI**：http://127.0.0.1:8000 （导入角色卡、在「设置 → 模型」配置逻辑模型与线路）
 - 数据：named volume `nast-data`（settings/models/secrets/角色卡/聊天/世界书/预设）；
   插件位于镜像内 `/app/plugins`，如需本机管理可挂载 `./plugins:/app/plugins`
-- 网络命名为 `nast-net`，供 IM 桥接栈（独立仓库 `nast-bridges`：QQ/Discord/飞书）接入
+- 网络命名为 `nast-net`，供本仓库 `nast-bridges/` 中的 IM 桥接接入（当前 QQ 可用）
 
 部署必须填写 `NAST_USERNAME`、`NAST_PASSWORD`，没有默认密码。桥接另设 `NAST_BRIDGE_TOKEN`。
 首次升级到带认证版本前先补齐环境变量；已有数据卷保留。网页、上传、头像、TTS 和 WebSocket 均由服务端认证保护。
@@ -44,7 +45,8 @@ docker compose up -d --build
 
 `.github/workflows/images.yml` 在推送 `main`、推送 `v*` 标签或手动触发时，
 构建并发布 `ghcr.io/<owner>/<repo>`（名称自动转小写，目前提供 `linux/amd64`）。
-PR 只构建和测试；镜像通过隔离数据目录的启动、升级迁移与重启测试后才发布。
+同一工作流也发布桥接镜像 `ghcr.io/<owner>/<repo>-bridges`；本仓库对应 `ghcr.io/un4gt/nast-bridges`。
+PR 只构建和测试；核心镜像通过隔离数据目录的启动、升级迁移与重启测试，桥接镜像通过运行库及许可证检查后才发布。
 工作流使用 `GITHUB_TOKEN`，无需额外配置 Docker 密钥；仓库／组织需允许 Actions 写入 Packages。
 
 - `latest`、`main`：默认 `main` 分支的最新构建。
@@ -175,6 +177,7 @@ nast.toast(msg, "info") / nast.log(...) / nast.json_decode / nast.json_encode
 
 ```bash
 cargo test --workspace   # 17 套件 / 140+ 测试
+cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked
 
 # 端到端冒烟（需先 cargo build；ws 模块路径可用 NAST_WS_MODULE 覆盖）
 node tests/m0_connection_smoke.js    # 连接闭环（secrets/models/custom_url）

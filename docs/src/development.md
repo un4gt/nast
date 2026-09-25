@@ -29,7 +29,7 @@ mdbook serve --open              # 本文档预览（http://localhost:3000）
 1. `src/rpc.rs` dispatch 表加方法名 → handler；
 2. 语义尽量落在 engine/storage crate（可测试），handler 只做参数解析；
 3. 前端 `web/src/rpc.ts` 直接 `rpc.call('方法名', {...})`，无需封装；
-4. 若属 Bridge API（见[桥接](./bridges.md)），同步 nast-bridges 并更新其 README 清单。
+4. 若属 Bridge API（见[桥接](./bridges.md)），在同一提交中同步 `nast-bridges/`，并运行 `cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked`。
 
 ## 文档（本 mdBook）
 

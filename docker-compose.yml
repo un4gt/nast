@@ -4,7 +4,7 @@
 #   1. docker compose up -d --build
 #   2. 浏览器打开 http://127.0.0.1:8000 导入角色卡并配置 API 连接
 #
-# IM 桥接（QQ/Discord/飞书）在独立仓库 nast-bridges，经 nast-net 网络接入。
+# IM 桥接位于同一仓库的 nast-bridges/，经 nast-net 网络接入。
 # 网络显式命名为 nast-net，供 nast-bridges 的 compose external 引用。
 
 services:

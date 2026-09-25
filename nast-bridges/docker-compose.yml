@@ -10,12 +10,10 @@
 # 凭据在各平台独立 volume 中（QQ 扫码缓存重启免扫；Discord/飞书用 env 密钥）。
 
 x-bridge: &bridge
-  image: nast-bridges:local
+  image: ${BRIDGE_IMAGE:-nast-bridges:local}
   build:
     context: .
     dockerfile: Dockerfile
-    additional_contexts:
-      qqbot: ../qqbot-connector
   restart: unless-stopped
   networks: [nast-net]
   environment: &bridge-env

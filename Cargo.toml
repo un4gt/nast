@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["nast-bridges"]
 members = [
     "crates/nast-model",
     "crates/nast-cards",
