@@ -3,11 +3,11 @@
 //! 平台适配器（QQ/Discord/飞书…）只做三件事：
 //! 1. 拿平台凭据并维持平台网关长连接；
 //! 2. 收到消息 → 清洗为纯文本 → 组装 [`InboundMessage`] 调 [`BridgeContext::handle_inbound`]；
-//! 3. 返回的 `Option<String>`（截断好的回复文本）按平台 API 发出去，None 则不回复。
+//! 3. 返回的 `Option<String>`（完整回复文本）按平台 API 发出去，None 则不回复。
 //!
 //! 本层负责：nast WS RPC 客户端（断线重试）、按来源的会话（角色 + 聊天文件）、
 //! 命令层（/help /chars /char /newchat /worlds /world）、自定义命令展开
-//! （settings.power_user.custom_commands）、插件命令透传、生成与截断。
+//! （settings.power_user.custom_commands）、插件命令透传、生成与完成状态。
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ pub struct Config {
     pub nast_server: String,
     /// 默认角色卡文件名（空 = 第一个角色）
     pub avatar: String,
-    /// 回复最大保留字符数
+    /// 平台单条消息的分段字符数（不截断总回复）
     pub max_chars: usize,
     /// 生成超时（秒）：超时后主动 generate.stop 解锁并回复错误
     pub gen_timeout_secs: u64,
@@ -105,7 +105,7 @@ impl NastClient {
         }
     }
 
-    /// 调用 RPC：传输层错误（连接重置/关闭/发送失败）作废连接并整体重试至多 3 次。
+    /// 调用 RPC：建立连接可重试；发送后的传输错误仅允许只读方法重试。
     /// 业务错误（响应里的 error）不重试，直接返回。
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
         let mut last_err = String::new();
@@ -154,7 +154,10 @@ impl NastClient {
                 if !replayable { return Err(format!("请求可能已提交，不自动重发：{last_err}")); }
                 continue;
             }
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+            let rpc_budget = if method.starts_with("generate.") && !matches!(method, "generate.stop" | "generate.status") {
+                params["time_budget_secs"].as_u64().unwrap_or(600).clamp(1,600) + 15
+            } else { 30 };
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(rpc_budget);
             loop {
                 let msg = tokio::select! {
                     m = conn.ws.next() => m,
@@ -197,6 +200,13 @@ impl NastClient {
                     continue;
                 }
                 if let Some(err) = v.get("error") {
+                    let detail = &err["diagnostic"]["detail"];
+                    tracing::warn!(event="bridge_rpc_failed", method, task_id=params["task_id"].as_str().unwrap_or(""),
+                        code=err["code"].as_str().unwrap_or("unknown"),
+                        error_kind=detail["type"].as_str().unwrap_or("unknown"),
+                        http_status=?detail["data"]["status"].as_u64(),
+                        input_tokens=?detail["data"]["input_tokens"].as_i64(),
+                        output_tokens=?detail["data"]["output_tokens"].as_i64(), limit=?detail["data"]["limit"].as_i64());
                     return Err(err
                         .get("message")
                         .and_then(|m| m.as_str())
@@ -226,9 +236,12 @@ pub struct BridgeContext {
 
 impl BridgeContext {
     pub fn new(cfg: Config) -> Arc<Self> {
+        let session_path = std::env::var_os("BRIDGE_SESSIONS_PATH").map(std::path::PathBuf::from).unwrap_or_else(|| "data/bridge-sessions.json".into());
+        Self::with_session_path(cfg, session_path)
+    }
+    pub fn with_session_path(cfg: Config, session_path: std::path::PathBuf) -> Arc<Self> {
         let nast = Arc::new(NastClient::new(cfg.nast_server.clone()));
         let ctrl = Arc::new(NastClient::new(cfg.nast_server.clone()));
-        let session_path = std::env::var_os("BRIDGE_SESSIONS_PATH").map(std::path::PathBuf::from).unwrap_or_else(|| "data/bridge-sessions.json".into());
         let (sessions, session_error) = match read_sessions(&session_path, &cfg.nast_server) {
             Ok(sessions) => (sessions,None), Err(e) => (HashMap::new(),Some(e)),
         };
@@ -241,10 +254,10 @@ impl BridgeContext {
         })
     }
 
-    /// 主入口：命令层 → 会话生成。返回应回复的文本（已截断）；None = 不回复。
+    /// 主入口：命令层 → 会话生成。返回应回复的完整文本；None = 不回复。
     pub async fn handle_inbound(&self, msg: InboundMessage) -> Option<String> {
         let text = msg.text.trim().to_string();
-        tracing::info!("[{}] 收到：{text:?}", msg.source_key);
+        tracing::info!(event="bridge_inbound", source=%msg.source_key, input_chars=text.chars().count(), command=text.starts_with('/'));
         if text.is_empty() {
             return Some("（空消息）".into());
         }
@@ -313,13 +326,9 @@ impl BridgeContext {
         self.generate_reply(&msg.source_key, &text).await
     }
 
-    /// 生成并截断；生成失败返回错误文案（仍回复给用户）。
+    /// Preserve the full result. Platform adapters split messages without discarding text.
     async fn generate_reply(&self, key: &str, text: &str) -> Option<String> {
-        let out = self.generate_reply_raw(key, text).await?;
-        const INCOMPLETE: &str = "\n（未完成：生成中断，已保留部分结果）";
-        if let Some(partial) = out.strip_suffix(INCOMPLETE) {
-            Some(format!("{}{INCOMPLETE}",truncate_chars(partial,self.cfg.max_chars.saturating_sub(INCOMPLETE.chars().count()))))
-        } else { Some(truncate_chars(&out, self.cfg.max_chars)) }
+        self.generate_reply_raw(key, text).await
     }
 
     /// 生成不截断版本：None = 无文本产出（如插件命令被服务端吞掉）。
@@ -334,6 +343,8 @@ impl BridgeContext {
         // 生成 + 超时守卫：超时则经控制通道 generate.stop 中止（释放 nast 的单生成锁）
         let timeout = Duration::from_secs(self.cfg.gen_timeout_secs);
         let task_id = uuid::Uuid::new_v4().to_string();
+        let started = std::time::Instant::now();
+        tracing::info!(event="bridge_generation_started", source=key, task_id, timeout_secs=self.cfg.gen_timeout_secs);
         let gen_fut = self.nast.call(
             "generate.run",
             json!({
@@ -348,7 +359,21 @@ impl BridgeContext {
         match tokio::time::timeout(timeout, gen_fut).await {
             Ok(Ok(r)) => {
                 let mut out = r.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
-                if r["routing"]["status"] == "incomplete" { out.push_str("\n（未完成：生成中断，已保留部分结果）"); }
+                let incomplete = r["routing"]["status"] == "incomplete";
+                tracing::info!(event="bridge_generation_result", source=key, task_id,
+                    status=r["routing"]["status"].as_str().unwrap_or("unknown"),
+                    finish_reason=r["routing"]["finish_reason"].as_str().unwrap_or("unknown"),
+                    error_kind=r["routing"]["error"]["detail"]["type"].as_str().unwrap_or("none"),
+                    text_chars=out.chars().count(), reasoning_chars=r["reasoning"].as_str().unwrap_or("").chars().count(),
+                    elapsed_ms=started.elapsed().as_millis() as u64);
+                if incomplete {
+                    if out.is_empty() && r["reasoning"].as_str().is_some_and(|v|!v.is_empty()) {
+                        out.push_str("仅收到思考内容，已保存在网页聊天记录中。");
+                    }
+                    if r["routing"]["error"]["detail"]["type"] == "output_limit" {
+                        out.push_str("\n（未完成：达到最大输出 Token，请在模型参数中调高最大输出，或在网页续写。）");
+                    } else { out.push_str("\n（未完成：生成中断，已保留部分结果）"); }
+                }
                 if out.is_empty() && text.starts_with('/') {
                     None
                 } else {
@@ -356,17 +381,17 @@ impl BridgeContext {
                 }
             }
             Ok(Err(e)) => {
-                tracing::error!("[{key}] 生成失败：{e}");
+                tracing::error!(event="bridge_generation_failed", source=key, task_id, elapsed_ms=started.elapsed().as_millis() as u64);
                 Some(format!("生成失败：{e}"))
             }
             Err(_) => {
-                tracing::error!(
-                    "[{key}] 生成超时（{}s），发送 generate.stop 中止",
-                    self.cfg.gen_timeout_secs
-                );
+                tracing::error!(event="bridge_generation_timeout", source=key, task_id, timeout_secs=self.cfg.gen_timeout_secs);
                 let ctrl = self.ctrl.clone();
                 tokio::spawn(async move {
-                    let _ = ctrl.call("generate.stop", json!({"task_id":task_id})).await;
+                    match ctrl.call("generate.stop", json!({"task_id":task_id})).await {
+                        Ok(result) => tracing::info!(event="bridge_cancel_result", task_id, cancelled=result["ok"].as_bool().unwrap_or(false)),
+                        Err(_) => tracing::warn!(event="bridge_cancel_failed", task_id),
+                    }
                 });
                 Some(format!("生成超时（超过 {} 秒），已请求中止本次生成，请稍后重试。", self.cfg.gen_timeout_secs))
             }
@@ -692,15 +717,6 @@ impl BridgeContext {
     }
 }
 
-/// 按字符数截断（超长回复保护），保留结尾省略号。
-pub fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{cut}…")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,12 +812,23 @@ mod tests {
         assert!(reply.contains("生成超时"));server.await.unwrap();
     }
 
-    #[test]
-    fn truncates_by_chars() {
-        let s = "很长".repeat(1000);
-        assert_eq!(truncate_chars(&s, 10).chars().count(), 10);
-        assert!(truncate_chars(&s, 10).ends_with('…'));
-        assert_eq!(truncate_chars("短", 10), "短");
+    #[tokio::test]
+    async fn long_and_output_limited_replies_are_not_truncated() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();let address=listener.local_addr().unwrap();
+        let text="完整中文回复🙂".repeat(1000);let original=text.clone();
+        let server=tokio::spawn(async move {
+            let (stream,_)=listener.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+            for limited in [false,true] {
+                let req:Value=serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+                ws.send(Message::Text(json!({"id":req["id"],"result":{"text":text,"routing":{"status":if limited {"incomplete"} else {"complete"},"error":{"detail":{"type":"output_limit"}}}}}).to_string())).await.unwrap();
+            }
+        });
+        let directory=tempfile::tempdir().unwrap();let context=test_context(format!("ws://{address}/ws"),directory.path(),240);
+        let msg=InboundMessage {source_key:"qq-g-1".into(),text:"hello".into()};
+        assert_eq!(context.handle_inbound(msg.clone()).await.unwrap(),original);
+        let limited=context.handle_inbound(msg).await.unwrap();
+        assert!(limited.starts_with(&original));assert!(limited.contains("达到最大输出 Token"));
+        server.await.unwrap();
     }
 
     #[test]

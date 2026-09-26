@@ -25,3 +25,6 @@ credentials.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Bridge reply delivery state
+qq-outbox.json

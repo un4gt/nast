@@ -82,3 +82,16 @@ pub fn count_tokens(text: &str, tokenizer: Tokenizer) -> usize {
         None => text.len() / 4, // 兜底粗估
     }
 }
+
+/// Use the same source mapping during assembly and frozen-request validation.
+pub fn tokenizer_for_source(source: &str, model: &str) -> Tokenizer {
+    resolve_tokenizer(&tokenizer_model_for_source(source, model))
+}
+
+/// Local estimate including message framing and optional name. Native model
+/// tokenizers are approximations; this is not provider-reported usage.
+pub fn count_message_tokens(content: &str, name: Option<&str>, tokenizer: Tokenizer) -> usize {
+    if content.is_empty() { return 0; }
+    count_tokens(content, tokenizer) + 4
+        + name.map_or(0, |name| count_tokens(name, tokenizer) + 1)
+}

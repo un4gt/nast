@@ -17,8 +17,8 @@
 use crate::macros::{evaluate_macros, MacroContext, MacroEnv};
 use crate::tokens::count_tokens;
 use nast_model::preset::{
-    OaiSettings, CC_DUMMY_ID, ID_BIAS, ID_CHAT_HISTORY, ID_ENHANCE,
-    ID_IMPERSONATE, ID_JAILBREAK, ID_MAIN, ID_NSWF, ID_PERSONA, ID_QUIET, ID_SCENARIO,
+    OaiSettings, CC_DUMMY_ID, ID_BIAS, ID_CHAT_HISTORY,
+    ID_IMPERSONATE, ID_JAILBREAK, ID_MAIN, ID_PERSONA, ID_QUIET, ID_SCENARIO,
     ID_WI_AFTER, ID_WI_BEFORE, INJ_ABSOLUTE, INJ_DEFAULT_ORDER,
 };
 
@@ -35,37 +35,9 @@ pub struct PromptMessage {
 }
 
 impl PromptMessage {
-    fn new(role: &str, content: String, identifier: &str, injected: bool) -> Self {
-        let tokens = count_tokens(&content, crate::tokens::resolve_tokenizer("gpt-4o")) as i64;
-        Self {
-            role: role.to_string(),
-            content,
-            name: None,
-            identifier: identifier.to_string(),
-            injected,
-            tokens,
-        }
-    }
-
-    /// 按来源选择 tokenizer 计数（D10：TokenHandler 语义）。
-    fn new_with_tok(
-        role: &str,
-        content: String,
-        identifier: &str,
-        injected: bool,
-        source: &str,
-        model: &str,
-    ) -> Self {
-        let model = crate::tokens::tokenizer_model_for_source(source, model);
-        let tokens = count_tokens(&content, crate::tokens::resolve_tokenizer(&model)) as i64;
-        Self {
-            role: role.to_string(),
-            content,
-            name: None,
-            identifier: identifier.to_string(),
-            injected,
-            tokens,
-        }
+    fn new(role: &str, content: String, identifier: &str, injected: bool, tokenizer: crate::tokens::Tokenizer) -> Self {
+        let tokens = crate::tokens::count_message_tokens(&content, None, tokenizer) as i64;
+        Self { role: role.into(), content, name: None, identifier: identifier.into(), injected, tokens }
     }
 }
 
@@ -150,7 +122,12 @@ pub struct AssembleOutput {
 /// 主入口：等价 prepareOpenAIMessages。
 pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     let oai = input.oai;
-    let budget: i64 = oai.openai_max_context - oai.openai_max_tokens;
+    let budget: i64 = oai.openai_max_context.saturating_sub(oai.openai_max_tokens);
+    let tokenizer = crate::tokens::tokenizer_for_source(&oai.chat_completion_source, &oai.openai_model);
+    let message = |role: &str, content: String, identifier: &str, injected| {
+        PromptMessage::new(role, content, identifier, injected, tokenizer)
+    };
+    let message_tokens = |text: &str| crate::tokens::count_message_tokens(text, None, tokenizer) as i64;
     let mut error = None;
 
     // ---------- preparePromptsForChatCompletion：构建 systemPrompts 并合并用户顺序 ----------
@@ -292,13 +269,13 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         if let Some(item) = collection.iter().find(|c| c.identifier == ID_IMPERSONATE) {
             let text = substitute(&item.content, input);
             if !text.is_empty() {
-                control.push(PromptMessage::new(&item.role, text, ID_IMPERSONATE, false));
+                control.push(message(&item.role, text, ID_IMPERSONATE, false));
             }
         }
     }
     if let Some(item) = collection.iter().find(|c| c.identifier == ID_QUIET) {
         if !item.content.is_empty() {
-            control.push(PromptMessage::new(&item.role, item.content.clone(), ID_QUIET, false));
+            control.push(message(&item.role, item.content.clone(), ID_QUIET, false));
         }
     }
     let control_tokens: i64 = control.iter().map(|m| m.tokens).sum();
@@ -317,12 +294,12 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         } else {
             String::new()
         };
-        let content = [prefill, chat_message.content.clone()]
+        let content = [prefill, input.cycle_prompt.clone().unwrap_or(chat_message.content.clone())]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let msg = PromptMessage::new(&chat_message.role, content, "continuePrefill", false);
+        let msg = message(&chat_message.role, content, "continuePrefill", false);
         reserved += msg.tokens;
         // 插在 quiet 之前（"Add all further control prompts BEFORE this prompt"）
         let quiet_pos = control
@@ -363,11 +340,11 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     } else {
         substitute(&oai.new_chat_prompt, input)
     };
-    let new_chat_tokens = tok_for(&new_chat_text, &oai.chat_completion_source, &oai.openai_model);
+    let new_chat_tokens = message_tokens(&new_chat_text);
     reserved += new_chat_tokens;
 
     let group_nudge_tokens = if input.is_group && input.generation_type != "impersonate" {
-        let t = tok_for(&group_nudge, &oai.chat_completion_source, &oai.openai_model);
+        let t = message_tokens(&group_nudge);
         reserved += t;
         t
     } else {
@@ -398,20 +375,20 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
             substitute_dyn(&oai.continue_nudge_prompt, &[("lastChatMessage", &last_text)], input);
         reserved += continued
             .as_ref()
-            .map(|m| tok_for(&m.content, &oai.chat_completion_source, &oai.openai_model))
+            .map(|m| message_tokens(&m.content))
             .unwrap_or(0)
-            + tok_for(&nudge_text, &oai.chat_completion_source, &oai.openai_model);
+            + message_tokens(&nudge_text);
         if let Some(c) = continued {
-            continue_nudge_tail.push(PromptMessage::new(&c.role, c.content, "continueNudge", false));
+            continue_nudge_tail.push(message(&c.role, c.content, "continueNudge", false));
         }
-        continue_nudge_tail.push(PromptMessage::new("system", nudge_text, "continueNudge", false));
+        continue_nudge_tail.push(message("system", nudge_text, "continueNudge", false));
     }
 
     // send_if_empty：最后一条是 assistant 且设置非空 → user 占位
     let mut send_if_empty_msg: Option<PromptMessage> = None;
     if let Some(last) = messages.last() {
         if last.role == "assistant" && !oai.send_if_empty.is_empty() {
-            send_if_empty_msg = Some(PromptMessage::new(
+            send_if_empty_msg = Some(message(
                 "user",
                 oai.send_if_empty.clone(),
                 "emptyUserMessageReplacement",
@@ -420,24 +397,83 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         }
     }
 
+    // Fixed prompts and newest user content must not lose their budget to old history.
+    if let Some(m) = &send_if_empty_msg { reserved += m.tokens; }
+    // AN 相对注入（position 0/2）：预留预算，order 放置后相对 main 插入
+    let an_msg: Option<PromptMessage> = input.authors_note.as_ref().and_then(|an| {
+        if an.text.trim().is_empty() {
+            return None;
+        }
+        Some(message(
+            "system",
+            an.text.clone(),
+            "authorsNote",
+            false,
+        ))
+    });
+    if let Some(m) = &an_msg {
+        reserved += m.tokens;
+    }
+
+    let newest = messages.iter().rposition(|m| !m.injected && !m.content.is_empty());
+    let newest_tokens = newest.map_or(0, |i| {
+        messages[i..].iter().map(|m| crate::tokens::count_message_tokens(&m.content, m.name.as_deref(), tokenizer) as i64).sum()
+    });
+    let mut relative = std::collections::HashMap::new();
+    let mut relative_order = Vec::new();
+    for (index, item) in collection.iter().enumerate() {
+        if (!item.enabled && item.identifier != ID_MAIN) || item.injection_position == INJ_ABSOLUTE
+            || matches!(item.identifier.as_str(), ID_CHAT_HISTORY | ID_IMPERSONATE | ID_QUIET | "groupNudge") {
+            continue;
+        }
+        let content = dynamic.get(&item.identifier).map(|(_, s)| s.clone())
+            .unwrap_or_else(|| substitute(&item.content, input));
+        let msg = message(&item.role, content, &item.identifier, false);
+        relative_order.push(index);
+        relative.insert(index, msg);
+    }
+    // main is mandatory even if a custom prompt order puts it after history.
+    relative_order.sort_by_key(|index| collection[*index].identifier != ID_MAIN);
+    for id in relative_order {
+        let cost = relative[&id].tokens;
+        if reserved + newest_tokens + cost <= budget {
+            reserved += cost;
+        } else if collection[id].identifier == ID_MAIN {
+            return AssembleOutput { chat: vec![], token_counts: vec![], error: Some(format!(
+                "固定提示词和最新消息需要约 {} 个输入 Token，预留输出 {}，可用输入预算 {}；请减少提示词/最新消息或调整模型参数。",
+                reserved + newest_tokens + cost, oai.openai_max_tokens, budget)) };
+        } else {
+            relative.remove(&id);
+        }
+    }
+    if reserved + newest_tokens > budget {
+        return AssembleOutput { chat: vec![], token_counts: vec![], error: Some(format!(
+            "固定提示词和最新消息需要约 {} 个输入 Token，预留输出 {}，可用输入预算 {}；请减少提示词/最新消息或调整模型参数。",
+            reserved + newest_tokens, oai.openai_max_tokens, budget)) };
+    }
     // 历史填充：倒序（新→旧），首条塞不下即 break；insertAtStart → 最终旧→新
     let mut history: Vec<PromptMessage> = Vec::new();
-    for m in messages.iter().rev() {
-        let mut msg = PromptMessage::new(&m.role, m.content.clone(), "chatHistory", false);
+    for (index, m) in messages.iter().enumerate().rev() {
+        let mut msg = message(&m.role, m.content.clone(), "chatHistory", false);
         msg.name = m.name.clone(); // COMPLETION names_behavior
+        msg.injected = m.injected;
+        msg.tokens = crate::tokens::count_message_tokens(&msg.content, msg.name.as_deref(), tokenizer) as i64;
         if reserved + msg.tokens > budget {
+            if newest.is_some_and(|i| index >= i) {
+                return AssembleOutput { chat: vec![], token_counts: vec![], error: Some(format!(
+                    "最新消息及深度注入超过可用输入预算（已用约 {}，当前消息 {}，可用 {} Token）；请减少提示词或调整模型参数。",
+                    reserved, msg.tokens, budget)) };
+            }
             break;
         }
         reserved += msg.tokens;
         history.insert(0, msg);
     }
-    // new chat 无条件插最前 + freeBudget
-    reserved -= new_chat_tokens;
-    history.insert(0, PromptMessage::new("system", new_chat_text.clone(), "newMainChat", false));
+    // new chat 无条件插最前；已预留预算仍计入最终消息。
+    history.insert(0, message("system", new_chat_text.clone(), "newMainChat", false));
 
     if input.is_group && input.generation_type != "impersonate" && group_nudge_tokens > 0 {
-        reserved -= group_nudge_tokens;
-        history.push(PromptMessage::new("system", group_nudge.clone(), "groupNudge", false));
+        history.push(message("system", group_nudge.clone(), "groupNudge", false));
     }
     // send_if_empty 在 newMainChat 之后（JS: 先 insert 到空 chatHistory 首位，
     // 再 insertAtStart(newChat) 覆盖其上）
@@ -448,19 +484,19 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     // 对话示例：all-or-nothing per block，全部 system 角色
     let mut examples: Vec<PromptMessage> = Vec::new();
     for (bi, block) in input.message_examples.iter().enumerate() {
-        let mut block_msgs = vec![PromptMessage::new(
+        let mut block_msgs = vec![message(
             "system",
             substitute(&oai.new_example_prompt, input),
             &format!("example-{bi}"),
             false,
         )];
-        let mut block_tokens = tok_for(&oai.new_example_prompt, &oai.chat_completion_source, &oai.openai_model);
+        let mut block_tokens = block_msgs[0].tokens;
         for (_role, name, content) in &block.messages {
             let mut text = content.clone();
             if input.is_group {
                 text = format!("{name}: {text}");
             }
-            let msg = PromptMessage::new("system", text, "example-msg", false);
+            let msg = message("system", text, "example-msg", false);
             block_tokens += msg.tokens;
             block_msgs.push(msg);
         }
@@ -472,27 +508,9 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         }
     }
 
-    // AN 相对注入（position 0/2）：预留预算，order 放置后相对 main 插入
-    let an_msg: Option<PromptMessage> = input.authors_note.as_ref().and_then(|an| {
-        if an.text.trim().is_empty() {
-            return None;
-        }
-        Some(PromptMessage::new_with_tok(
-            "system",
-            an.text.clone(),
-            "authorsNote",
-            false,
-            &oai.chat_completion_source,
-            &oai.openai_model,
-        ))
-    });
-    if let Some(m) = &an_msg {
-        reserved += m.tokens;
-    }
-
     // ---------- 按 prompt_order 顺序放置（= JS add(collection, index) flatten） ----------
     let mut chat: Vec<PromptMessage> = Vec::new();
-    for item in &collection {
+    for (index, item) in collection.iter().enumerate() {
         if !item.enabled && item.identifier != ID_MAIN {
             continue;
         }
@@ -506,51 +524,11 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
         ) {
             continue;
         }
-        // 动态内容优先（marker 填充），否则静态内容 + preparePrompt 宏替换
-        let content = if let Some((_, dyn_content)) = dynamic.get(&item.identifier) {
-            dyn_content.clone()
-        } else {
-            substitute(&item.content, input)
-        };
         if item.identifier == ID_CHAT_HISTORY {
             chat.extend(examples.iter().cloned());
             chat.extend(history.iter().cloned());
-            continue;
-        }
-        let is_known = matches!(
-            item.identifier.as_str(),
-            ID_MAIN
-                | ID_WI_BEFORE
-                | ID_WI_AFTER
-                | "charDescription"
-                | "charPersonality"
-                | ID_SCENARIO
-                | ID_PERSONA
-                | ID_NSWF
-                | ID_JAILBREAK
-                | ID_ENHANCE
-                | ID_BIAS
-        );
-        if is_known {
-            if !content.is_empty() || item.identifier == ID_MAIN {
-                let msg = PromptMessage::new_with_tok(&item.role, content, &item.identifier, false, &oai.chat_completion_source, &oai.openai_model);
-                // 预算检查：main 强制（超限报错，对应 JS TokenBudgetExceededError），
-                // 其余塞不下跳过（JS insert() 的 canAfford 检查）
-                if reserved + msg.tokens <= budget {
-                    reserved += msg.tokens;
-                    chat.push(msg);
-                } else if item.identifier == ID_MAIN {
-                    error = Some("Mandatory prompts exceed the context size.".into());
-                    return AssembleOutput { chat: vec![], token_counts: vec![], error };
-                }
-            }
-        } else if !content.is_empty() {
-            // 用户自定义相对项
-            let msg = PromptMessage::new_with_tok(&item.role, content, &item.identifier, false, &oai.chat_completion_source, &oai.openai_model);
-            if reserved + msg.tokens <= budget {
-                reserved += msg.tokens;
-                chat.push(msg);
-            }
+        } else if let Some(msg) = relative.remove(&index) {
+            chat.push(msg);
         }
     }
 
@@ -585,6 +563,13 @@ pub fn assemble(input: &AssembleInput) -> AssembleOutput {
     // getChat：丢弃空内容
     chat.retain(|m| !m.content.is_empty());
 
+    for msg in &mut chat {
+        msg.tokens = crate::tokens::count_message_tokens(&msg.content, msg.name.as_deref(), tokenizer) as i64;
+    }
+    let total = chat.iter().map(|m| m.tokens).sum::<i64>() + 3;
+    if total > budget {
+        error = Some(format!("拼装后输入约 {total} Token，预留输出 {}，上下文上限 {}；请调整模型参数。", oai.openai_max_tokens, oai.openai_max_context));
+    }
     let token_counts: Vec<i64> = chat.iter().map(|m| m.tokens).collect();
     AssembleOutput { chat, token_counts, error }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { v4 as uuidv4 } from 'uuid';
 import { Pencil, Plus, Play, Trash2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -44,7 +45,7 @@ interface RegexScript {
 
 function newScript(): RegexScript {
   return {
-    id: crypto.randomUUID?.() ?? `re-${Date.now()}`,
+    id: uuidv4(),
     script_name: '新脚本',
     find_regex: 'pattern',
     replace_string: '',

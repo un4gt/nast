@@ -100,3 +100,9 @@ python tests/parity/container_migration.py --image nast:model-routing-test
 ```
 
 脚本只创建独立临时数据目录和随机名称的测试容器，退出后移除该测试容器，保留备份与报告。它验证原文件逐字节备份、密钥迁移以及重启后目录不变。
+
+## 模型添加与 QQ 长回复修复验收
+
+参见 [测试目录说明](https://github.com/un4gt/nast/tree/main/tests/parity#模型添加与普通-http)。运行 `tests/parity/model_setup.py` 验证真实非安全 HTTP 下的登录、模型表单、参数请求与首条聊天；运行 `tests/parity/routing.py` 验证三协议 Token 用尽的未完成状态和结构化日志。QQ 心跳及分段 HTTP 发送由桥接工作区测试覆盖，不使用真实账号。
+
+本轮本地结果：HTTP E2E 四组主题／宽度通过，路由验收 24 组通过，角色卡、内嵌书、世界书、宏和群聊完整差分回归 240 项通过且无浏览器异常。QQ 字符无损分段、待发尾部恢复及慢生成心跳的本地集成测试通过。

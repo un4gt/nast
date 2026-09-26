@@ -107,13 +107,13 @@ docker compose ps -a
 | `BRIDGE_NAST_SERVER` | 同 Docker 网络使用 `ws://nast:8000/ws`；远程部署使用实际域名的 `wss://…/ws` |
 | `BRIDGE_NAST_TOKEN` | 与 NAST 的 `NAST_BRIDGE_TOKEN` 一致；在握手请求头传递，不放 URL |
 | `BRIDGE_AVATAR` | 默认角色文件名；空值使用第一个角色 |
-| `BRIDGE_MAX_CHARS` | 回复截断长度，默认 1500；部分生成仍保留未完成提示 |
+| `BRIDGE_MAX_CHARS` | 单条分段长度，默认 1500（128–1500）；完整回复保留，超出 QQ 回复配额用 `/more` 查看 |
 | `BRIDGE_GEN_TIMEOUT_SECS` | 默认 240 秒；扣除收尾时间传给 NAST，超时只取消匹配任务 ID |
 | `BRIDGE_SESSIONS_PATH` | 裸跑默认 `data/bridge-sessions.json`；Compose 固定 `/data/bridge-sessions.json` |
 | `network nast-net declared as external, but could not be found` | 先启动 NAST Compose，或创建并把 NAST 加入同名网络 |
 | 401／认证失败 | 检查双方令牌和版本；更改环境变量后重新创建两个容器 |
 | 连接拒绝 | 确认 NAST 已启动；桥接容器中的 `127.0.0.1` 指向桥接自身 |
-| 没有角色／模型不可用 | 在网页导入角色并配置可用线路，可用 `/chars`、`/char`、`/model info` 检查 |
+| 没有角色／模型不可用 | 在网页导入角色并配置可用模型，可用 `/chars`、`/char`、`/model info` 检查 |
 | Discord／飞书容器反复退出 | 当前是占位实现，请停止该服务；配置 Token 无法解决 |
 | 重启后要重新扫码 | 确认 `qq-creds` 卷仍在，不要用 `docker compose down -v` 删除凭据和会话 |
 
@@ -122,3 +122,7 @@ docker compose ps -a
 ## 新增平台适配器
 
 适配器负责平台认证、网关长连接及消息收发：收到消息后调用 `BridgeContext::handle_inbound(InboundMessage)`，再把结果回复给平台。公共层统一负责 NAST 认证、来源会话、`/model` 等命令和生成取消。新增平台应使用唯一的来源键前缀及独立会话卷。
+
+## QQ 长回复与排错
+
+回复现在完整分段发送；超过单次被动回复配额时，用 `/more` 查看持久化的剩余内容。慢生成不再阻塞 QQ 网关心跳。日志默认记录 task_id、结束原因和每段发送结果，具体命令及字段见 [模型与 QQ 排错文档](guide/connection.md#qq-长回复与日志排错)。

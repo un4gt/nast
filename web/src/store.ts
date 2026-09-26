@@ -249,7 +249,11 @@ export const useStore = create<AppState>((set, get) => ({
 
   selectCharacter: async (avatar) => {
     const chatList = await rpc.call<string[]>('characters.chats', { avatar });
-    const activeChatName = chatList.length ? chatList[chatList.length - 1] : null;
+    if (!chatList.length) {
+      await get().newChat(avatar);
+      return;
+    }
+    const activeChatName = chatList[chatList.length - 1];
     let messages: ChatMessage[] = [];
     let chatMetadata: ChatMetadata | null = null;
     if (activeChatName) {

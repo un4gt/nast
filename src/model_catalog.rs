@@ -38,6 +38,7 @@ pub struct RouteConfig {
     pub endpoint: String,
     pub credential_ref: Option<String>,
     pub context_limit: Option<i64>,
+    pub input_limit: Option<i64>,
     pub output_limit: Option<i64>,
     pub connect_timeout_secs: u64,
     pub first_token_timeout_secs: u64,
@@ -52,6 +53,7 @@ impl Default for RouteConfig {
             endpoint: String::new(),
             credential_ref: None,
             context_limit: None,
+            input_limit: None,
             output_limit: None,
             connect_timeout_secs: 10,
             first_token_timeout_secs: 60,
@@ -71,6 +73,64 @@ pub fn protected(key: &str) -> bool {
         "model" | "messages" | "stream" | "contents" | "system" | "systemInstruction"
     )
 }
+/// Validate explicit budgets at save time and the effective output again before sending.
+/// Omitted limits inherit the active preset, so that relationship is checked at runtime.
+pub fn validate_parameters(route: &Route, effective_output: Option<i64>) -> Result<(), String> {
+    let params = &route.config.parameters;
+    let get = |key: &str| params.get(key).filter(|_| !route.config.remove_parameters.iter().any(|k| k == key));
+    let explicit = if route.protocol == "gemini" {
+        get("generationConfig").and_then(|v| v.get("maxOutputTokens"))
+    } else if route.protocol == "openai" {
+        get("max_completion_tokens").or_else(|| get("max_tokens"))
+    } else {
+        get("max_tokens")
+    };
+    let output = match explicit {
+        Some(value) => Some(value.as_i64().filter(|v| *v > 0).ok_or("最大输出 Token 必须为正整数")?),
+        None => effective_output,
+    };
+    if let Some(output) = output {
+        if output <= 0 || route.config.output_limit.is_some_and(|limit| output > limit) {
+            return Err("最大输出超过模型配置的输出限制".into());
+        }
+        if route.config.context_limit.is_some_and(|limit| output >= limit) {
+            return Err("最大输出必须小于上下文窗口，为输入留出空间".into());
+        }
+    }
+    if route.protocol == "anthropic" {
+        if let Some(thinking) = get("thinking") {
+            match thinking["type"].as_str() {
+                Some("enabled") => {
+                    let budget = thinking["budget_tokens"].as_i64().filter(|v| *v >= 1024)
+                        .ok_or("Anthropic 思考预算必须为至少 1024 的整数")?;
+                    if output.or(route.config.output_limit).is_some_and(|limit| budget >= limit) {
+                        return Err("Anthropic 思考预算必须小于最大输出 Token".into());
+                    }
+                }
+                Some("adaptive" | "disabled") => {
+                    if thinking.get("budget_tokens").is_some() {
+                        return Err("仅指定思考预算模式可设置 budget_tokens".into());
+                    }
+                }
+                _ => return Err("无效的 Anthropic 思考方式".into()),
+            }
+        }
+    }
+    if route.protocol == "gemini" {
+        if let Some(thinking) = get("generationConfig").and_then(|v| v.get("thinkingConfig")) {
+            if let Some(budget) = thinking.get("thinkingBudget") {
+                if budget.as_i64().is_none_or(|v| v < -1) {
+                    return Err("Gemini 思考预算须为非负整数，或用 -1 表示自动".into());
+                }
+                if thinking.get("thinkingLevel").is_some() {
+                    return Err("Gemini 思考级别与思考预算不能同时设置".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Catalog {
     pub fn validate(&self) -> Result<(), String> {
         let mut ids = HashSet::new();
@@ -100,6 +160,7 @@ impl Catalog {
                     return Err("请填写上游模型 ID".into());
                 }
                 if r.config.context_limit.is_some_and(|v| v <= 0)
+                    || r.config.input_limit.is_some_and(|v| v <= 0)
                     || r.config.output_limit.is_some_and(|v| v <= 0)
                     || [
                         r.config.connect_timeout_secs,
@@ -111,6 +172,10 @@ impl Catalog {
                 {
                     return Err("限制与超时须为正数，超时最多 600 秒".into());
                 }
+                if r.config.context_limit.zip(r.config.output_limit).is_some_and(|(context, output)| output >= context) {
+                    return Err("最大输出必须小于上下文窗口，为输入留出空间".into());
+                }
+                validate_parameters(r, None)?;
                 for k in r
                     .config
                     .parameters

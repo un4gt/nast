@@ -353,3 +353,9 @@ TTS 这次按已存在的源码能力计入，不再列为“没有 TTS”。Kok
 [s-connections]: ../refrence/SillyTavern/public/scripts/extensions/connection-manager/index.js
 [s-backups]: ../refrence/SillyTavern/src/endpoints/backups.js
 [s-users]: ../refrence/SillyTavern/src/endpoints/users-private.js
+
+## 2026-09-27 模型设置与 QQ 截断修复回归
+
+本轮完整运行 `tests/parity/run.py --stage all --skip-build`，240 项检查通过且无浏览器异常：角色卡、内嵌书、世界书、宏、群聊、管理与 UI 检查全部通过。模型专属输入／输出预算仅在配置时改变请求；未配置时原有 ST 差分请求、状态和回复保持通过。新角色首次选择会创建首个聊天，以便立即绑定模型并发送消息。具体改动以本节所在提交为准。
+
+补充上下文预算修复：历史和系统提示使用同一 tokenizer 映射，预留消息包装、名字及固定提示词；旧历史按预算裁剪，最新消息无法容纳时明确报错。新增长中文／自定义模型名三协议回归、宏只执行一次和 Anthropic 续写不重复正文检查。备用连接继续校验冻结请求，不重新执行宏或裁剪。

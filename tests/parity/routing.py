@@ -178,6 +178,21 @@ async def main():
                 current=await new();server.plans[protocol]=[{'stream_error':'overloaded_error' if protocol=='anthropic' else 'UNAVAILABLE'}]
                 start=len(server.captures);await generate(current);assert len(server.captures)-start==2
             passed('protocols/native-endpoints-json-stream-reasoning-native-temporary-errors')
+            for protocol, reason in [('openai','length'),('anthropic','max_tokens'),('gemini','MAX_TOKENS')]:
+                await configure([route('limit',protocol),route('unused')])
+                for streaming in [False,True]:
+                    settings['oai_settings']['stream_openai']=streaming
+                    await call('settings.save',settings=settings)
+                    current=await new();server.plans['limit']=[{'finish_reason':reason}];start=len(server.captures)
+                    result=await generate(current,task_id='output-limit-'+protocol+'-'+str(streaming))
+                    assert result['routing']['status']=='incomplete'
+                    assert result['routing']['finish_reason']==reason
+                    assert result['routing']['error']['detail']['type']=='output_limit'
+                    assert len(server.captures)==start+1 and result['text']
+                    assert 'active_route' not in await selection(current)
+                    assert (await lines(current))[-1]['extra']['nast_model']['status']=='incomplete'
+            passed('protocols/output-limit-json-and-stream-retains-text-without-failover')
+
 
             await configure([route('a'),route('b')])
             current=await new()
@@ -233,12 +248,48 @@ async def main():
             assert [x['route'] for x in server.captures[start:]]==['c','c','a','a','b','b','b','a']
             passed('groups/priority-after-sticky-route-changes-between-members')
 
+            # Long Chinese conversations must be cropped with the same estimate used at send time.
+            for protocol in ['openai','anthropic','gemini']:
+                bounded=route('budget',protocol)
+                bounded['upstream_model']='family-chat-v1'  # unknown/custom model alias
+                bounded['config'].update(context_limit=1536,input_limit=1250,output_limit=128)
+                await configure([bounded])
+                current=await new();seed=await lines(current)
+                for i in range(80):
+                    seed.append({'name':'User' if i%2==0 else 'RouterActor','is_user':i%2==0,
+                                 'mes':f'历史记录{i}：'+('妈妈，今天上课好无聊，终于下课了。😊'*8),
+                                 'send_date':'2026-09-26T10:00:00Z','is_system':False})
+                await call('chats.save',avatar=avatar,file_name=current,chat=seed,force=True)
+                start=len(server.captures)
+                result=await call('generate.run',avatar=avatar,chat_file=current,user_message='最新问题保留标记：今天晚餐吃什么？')
+                assert result['routing']['status']=='complete' and len(server.captures)==start+1
+                body=json.dumps(server.captures[-1]['body'],ensure_ascii=False)
+                assert '最新问题保留标记' in body and '历史记录0：' not in body
+                assert '历史记录79：' in body
+                if protocol=='anthropic':
+                    settings['oai_settings']['continue_prefill']=True
+                    await call('settings.save',settings=settings)
+                    prior=result['text']
+                    result=await generate(current,type='continue')
+                    assert result['routing']['status']=='complete'
+                    messages=server.captures[-1]['body']['messages']
+                    assert sum(json.dumps(m,ensure_ascii=False).count(prior) for m in messages)==1
+                    settings['oai_settings']['continue_prefill']=False
+                    await call('settings.save',settings=settings)
+            passed('budget/long-chinese-custom-alias-three-protocols-and-single-prefill')
+
             # Preserve request semantics when fallback has a smaller context or unsupported capabilities.
-            smaller=route('b');smaller['config']['context_limit']=1
+            smaller=route('b');smaller['config']['context_limit']=129;smaller['config']['output_limit']=128
             await configure([route('a'),smaller]);current=await new();server.plans['a']=[{'status':503}]*2;start=len(server.captures)
             error=await fails('generate.run',avatar=avatar,chat_file=current,user_message='context')
-            assert 'context limit' in error and len(server.captures)-start==2
+            assert '上下文上限' in error and '估算输入' in error and '预留输出' in error and len(server.captures)-start==2
             passed('routing/fallback-context-validation-no-retrim')
+            smaller=route('b');smaller['config']['input_limit']=1
+            await configure([route('a'),smaller]);current=await new();server.plans['a']=[{'status':503}]*2;start=len(server.captures)
+            error=await fails('generate.run',avatar=avatar,chat_file=current,user_message='input budget')
+            assert '最大输入' in error and len(server.captures)-start==2
+            passed('routing/fallback-input-limit-no-retrim')
+
             await configure([route('a'),route('b')],{'a':'frozen-a','b':'frozen-b'})
             current=await new();server.plans['a']=[{'status':503,'retry_after':3},{'status':503}];start=len(server.captures)
             task=asyncio.create_task(generate(current))
@@ -279,6 +330,11 @@ async def main():
             from model_ui import check_models_ui
             await check_models_ui(page,artifact,'RouterActor')
             passed('ui/model-selector-keyboard-themes-narrow-draft-conflict')
+            logs=(artifact/'server.log').read_text(encoding='utf-8')
+            assert 'generation_attempt' in logs and 'generation_finished' in logs and 'generation_backoff' in logs
+            assert 'output-limit-openai-True' in logs and 'output_limit' in logs
+            assert 'key-a' not in logs and 'frozen-b' not in logs and 'legacy-secret' not in logs
+            passed('observability/task-retry-finish-reason-and-secret-free-logs')
             await browser.close()
             corrupt_root=artifact/'corrupt-data';corrupt_user=corrupt_root/'default-user';corrupt_user.mkdir(parents=True)
             (corrupt_user/'secrets.json').write_bytes(b'{broken-secret-file')

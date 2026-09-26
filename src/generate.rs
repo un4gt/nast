@@ -212,7 +212,7 @@ impl<'a> GenerateSession<'a> {
             if use_prefill { crate::prompt_bridge::assemble_continue_prefill(&self.oai, &input, &prior.mes, "assistant") }
             else { crate::prompt_bridge::assemble_continue_nudge(&self.oai, &input, &prior.mes) }
         } else { crate::prompt_bridge::assemble_with_macros(&self.oai, &input) };
-        if let Some(error) = &assembled.error { return Err(error.clone()); }
+        self.check_prompt(&assembled)?;
         // 插件钩子：prompt_built 可整体重写拼装消息
         let assembled = apply_prompt_plugin(self.plugins, assembled);
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
@@ -240,7 +240,8 @@ impl<'a> GenerateSession<'a> {
             max_tokens: self.oai.openai_max_tokens,
             stop: self.stopping_strings(&input.name1, &char_name, 4),
             stream: self.oai.stream_openai,
-            assistant_prefill: if use_prefill { prior.map(|message| format!("{}{}", message.mes, self.oai.continue_postfix)) } else { None },
+            // The assembler already put the continuation in its final assistant message.
+            assistant_prefill: None,
             use_sysprompt: true,
             extra_headers: crate::connection::extra_headers(&self.oai),
             extra_body: crate::connection::extra_body(&self.oai),
@@ -293,6 +294,10 @@ impl<'a> GenerateSession<'a> {
             &self.stopping_strings(&input.name1, &char_name, 0),
             &scripts_for_cleanup,
         );
+        if cleaned.chars().count() != streamed.chars().count() {
+            tracing::info!(event="generation_text_processed", task_id=%self.routing.task_id,
+                before_chars=streamed.chars().count(), after_chars=cleaned.chars().count());
+        }
         let streamed = cleaned;
 
         // 正则 display pass（markdownOnly 脚本生效）→ extra.display_text
@@ -464,7 +469,7 @@ impl<'a> GenerateSession<'a> {
             crate::prompt_bridge::substitute_basic(&self.oai.impersonation_prompt, &input.name1, &p.character.name)
         };
         let assembled = crate::prompt_bridge::assemble_impersonate(&self.oai, &input, &impersonation_prompt);
-        if let Some(error) = &assembled.error { return Err(error.clone()); }
+        self.check_prompt(&assembled)?;
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
@@ -502,7 +507,7 @@ impl<'a> GenerateSession<'a> {
             .collect();
         let input = self.build_assemble_input(p, &history);
         let assembled = crate::prompt_bridge::assemble_quiet(&self.oai, &input, &p.user_message);
-        if let Some(error) = &assembled.error { return Err(error.clone()); }
+        self.check_prompt(&assembled)?;
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
@@ -978,12 +983,23 @@ impl<'a> GenerateSession<'a> {
         }
     }
 
+    fn check_prompt(&self, assembled: &AssembleOutput) -> Result<(), String> {
+        if let Some(error) = &assembled.error {
+            // Assembly errors contain budget counts only, never prompt content.
+            tracing::warn!(event="generation_prompt_rejected", task_id=%self.routing.task_id,
+                logical_model=%self.routing.model_id, max_output=self.oai.openai_max_tokens,
+                context_limit=self.oai.openai_max_context, reason=%error);
+            return Err(error.clone());
+        }
+        Ok(())
+    }
+
     pub async fn call_provider(
         &self,
         assembled: &AssembleOutput,
         prefill: Option<&str>,
     ) -> Result<crate::routing::Outcome, String> {
-        if let Some(error) = &assembled.error { return Err(error.clone()); }
+        self.check_prompt(&assembled)?;
         let provider_msgs: Vec<ProviderMessage> = assembled
             .chat
             .iter()

@@ -7,6 +7,8 @@
 //! 环境变量：BRIDGE_QQ_CRED_FILE（默认 ./qqbot-credentials.json）；
 //! 其余公共配置见 bridge-core::Config::from_env。
 
+mod delivery;
+use tracing::Instrument;
 use bridge_core::{BridgeContext, Config, InboundMessage};
 use futures_util::{SinkExt, StreamExt};
 use qqbot_connector::{ConnectOptions, Credentials, FileStore};
@@ -15,6 +17,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
+
+struct DeliveryState {
+    outbox: Mutex<delivery::Outbox>,
+    busy: tokio::sync::Mutex<()>,
+    seen: Mutex<std::collections::VecDeque<String>>,
+}
+impl DeliveryState {
+    fn first_delivery(&self, message: &str) -> bool {
+        let mut seen=self.seen.lock().unwrap();
+        if seen.iter().any(|id|id==message) { return false; }
+        seen.push_back(message.into());
+        if seen.len()>1024 { seen.pop_front(); }
+        true
+    }
+}
 
 const GATEWAY_URL: &str = "wss://api.sgroup.qq.com/websocket";
 const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
@@ -37,6 +54,7 @@ fn http_agent() -> &'static ureq::Agent {
 // ---------- access token 管理 ----------
 
 struct TokenManager {
+    api_base: String,
     creds: Credentials,
     token: Mutex<TokenState>,
 }
@@ -51,6 +69,7 @@ struct TokenState {
 impl TokenManager {
     fn new(creds: Credentials) -> Self {
         Self {
+            api_base: API_BASE.into(),
             creds,
             token: Mutex::new(TokenState {
                 access_token: String::new(),
@@ -163,11 +182,11 @@ fn send_reply_blocking(
     let access_token = token.get_blocking()?;
     let (url, body) = match target {
         ReplyTarget::Group(group_openid) => (
-            format!("{API_BASE}/v2/groups/{group_openid}/messages"),
+            format!("{}/v2/groups/{group_openid}/messages",token.api_base),
             json!({"content": content, "msg_type": 0, "msg_id": msg_id, "msg_seq": seq}),
         ),
         ReplyTarget::C2C(openid) => (
-            format!("{API_BASE}/v2/users/{openid}/messages"),
+            format!("{}/v2/users/{openid}/messages",token.api_base),
             json!({"content": content, "msg_type": 0, "msg_id": msg_id, "msg_seq": seq}),
         ),
     };
@@ -181,7 +200,9 @@ fn send_reply_blocking(
     let status = resp.status().as_u16();
     let text = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
     if status != 200 && status != 201 && status != 204 {
-        return Err(format!("reply http {status}: {text}"));
+        let value:Value=serde_json::from_str(&text).unwrap_or(Value::Null);
+        let code=value["code"].as_i64().unwrap_or(0);
+        return Err(format!("QQ reply http_status={status} api_code={code}"));
     }
     Ok(())
 }
@@ -191,9 +212,8 @@ async fn reply(
     target: &ReplyTarget,
     content: &str,
     msg_id: &str,
-    msg_seq: Arc<AtomicU64>,
+    seq: u64,
 ) -> Result<(), String> {
-    let seq = msg_seq.fetch_add(1, Ordering::Relaxed);
     let target_clone = match target {
         ReplyTarget::Group(g) => ReplyTarget::Group(g.clone()),
         ReplyTarget::C2C(o) => ReplyTarget::C2C(o.clone()),
@@ -217,7 +237,7 @@ async fn main() {
         )
         .init();
 
-    let cfg = Config::from_env("");
+    let cfg = Config::from_env("/more — 查看尚未发完的回复（不重新生成）");
     let ctx = BridgeContext::new(cfg);
 
     // 1. 凭据（扫码绑定，二维码进 stdout；FileStore 缓存持久化在 volume）
@@ -242,11 +262,18 @@ async fn main() {
     tracing::info!("机器人已绑定：AppID {}", creds.app_id);
 
     let token = Arc::new(TokenManager::new(creds));
-    let msg_seq = Arc::new(AtomicU64::new(1));
+    let path = std::env::var_os("BRIDGE_QQ_OUTBOX_PATH").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("BRIDGE_SESSIONS_PATH").or_else(||std::env::var_os("BRIDGE_QQ_CRED_FILE"))
+                .map(std::path::PathBuf::from).and_then(|path|path.parent().map(|p|p.join("qq-outbox.json")))
+                .unwrap_or_else(|| "data/qq-outbox.json".into())
+        });
+    let outbox=delivery::Outbox::open(path).unwrap_or_else(|e| { tracing::error!("{e}");std::process::exit(1) });
+    let delivery = Arc::new(DeliveryState { outbox:Mutex::new(outbox), busy:tokio::sync::Mutex::new(()), seen:Mutex::new(Default::default()) });
 
     // 2. 网关循环（断线自动重连）
     loop {
-        let reason = run_gateway(ctx.clone(), token.clone(), msg_seq.clone()).await;
+        let reason = run_gateway(ctx.clone(), token.clone(), delivery.clone(), GATEWAY_URL).await;
         tracing::warn!("网关连接结束（{reason}），5 秒后重连…");
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -256,9 +283,10 @@ async fn main() {
 async fn run_gateway(
     ctx: Arc<BridgeContext>,
     token: Arc<TokenManager>,
-    msg_seq: Arc<AtomicU64>,
+    delivery: Arc<DeliveryState>,
+    gateway_url: &str,
 ) -> String {
-    let (ws, _) = match tokio_tungstenite::connect_async(GATEWAY_URL).await {
+    let (ws, _) = match tokio_tungstenite::connect_async(gateway_url).await {
         Ok(v) => v,
         Err(e) => return format!("connect: {e}"),
     };
@@ -365,8 +393,9 @@ async fn run_gateway(
                         } else if t == "RESUMED" {
                             tracing::info!("会话已恢复");
                         } else if t == "GROUP_AT_MESSAGE_CREATE" || t == "C2C_MESSAGE_CREATE" {
-                            tracing::info!("收到事件 {t}");
-                            handle_message(ctx.clone(), token.clone(), msg_seq.clone(), t, d).await;
+                            let ctx=ctx.clone(); let token=token.clone(); let delivery=delivery.clone(); let event=t.to_string();
+                            // Keep reading and sending gateway heartbeats while a model is generating.
+                            tokio::spawn(async move { handle_message(ctx, token, delivery, &event, d).await; });
                         } else if !t.is_empty() {
                             tracing::debug!("忽略事件 t={t}");
                         }
@@ -393,7 +422,7 @@ async fn run_gateway(
 async fn handle_message(
     ctx: Arc<BridgeContext>,
     token: Arc<TokenManager>,
-    msg_seq: Arc<AtomicU64>,
+    delivery: Arc<DeliveryState>,
     event: &str,
     d: Value,
 ) {
@@ -405,7 +434,8 @@ async fn handle_message(
         .to_string();
     let group_openid = d.get("group_openid").and_then(|g| g.as_str()).map(String::from);
     let openid = d
-        .pointer("/author/id")
+        .pointer("/author/user_openid")
+        .or_else(|| d.pointer("/author/id"))
         .or_else(|| d.pointer("/author/openid"))
         .or_else(|| d.pointer("/author/member_openid"))
         .and_then(|o| o.as_str())
@@ -422,20 +452,133 @@ async fn handle_message(
         ReplyTarget::C2C(o) => format!("qq-u-{o}"),
     };
 
-    let inbound = InboundMessage {
-        source_key,
-        text: clean_qq_content(content),
-    };
-    if let Some(answer) = ctx.handle_inbound(inbound).await {
-        if let Err(e) = reply(token, &target, &answer, &msg_id, msg_seq).await {
-            tracing::warn!("回复发送失败（{e}）content_len={}", answer.chars().count());
-        }
+    if msg_id.is_empty() || !delivery.first_delivery(&msg_id) {
+        tracing::info!(event="qq_duplicate_ignored", message_id=%msg_id);
+        return;
     }
+    let span=tracing::info_span!("qq_message", message_id=%msg_id, source=%source_key);
+    async {
+        let Ok(_busy) = delivery.busy.try_lock() else {
+            if let Err(error)=reply(token.clone(),&target,"正在处理上一条消息，请稍后再发。",&msg_id,1).await {
+                tracing::warn!(event="qq_busy_reply_failed",%error);
+            }
+            return;
+        };
+        let text=clean_qq_content(content);
+        if text=="/more" {
+            if delivery.outbox.lock().unwrap().len(&source_key)==0 {
+                if let Err(error)=reply(token.clone(),&target,"没有待发送的后续内容。",&msg_id,1).await {
+                    tracing::warn!(event="qq_empty_reply_failed",%error);
+                }
+                return;
+            }
+        } else {
+            let inbound=InboundMessage { source_key:source_key.clone(), text };
+            let Some(answer)=ctx.handle_inbound(inbound).await else { return; };
+            tracing::info!(event="qq_reply_ready", text_chars=answer.chars().count(), segment_chars=ctx.cfg.max_chars.clamp(128,1500));
+            let saved = delivery.outbox.lock().unwrap().enqueue(&source_key,&answer,ctx.cfg.max_chars);
+            if let Err(error)=saved {
+                tracing::error!(event="qq_outbox_save_failed",%error);
+                let _=reply(token.clone(),&target,"回复已生成，但保存待发送记录失败，请在网页查看完整结果。",&msg_id,1).await;
+                return;
+            }
+        }
+        // Official passive reply quotas: C2C 4, group 5. Remaining chunks survive restarts.
+        let allowed=match target { ReplyTarget::C2C(_)=>4, ReplyTarget::Group(_)=>5 };
+        let started=std::time::Instant::now();
+        for seq in 1..=allowed {
+            let part=delivery.outbox.lock().unwrap().front(&source_key,seq==allowed);
+            let Some(part)=part else { break; };
+            if seq>1 { tokio::time::sleep(Duration::from_millis(350)).await; }
+            match reply(token.clone(),&target,&part,&msg_id,seq).await {
+                Ok(())=> {
+                    tracing::info!(event="qq_reply_segment_sent",seq,text_chars=part.chars().count());
+                    if let Err(error)=delivery.outbox.lock().unwrap().acknowledge(&source_key) {
+                        tracing::error!(event="qq_outbox_ack_failed",seq,%error);
+                        break;
+                    }
+                }
+                Err(error)=> {
+                    // Delivery can be uncertain after a network failure. No automatic resend.
+                    tracing::warn!(event="qq_reply_segment_failed",seq,%error,text_chars=part.chars().count(), recovery="send /more; full generation is in web history");
+                    break;
+                }
+            }
+        }
+        tracing::info!(event="qq_reply_finished",remaining_segments=delivery.outbox.lock().unwrap().len(&source_key),elapsed_ms=started.elapsed().as_millis() as u64);
+    }.instrument(span).await;
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn slow_generation_keeps_heartbeats_and_sends_every_character() {
+        use tokio::io::{AsyncReadExt,AsyncWriteExt};
+        let dir=tempfile::tempdir().unwrap();
+        let nast_listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway_listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let nast_url=format!("ws://{}/ws",nast_listener.local_addr().unwrap());
+        let gateway_url=format!("ws://{}",gateway_listener.local_addr().unwrap());
+        let answer="中文🙂长回复".repeat(600);let expected=answer.clone();
+        let session_path=dir.path().join("sessions.json");
+        std::fs::write(&session_path,json!({"server":nast_url,"sessions":{"qq-u-user":{"avatar":"actor.png","chat_file":"chat.jsonl"}}}).to_string()).unwrap();
+        let ctx=BridgeContext::with_session_path(Config { nast_server:nast_url,avatar:"".into(),max_chars:1500,gen_timeout_secs:240,platform_help:"".into() },session_path);
+        let delivery=Arc::new(DeliveryState { outbox:Mutex::new(delivery::Outbox::open(dir.path().join("outbox.json")).unwrap()),busy:tokio::sync::Mutex::new(()),seen:Mutex::new(Default::default()) });
+        let mut token=TokenManager::new(Credentials { app_id:"test".into(),app_secret:"test".into(),user_openid:None });
+        token.api_base=format!("http://{}",api_listener.local_addr().unwrap());
+        *token.token.lock().unwrap()=TokenState {access_token:"test-token".into(),fetched_at:std::time::Instant::now(),expires_in:7200};
+        let (started_tx,started_rx)=tokio::sync::oneshot::channel();
+        let nast=tokio::spawn(async move {
+            let (stream,_)=nast_listener.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+            let req:Value=serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(req["method"],"generate.run");started_tx.send(()).unwrap();
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            ws.send(Message::Text(json!({"id":req["id"],"result":{"text":answer,"routing":{"status":"complete"}}}).to_string())).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let (delivered_tx,delivered_rx)=tokio::sync::oneshot::channel();
+        let api=tokio::spawn(async move {
+            let mut sent=String::new();
+            for seq in 1..=3 {
+                let (mut socket,_)=api_listener.accept().await.unwrap();let mut data=Vec::new();
+                let header_end=loop {
+                    let mut buf=[0;4096];let n=socket.read(&mut buf).await.unwrap();assert!(n>0);data.extend_from_slice(&buf[..n]);
+                    if let Some(i)=data.windows(4).position(|w|w==b"\r\n\r\n") { break i+4; }
+                };
+                let headers=std::str::from_utf8(&data[..header_end]).unwrap().to_lowercase();
+                assert!(headers.starts_with("post /v2/users/user/messages "));
+                let len:usize=headers.lines().find_map(|line|line.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                while data.len()<header_end+len { let mut buf=[0;4096];let n=socket.read(&mut buf).await.unwrap();assert!(n>0);data.extend_from_slice(&buf[..n]); }
+                let body:Value=serde_json::from_slice(&data[header_end..header_end+len]).unwrap();
+                assert_eq!(body["msg_seq"],seq);assert_eq!(body["msg_id"],"message-one");
+                sent.push_str(body["content"].as_str().unwrap());
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+            }
+            assert_eq!(sent,expected);delivered_tx.send(()).unwrap();
+        });
+        let gateway=tokio::spawn(async move {
+            let (stream,_)=gateway_listener.accept().await.unwrap();let mut ws=tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Text(json!({"op":10,"d":{"heartbeat_interval":30}}).to_string())).await.unwrap();
+            let identify:Value=serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();assert_eq!(identify["op"],2);
+            let message=json!({"op":0,"s":1,"t":"C2C_MESSAGE_CREATE","d":{"id":"message-one","author":{"user_openid":"user"},"content":"hello"}}).to_string();
+            ws.send(Message::Text(message.clone())).await.unwrap();ws.send(Message::Text(message)).await.unwrap(); // duplicate event must not regenerate
+            started_rx.await.unwrap();
+            for _ in 0..3 {
+                let heartbeat=tokio::time::timeout(Duration::from_millis(150),ws.next()).await.expect("generation must not block heartbeat").unwrap().unwrap();
+                let body:Value=serde_json::from_str(heartbeat.to_text().unwrap()).unwrap();assert_eq!(body["op"],1);
+            }
+            tokio::time::timeout(Duration::from_secs(5),delivered_rx).await.unwrap().unwrap();
+            ws.send(Message::Text(json!({"op":7}).to_string())).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        assert_eq!(run_gateway(ctx,Arc::new(token),delivery.clone(),&gateway_url).await,"server reconnect requested");
+        gateway.await.unwrap();api.await.unwrap();nast.await.unwrap();
+        assert_eq!(delivery.outbox.lock().unwrap().len("qq-u-user"),0);
+    }
 
     #[test]
     fn cleans_mentions_and_escapes() {

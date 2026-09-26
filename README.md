@@ -32,7 +32,7 @@ cp .env.example .env        # 填写 NAST_USERNAME 和 NAST_PASSWORD
 docker compose up -d --build
 ```
 
-- **Web UI**：http://127.0.0.1:8000 （导入角色卡、在「设置 → 模型」配置逻辑模型与线路）
+- **Web UI**：http://127.0.0.1:8000 （导入角色卡、在「设置 → 模型」添加模型并填写 API 配置）
 - 数据：named volume `nast-data`（settings/models/secrets/角色卡/聊天/世界书/预设）；
   插件位于镜像内 `/app/plugins`，如需本机管理可挂载 `./plugins:/app/plugins`
 - 网络命名为 `nast-net`，供本仓库 `nast-bridges/` 中的 IM 桥接接入（当前 QQ 可用）
@@ -152,7 +152,7 @@ cd web && npm run dev   # → http://localhost:3000
 
 文本补全路径（instruct/context 模板）、向量/RAG、图像生成、翻译、多用户账号。
 模型接入支持 OpenAI 兼容、Anthropic 和 Gemini 三种协议，均可配置自定义端点；
-模型目录保存在服务端 models.json，线路密钥隔离存入 secrets.json（UI 可配）。
+模型目录保存在服务端 models.json，模型密钥隔离存入 secrets.json（UI 可配）。
 
 ## 插件（服务端 Lua）
 

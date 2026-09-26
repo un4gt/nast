@@ -382,3 +382,71 @@ fn mandatory_overflow_errors() {
 
 
 
+
+#[test]
+fn chinese_history_uses_one_budget_for_messages_names_and_framing() {
+    use nast_engine::tokens::{count_message_tokens, tokenizer_for_source};
+    for source in ["custom", "claude", "makersuite"] {
+        for context in [512, 768, 1024] {
+            let mut oai = default_oai();
+            oai.chat_completion_source = source.into();
+            oai.openai_model = "family-chat-v1".into();
+            oai.openai_max_context = context;
+            oai.openai_max_tokens = 128;
+            let mut input = base_input(&oai);
+            input.messages = (0..80).map(|i| HistoryMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("第{i}条：{}", "妈妈，今天上课好无聊，终于下课了。😊".repeat(3)),
+                name: Some("小明".into()), is_narrator: false, injected: false,
+            }).collect();
+            let out = assemble(&input);
+            assert!(out.error.is_none(), "{source}/{context}: {:?}", out.error);
+            let tokenizer = tokenizer_for_source(source, &oai.openai_model);
+            let actual = out.chat.iter().map(|m| count_message_tokens(&m.content, m.name.as_deref(), tokenizer)).sum::<usize>() + 3;
+            assert!(actual as i64 + oai.openai_max_tokens <= context, "{source}/{context}: {actual}");
+            assert!(out.chat.iter().any(|m| m.content.starts_with("第79条：")));
+            assert!(!out.chat.iter().any(|m| m.content.starts_with("第0条：")));
+            assert!(out.chat.iter().any(|m| m.identifier == "main"));
+            assert!(out.chat.iter().any(|m| m.identifier == "charDescription"));
+        }
+    }
+}
+
+#[test]
+fn latest_message_cannot_be_silently_dropped() {
+    let mut oai = default_oai();
+    oai.openai_max_context = 256;
+    oai.openai_max_tokens = 128;
+    let mut input = base_input(&oai);
+    input.messages.last_mut().unwrap().content = "当前用户问题不能被丢掉".repeat(100);
+    let out = assemble(&input);
+    assert!(out.error.as_deref().unwrap().contains("最新消息"));
+}
+
+#[test]
+fn prompt_macros_run_once_when_history_is_trimmed() {
+    use nast_engine::macros::MacroContext;
+    let mut oai = default_oai();
+    oai.openai_max_context = 512;
+    oai.openai_max_tokens = 128;
+    oai.prompts.iter_mut().find(|p| p.identifier == "main").unwrap().content = "{{incvar::count}}回答最新问题".into();
+    let context = std::cell::RefCell::new(MacroContext::default());
+    let mut input = base_input(&oai);
+    input.macro_context = Some(&context);
+    let older = input.messages[0].clone();
+    input.messages.splice(0..0, vec![older; 300]);
+    let out = assemble(&input);
+    assert!(out.error.is_none(), "{:?}", out.error);
+    assert_eq!(context.borrow().vars.local["count"].as_str(), Some("1"));
+    assert!(out.chat.len() < input.messages.len());
+}
+
+#[test]
+fn repeated_prompt_order_entry_does_not_panic_at_budget_boundary() {
+    let mut oai = default_oai();
+    let first = oai.prompt_order[0].order[0].clone();
+    oai.prompt_order[0].order.push(first);
+    let input = base_input(&oai);
+    let out = assemble(&input);
+    assert!(out.error.is_none(), "{:?}", out.error);
+}

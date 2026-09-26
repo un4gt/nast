@@ -108,6 +108,7 @@ dependencies = [
  "futures-util",
  "qqbot-connector",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",

@@ -38,3 +38,7 @@ docker build -t nast-bridges:local nast-bridges
 ## 公共 RPC
 
 依赖 `characters.all`、`characters.chats`、`chats.new/rename/set_world`、`generate.run/status/stop`、`settings.get`、`plugins.list`、`model.command`、`model_catalog.get` 和 `conversation_model.get/set`。接口变更应与本目录的适配放在同一个提交中。
+
+## QQ 长回复与排错
+
+回复现在完整分段发送；超过单次被动回复配额时，用 `/more` 查看持久化的剩余内容。慢生成不再阻塞 QQ 网关心跳。日志默认记录 task_id、结束原因和每段发送结果，具体命令及字段见 [模型与 QQ 排错文档](../docs/src/guide/connection.md#qq-长回复与日志排错)。

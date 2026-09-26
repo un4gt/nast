@@ -34,6 +34,7 @@ services:
     environment:
       <<: *bridge-env
       BRIDGE_QQ_CRED_FILE: /data/qqbot-credentials.json
+      BRIDGE_QQ_OUTBOX_PATH: /data/qq-outbox.json
     volumes:
       - qq-creds:/data
 

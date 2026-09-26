@@ -31,6 +31,12 @@ pub enum ProviderError {
     Aborted,
     #[error("config: {0}")]
     Config(String),
+    #[error("达到最大输出 Token 限制（{0}），回复未完成；请调高模型的最大输出或续写")]
+    OutputLimit(String),
+    #[error("模型 {model}：估算输入 {input_tokens} Token，超过最大输入 {limit}；请调整模型参数或减少提示词。备用模型不会重新裁剪本次请求")]
+    InputLimit { model: String, input_tokens: i64, limit: i64 },
+    #[error("模型 {model}：估算输入 {input_tokens} + 预留输出 {output_tokens} Token，超过上下文上限 {limit}；请调整模型参数。备用模型不会重新裁剪本次请求")]
+    ContextLimit { model: String, input_tokens: i64, output_tokens: i64, limit: i64 },
 }
 
 impl ProviderError {
@@ -85,6 +91,8 @@ pub enum StreamEvent {
     Usage { input: Option<i64>, output: Option<i64> },
     /// 上游报错（流中）
     Error(ProviderError),
+    /// 上游结束原因；不代替协议的流结束标记。
+    FinishReason(String),
     /// 流结束
     Done,
 }
@@ -497,6 +505,7 @@ impl Provider {
                     if let Some(text) = block["text"].as_str() { events.push(StreamEvent::Token(text.into())); }
                     if let Some(text) = block["thinking"].as_str() { events.push(StreamEvent::Reasoning(text.into())); }
                 }
+                if let Some(reason) = value["stop_reason"].as_str() { events.push(StreamEvent::FinishReason(reason.into())); }
                 events.push(StreamEvent::Usage {
                     input: value["usage"]["input_tokens"].as_i64(),
                     output: value["usage"]["output_tokens"].as_i64(),
@@ -615,7 +624,10 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
                     }
                 }
             }
-            // finish_reason 不检查（ST 行为），等待 [DONE] 或流关闭
+            if let Some(reason) = choice["finish_reason"].as_str() {
+                out.push(StreamEvent::FinishReason(reason.into()));
+            }
+            // Only [DONE] terminates an OpenAI SSE stream.
         }
         if let Some(u) = v.get("usage") {
             out.push(StreamEvent::Usage {
@@ -646,6 +658,7 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
                 }
             }
             "message_delta" => {
+                if let Some(reason) = v["delta"]["stop_reason"].as_str() { out.push(StreamEvent::FinishReason(reason.into())); }
                 if let Some(u) = v.get("usage") {
                     out.push(StreamEvent::Usage {
                         input: None,
@@ -684,8 +697,8 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
                     }
                 }
             }
-            if c0.get("finishReason").is_some() {
-                out.push(StreamEvent::Done);
+            if let Some(reason) = c0["finishReason"].as_str() {
+                out.push(StreamEvent::FinishReason(reason.into()));
             }
         }
         if let Some(u) = v.get("usageMetadata") {
@@ -693,6 +706,9 @@ fn normalize(v: Value) -> Vec<StreamEvent> {
                 input: u.get("promptTokenCount").and_then(|t| t.as_i64()),
                 output: u.get("candidatesTokenCount").and_then(|t| t.as_i64()),
             });
+        }
+        if candidates.first().is_some_and(|c| c["finishReason"].is_string()) {
+            out.push(StreamEvent::Done);
         }
         return out;
     }
@@ -791,6 +807,15 @@ mod tests {
         let v = json!({"candidates": [{"content": {"parts": [{"text": "yo"}]}}]});
         let evs = normalize(v);
         assert!(matches!(&evs[0], StreamEvent::Token(t) if t == "yo"));
+    }
+
+    #[test]
+    fn gemini_usage_is_delivered_before_done() {
+        let events = normalize(json!({"candidates":[{"finishReason":"MAX_TOKENS"}],
+            "usageMetadata":{"promptTokenCount":123,"candidatesTokenCount":45}}));
+        assert!(matches!(events[0], StreamEvent::FinishReason(_)));
+        assert!(matches!(events[1], StreamEvent::Usage { input:Some(123), output:Some(45) }));
+        assert!(matches!(events[2], StreamEvent::Done));
     }
 
     #[test]

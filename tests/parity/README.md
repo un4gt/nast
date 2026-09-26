@@ -43,3 +43,23 @@ python tests/parity/model_server.py --port 19999 --output requests.jsonl
 时间戳、UI 遥测和随机批次 ID 的具体值不比较；批次之间是否相同会比较。ST 对原始 JSON 字段顺序计算世界书 hash，nast 对规范化条目计算，因此定时 hash 映射为 `world.uid` 身份后比较。原始 hash、完整状态及原始请求都保留在证据中；这不证明跨应用恢复活动计时记录等价。
 
 `report.json` 记录检查结果和浏览器未捕获异常；场景目录保存两端 JSON、原始状态和差异；`ui/` 保存截图。非零退出码表示至少一项失败。该套件是可扩展的确定性回归基线，尚不穷举 ST 的全部字段、随机策略或高级规则组合。
+
+## 模型添加与普通 HTTP
+
+构建最新服务端和网页后运行：
+
+```powershell
+.cache/st-parity-venv/Scripts/python.exe tests/parity/model_setup.py
+.cache/st-parity-venv/Scripts/python.exe tests/parity/routing.py
+cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked
+```
+
+`model_setup.py` 使用真实局域网 HTTP 地址，断言 `isSecureContext=false` 且 `crypto.randomUUID` 不存在。默认取本机主机名解析到的 IPv4；需要时用 `NAST_E2E_HTTP_HOST` 指定非回环 IPv4，浏览器必须能访问该地址。测试短暂监听 0.0.0.0，使用隔离数据和测试账号，退出关闭服务。
+
+覆盖登录错误、键盘提交、添加模型、保存前获取列表、三种协议输出与思考参数、草稿冲突恢复、角色卡 UI 导入及首条聊天；抓取真正的上游请求进行断言。覆盖明暗主题、390／1440 像素宽度，证据含 basic/parameters/chat 截图和 report.json，不调用真实模型。
+
+`routing.py` 额外验证三协议流式和 JSON 的输出额度用尽、部分结果保存、不切换备用模型、冻结输入预算以及无密钥日志。长中文历史覆盖三种协议与自定义模型名，检查最新问题保留、旧历史裁剪和 Anthropic 续写只发送一份正文。模拟模型服务可用 `finish_reason` 编排结束原因。
+
+桥接测试使用本地假 QQ 网关、假 NAST WebSocket 和真实 HTTP 请求接收器，验证慢生成期间网关心跳不中断、重复事件不重复生成、超长中文／emoji 全字符发送、发送失败保留尾部与重启后续读。未连接真实 QQ 账号，不代表已在真实 QQ 平台完成端到端验收。
+
+模型表单复用项目已有的 shadcn Dialog、Field、Select、Collapsible，以及官方 Popover + Command combobox 示例；基础字段参考 [Cline OpenAI Compatible 配置](https://docs.cline.bot/provider-config/openai-compatible)。未新增自制基础 UI 组件。

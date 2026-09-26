@@ -95,8 +95,14 @@ async fn handle_rpc(state: SharedState, mut session: Session, raw: String) {
     };
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let params = req.get("params").cloned().unwrap_or(Value::Null);
+    let mut params = req.get("params").cloned().unwrap_or(Value::Null);
+    if matches!(method.as_str(), "generate.run" | "generate.group") && params.is_object() {
+        params["task_id"] = serde_json::json!(crate::routing::task_id(&params));
+        tracing::info!(event="generation_requested", method, task_id=params["task_id"].as_str().unwrap_or(""));
+    }
 
+    let task_id = params["task_id"].as_str().unwrap_or("").to_string();
+    let started = std::time::Instant::now();
     let result = rpc::dispatch(state, &method, params).await;
     let reply = match result {
         Ok(v) => serde_json::json!({"id": id, "result": v}),
@@ -109,9 +115,12 @@ async fn handle_rpc(state: SharedState, mut session: Session, raw: String) {
                 rpc::RpcError::Integrity => "integrity",
                 rpc::RpcError::Internal(_) => "internal",
             };
+            tracing::warn!(event="rpc_failed", method, task_id, code, elapsed_ms=started.elapsed().as_millis() as u64);
             let diagnostic = match &e { rpc::RpcError::Generation(v)=>v.clone(), _=>Value::Null };
             serde_json::json!({"id": id, "error": {"code": code, "message": e.to_string(),"diagnostic":diagnostic}})
         }
     };
-    let _ = session.text(reply.to_string()).await;
+    if session.text(reply.to_string()).await.is_err() {
+        tracing::warn!(event="rpc_delivery_failed", method, task_id, elapsed_ms=started.elapsed().as_millis() as u64);
+    }
 }

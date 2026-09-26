@@ -193,6 +193,33 @@ async fn secrets_set(state: SharedState, params: Value) -> RpcResult {
 
 /// 模型列表：默认用已保存配置；连接测试可传 url/key 覆盖（不必先保存）。
 async fn models_list(state: SharedState, params: Value) -> RpcResult {
+    // Preview an unsaved connection. Never fall back to a global secret or send a
+    // saved key to an edited endpoint. Listing models must not publish a draft.
+    if let Some(draft) = params.get("connection") {
+        let endpoint = param_str(draft, "endpoint")?.trim().trim_end_matches('/');
+        let url = reqwest::Url::parse(endpoint).map_err(|_| RpcError::BadRequest("请输入有效的 API 地址".into()))?;
+        if !["http", "https"].contains(&url.scheme()) || url.host_str().is_none()
+            || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+            return Err(RpcError::BadRequest("API 地址须为不含凭据、查询参数或片段的 HTTP(S) URL".into()));
+        }
+        let mut key = String::new();
+        if let Some(value) = draft.get("key") {
+            key = value.as_str().ok_or_else(|| RpcError::BadRequest("API 密钥须为字符串".into()))?.trim().into();
+        } else if let Some(id) = draft["route_id"].as_str() {
+            let secrets = state.secrets.read().await;
+            let catalog = state.catalog.lock().unwrap();
+            if let Some(route) = catalog.models.iter().flat_map(|m| &m.routes).find(|r| r.id == id) {
+                if route.protocol == "openai" && route.config.endpoint.trim_end_matches('/') == endpoint {
+                    key = route.config.credential_ref.as_deref().and_then(|k| crate::connection::active_secret(&secrets, k)).unwrap_or_default();
+                }
+            }
+        }
+        let provider = nast_providers::Provider::new(nast_providers::ProviderKind::OpenAiCompat { base_url: endpoint.into(), api_key: key });
+        let data = tokio::time::timeout(std::time::Duration::from_secs(20), provider.list_models()).await
+            .map_err(|_| RpcError::BadRequest("获取模型列表超时，请检查 API 地址或手动填写模型 ID".into()))?
+            .map_err(|e| RpcError::Generation(json!({"message":e.to_string(),"retryable":e.retryable(),"detail":e})))?;
+        return Ok(json!({"data":data}));
+    }
     if let Some(route_id) = params["route_id"].as_str() {
         let (route,secrets) = {
             let secrets = state.secrets.read().await;

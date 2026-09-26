@@ -43,7 +43,7 @@ export function ModelSelector() {
       catch (e) { setError(String(e)); } finally { setPending(false); }
     }}>
       <SelectTrigger aria-label="会话模型" className="h-8 w-auto min-w-32 max-w-full gap-2 text-xs"><SelectValue placeholder="选择模型">{catalog?.models.find(m => m.id === selected)?.display_name ?? (selected ? '模型已删除，请重新选择' : '选择模型')}</SelectValue></SelectTrigger>
-      <SelectContent><SelectGroup>{catalog?.models.map(m => <SelectItem key={m.id} value={m.id}>{m.display_name}{m.routes.some(r => r.enabled) ? '' : ' · 无可用路由'}</SelectItem>)}</SelectGroup></SelectContent>
+      <SelectContent><SelectGroup>{catalog?.models.map(m => <SelectItem key={m.id} value={m.id}>{m.display_name}{m.routes.some(r => r.enabled) ? '' : ' · 尚未配置'}</SelectItem>)}</SelectGroup></SelectContent>
     </Select>
     <span role="status" className="text-xs text-muted-foreground">{(generating || serverBusy) && (phase === 'retrying' ? '正在重试' : phase === 'fallback' ? '正在切换备用线路' : '')}</span>
     {error && <div role="alert" className="flex w-full flex-wrap items-center gap-2 text-xs text-destructive"><span>{error}</span><Button size="sm" variant="outline" onClick={() => window.dispatchEvent(new CustomEvent('nast:open-model-settings'))}>模型设置</Button></div>}

@@ -116,11 +116,11 @@ class Handler(BaseHTTPRequestHandler):
         common = {'id': 'chatcmpl-parity', 'created': 0, 'model': body.get('model', 'gpt-4o')}
         if not stream:
             if protocol == 'anthropic':
-                response = {'type':'message','content':[{'type':'text','text':answer},{'type':'thinking','thinking':'核对上下文'}], 'stop_reason':'end_turn','usage':{'input_tokens':1,'output_tokens':1}}
+                response = {'type':'message','content':[{'type':'text','text':answer},{'type':'thinking','thinking':'核对上下文'}], 'stop_reason':action.get('finish_reason','end_turn'),'usage':{'input_tokens':1,'output_tokens':1}}
             elif protocol == 'gemini':
-                response = {'candidates':[{'content':{'parts':[{'text':'核对上下文','thought':True},{'text':answer}]},'finishReason':'STOP'}]}
+                response = {'candidates':[{'content':{'parts':[{'text':'核对上下文','thought':True},{'text':answer}]},'finishReason':action.get('finish_reason','STOP')}]}
             else:
-                response = {**common, 'object':'chat.completion','choices':[{'index':0,'message':{'role':'assistant','content':answer,'reasoning_content':'核对上下文'},'finish_reason':'stop'}], 'usage':{'prompt_tokens':1,'completion_tokens':1,'total_tokens':2}}
+                response = {**common, 'object':'chat.completion','choices':[{'index':0,'message':{'role':'assistant','content':answer,'reasoning_content':'核对上下文'},'finish_reason':action.get('finish_reason','stop')}], 'usage':{'prompt_tokens':1,'completion_tokens':1,'total_tokens':2}}
             self.send_json(200,response)
             return
         self.send_response(200)
@@ -158,11 +158,12 @@ class Handler(BaseHTTPRequestHandler):
             if cutoff == 'no_done':
                 return
             if protocol == 'anthropic':
+                frame({'type':'message_delta','delta':{'stop_reason':action.get('finish_reason','end_turn')},'usage':{'output_tokens':1}})
                 frame({'type':'message_stop'})
             elif protocol == 'gemini':
-                frame({'candidates':[{'finishReason':'STOP'}]})
+                frame({'candidates':[{'finishReason':action.get('finish_reason','STOP')}]})
             else:
-                frame({**common,'choices':[{'index':0,'delta':{},'finish_reason':'stop'}]})
+                frame({**common,'choices':[{'index':0,'delta':{},'finish_reason':action.get('finish_reason','stop')}]})
                 frame('[DONE]')
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
