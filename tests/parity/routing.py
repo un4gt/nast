@@ -43,6 +43,17 @@ async def main():
             browser=await pw.chromium.launch()
             page=await browser.new_page()
             await page.goto(f'http://127.0.0.1:{http_port}')
+            async def restart():
+                nonlocal process, page
+                # Linux SIGTERM drains active WebSockets; Windows terminate is immediate.
+                # Close clients first and allow Actix's 30-second graceful shutdown.
+                await page.close()
+                process.terminate()
+                await asyncio.to_thread(process.wait, timeout=35)
+                process=subprocess.Popen([str(binary)],cwd=artifact,env=env,stdout=log,stderr=log)
+                await wait_http(f'http://127.0.0.1:{http_port}',process)
+                page=await browser.new_page()
+                await page.goto(f'http://127.0.0.1:{http_port}')
             async def call(method,**params): return await rpc(page,method,params)
             async def fails(method,**params):
                 try: await call(method,**params)
@@ -55,10 +66,7 @@ async def main():
             assert 'legacy-secret' not in json.dumps(catalog)
             assert (user/'backups'/'pre-models-secrets.json').exists()
             original_catalog=(user/'models.json').read_bytes()
-            process.terminate();process.wait(timeout=10)
-            process=subprocess.Popen([str(binary)],cwd=artifact,env=env,stdout=log,stderr=log)
-            await wait_http(f'http://127.0.0.1:{http_port}',process)
-            await page.reload()
+            await restart()
             assert (user/'models.json').read_bytes()==original_catalog
             passed('migration/backup-credential-idempotent-restart')
             avatar=(await call('characters.import',filename='actor.json',data_base64=base64.b64encode(json.dumps(card('RouterActor')).encode()).decode()))['avatar']
@@ -304,9 +312,7 @@ async def main():
             assert attempts[-1]['credential_hash']==hashlib.sha256(b'Bearer frozen-b').hexdigest()
             assert (await selection(current))['active_route_info']['upstream_model']=='gpt-4o'
             persisted=(await selection(current))
-            process.terminate();process.wait(timeout=10)
-            process=subprocess.Popen([str(binary)],cwd=artifact,env=env,stdout=log,stderr=log)
-            await wait_http(f'http://127.0.0.1:{http_port}',process);await page.reload()
+            await restart()
             assert await selection(current)==persisted
             await generate(current);assert server.captures[-1]['body']['model']=='changed-after-start'
             assert server.captures[-1]['route']=='b'
@@ -344,7 +350,11 @@ async def main():
             assert not (corrupt_user/'models.json').exists()
             passed('migration/corrupt-secrets-fail-closed-without-overwrite')
     finally:
-        if process.poll() is None: process.terminate();process.wait(timeout=10)
+        if process.poll() is None:
+            process.terminate()
+            try: process.wait(timeout=35)
+            except subprocess.TimeoutExpired:
+                process.kill();process.wait(timeout=10)
         log.close();server.shutdown();server.server_close()
         write_json(artifact/'report.json',results)
     print(f'{len(results)} routing acceptance groups passed',flush=True)
