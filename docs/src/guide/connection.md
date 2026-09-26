@@ -6,7 +6,7 @@
 
 | API 类型 | 基础地址示例 | 模型选择 |
 | --- | --- | --- |
-| OpenAI 兼容 | `https://api.openai.com/v1` | 填好地址和密钥后点「获取模型列表」，搜索选择；也可直接输入 |
+| OpenAI 兼容 | `https://api.openai.com/v1` | 填好地址和密钥后点「获取模型列表」，搜索、多选后一次添加；也可直接输入 |
 | Anthropic | `https://api.anthropic.com/v1` | 手动输入服务商提供的模型 ID |
 | Gemini | `https://generativelanguage.googleapis.com/v1beta` | 手动输入服务商提供的模型 ID |
 
@@ -15,6 +15,18 @@ OpenRouter、DeepSeek、vLLM、Ollama 等提供 Chat Completions 兼容接口的
 获取列表不会先保存模型，也不会使用旧的全局密钥。获取失败时仍可手动填写模型 ID。修改已保存的地址或 API 类型时，需要重新输入密钥或明确清除旧密钥，避免把旧密钥发给另一个服务。读取配置只显示密钥是否已设置。
 
 模型列表提供编辑、删除和设为默认。保存失败保留输入，版本冲突可点「加载最新配置并保留输入」后确认保存。内部 ID 保持不变，旧的多个连接配置保留；常规添加流程只需要配置一个 API。
+
+## 一次同步多个模型
+
+1. 首次配置：点「添加模型」，选择 OpenAI 兼容，填写地址和密钥，再点「获取模型列表」，无需先填模型 ID 或保存。
+2. 已有配置：在对应模型旁点「同步模型」，复用已保存的 API 地址和密钥。
+3. 搜索并勾选所需模型，或点「全选搜索结果」。切换搜索词不会丢失已选项，「清空选择」可重新选择。
+4. 按需展开「模型参数」设置本次新增模型的输入、输出和思考参数；需要更换默认模型时勾选「设置新的默认模型」，从已选模型中选择。
+5. 点「添加 N 个模型」一次保存。添加后每个模型可分别编辑参数和名称。
+
+同步只新增模型，不覆盖已有模型及参数。同一 API 地址和类型下已添加的模型会标记为「已添加」，不能重复勾选。获取或保存失败不会丢失选择；版本冲突时可加载最新配置并保留选择，再次添加。返回手动填写时，之前的 API 输入仍会保留。Anthropic 和 Gemini 原生接口当前通过手动模型 ID 添加。
+
+已保存密钥由服务端复制为每个新增模型各自的密钥引用，不会发回浏览器。以后修改其中一个模型的密钥，不会连带修改其他模型。
 
 ## 最大输入、最大输出与思考
 
@@ -76,7 +88,7 @@ OpenRouter、DeepSeek、vLLM、Ollama 等提供 Chat Completions 兼容接口的
 | 方法 | 参数／结果 |
 | --- | --- |
 | `model_catalog.get` | 返回 `{version, default_model, models}`，线路附 `credential_configured`；不返回明文密钥 |
-| `model_catalog.save` | `{catalog, credentials?: {route_id: "新密钥"}}`；空字符串清除，省略保留；返回新 version |
+| `model_catalog.save` | `{catalog, credentials?: {route_id: "新密钥"}, credential_copies?: {new_route_id: "source_route_id"}}`；密钥空字符串清除，省略保留；返回新 version |
 | `conversation_model.get` | `{conversation}`，返回 state、model、candidate_route、可操作的 error |
 | `conversation_model.set` | `{conversation, model_id}` |
 | `model.command` | `{conversation, argument: "" 或 "info" 或模型 ID}`；返回 text 和 view |
@@ -86,6 +98,8 @@ OpenRouter、DeepSeek、vLLM、Ollama 等提供 Chat Completions 兼容接口的
 | `generate.stop` | 可加 `{task_id}`；不匹配时返回 `{ok:false,reason:"task_mismatch"}` |
 
 私聊引用为 `{kind:"private",avatar:"角色.png",chat_file:"聊天.jsonl"}`；群聊引用为 `{kind:"group",group_id:"…",chat_id:"…"}`，服务端校验群聊归属。私聊通过 `chats.save` 导入新文件自动清除原线路，覆盖导入已有文件需传 `imported:true`。
+
+`credential_copies` 是只写的批量添加参数：目标必须为新增连接，来源必须已保存，且两者 API 地址和协议相同。不能对同一目标同时传 `credentials` 和 `credential_copies`。每份副本使用独立凭据引用，不会回退到旧全局密钥；无效复制请求不会写入目录或密钥。
 
 新增事件 `model_catalog_changed`、`conversation_model_changed`、`generation_route`、`generation_diagnostic`。会话事件携带明确引用，生成事件携带任务 ID。错误响应保留 code/message 并增加 diagnostic；上游错误使用 `upstream`，目录冲突使用 `conflict`。诊断和广播不含密钥。
 

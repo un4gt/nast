@@ -329,12 +329,20 @@ pub async fn get(state: SharedState) -> RpcResult {
 pub async fn save(state: SharedState, params: Value) -> RpcResult {
     let mut next: Catalog = serde_json::from_value(params["catalog"].clone()).map_err(bad)?;
     next.validate().map_err(bad)?;
+    let copies: std::collections::HashMap<String, String> = params.get("credential_copies")
+        .map(|value| serde_json::from_value(value.clone()).map_err(bad))
+        .transpose()?.unwrap_or_default();
     let mut secrets = state.secrets.write().await;
     let mut current = state.catalog.lock().unwrap();
     if current.version != next.version {
         return Err(RpcError::Conflict(
             "模型目录已更新，请重新加载后保存；草稿尚未保存".into(),
         ));
+    }
+    for target in copies.keys() {
+        if !next.models.iter().flat_map(|m| &m.routes).any(|r| &r.id == target) {
+            return Err(bad("复制密钥的目标模型不存在"));
+        }
     }
     let mut updated = secrets.clone();
     for model in &mut next.models {
@@ -346,8 +354,17 @@ pub async fn save(state: SharedState, params: Value) -> RpcResult {
                 .find(|r| r.id == route.id);
             // Clients cannot bind another route's credential or the legacy global key.
             route.config.credential_ref = old.and_then(|r| r.config.credential_ref.clone());
-            if let Some(key) = params["credentials"].get(&route.id) {
-                let key = key.as_str().ok_or_else(|| bad("密钥必须是字符串"))?.trim();
+            let key = if let Some(source) = copies.get(&route.id) {
+                if old.is_some() || params["credentials"].get(&route.id).is_some() {
+                    return Err(bad("仅新增模型可复制密钥，且不能同时填写新密钥"));
+                }
+                Some(copy_credential(&current, &secrets, route, source).map_err(bad)?)
+            } else {
+                params["credentials"].get(&route.id)
+                    .map(|key| key.as_str().map(|s| s.trim().to_string()).ok_or_else(|| bad("密钥必须是字符串")))
+                    .transpose()?
+            };
+            if let Some(key) = key {
                 route.config.credential_ref = if key.is_empty() {
                     None
                 } else {
@@ -374,6 +391,20 @@ pub async fn save(state: SharedState, params: Value) -> RpcResult {
         .hub
         .emit("model_catalog_changed", json!({"version":current.version}));
     Ok(json!({"version":current.version}))
+}
+
+/// Explicitly reuse a saved connection for batch additions. The new route gets
+/// its own immutable secret reference; raw keys never return to the browser.
+fn copy_credential(catalog: &Catalog, secrets: &Value, target: &Route, source_id: &str) -> Result<String, String> {
+    let source = catalog.models.iter().flat_map(|m| &m.routes).find(|r| r.id == source_id)
+        .ok_or("来源模型已删除，请重新选择 API 配置")?;
+    if source.protocol != target.protocol
+        || source.config.endpoint.trim_end_matches('/') != target.config.endpoint.trim_end_matches('/') {
+        return Err("API 地址或类型已更改，请重新输入密钥".into());
+    }
+    source.config.credential_ref.as_deref()
+        .and_then(|reference| connection::active_secret(secrets, reference))
+        .ok_or_else(|| "来源模型未配置可用密钥，请重新输入密钥".into())
 }
 
 pub fn bind(chat: &mut ChatFile, default_model: &str, imported: bool) {
@@ -566,5 +597,24 @@ mod tests {
             .parameters
             .insert("stream".into(), json!(false));
         assert!(c.validate().is_err());
+    }
+    #[test]
+    fn credential_copy_requires_an_explicit_saved_matching_connection() {
+        let mut source = route("source", 0);
+        source.config.credential_ref = Some("route_secret".into());
+        let catalog = Catalog { version: 1, default_model: "m".into(),
+            models: vec![Model { id: "m".into(), display_name: "M".into(), routes: vec![source.clone()] }] };
+        let secrets = json!({"route_secret":[{"value":"route-key","active":true}],
+            "api_key_custom":[{"value":"legacy-key","active":true}]});
+        let mut target = route("new", 0);
+        assert_eq!(copy_credential(&catalog, &secrets, &target, "source").unwrap(), "route-key");
+        assert!(copy_credential(&catalog, &secrets, &target, "missing").is_err());
+        target.config.endpoint = "https://different.example/v1".into();
+        assert!(copy_credential(&catalog, &secrets, &target, "source").is_err());
+        target.config.endpoint = source.config.endpoint;
+        target.protocol = "anthropic".into();
+        assert!(copy_credential(&catalog, &secrets, &target, "source").is_err());
+        target.protocol = "openai".into();
+        assert!(copy_credential(&catalog, &json!({"api_key_custom":[{"value":"legacy-key","active":true}]}), &target, "source").is_err());
     }
 }

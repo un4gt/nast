@@ -50,6 +50,7 @@ python tests/parity/model_server.py --port 19999 --output requests.jsonl
 
 ```powershell
 .cache/st-parity-venv/Scripts/python.exe tests/parity/model_setup.py
+.cache/st-parity-venv/Scripts/python.exe tests/parity/model_sync.py
 .cache/st-parity-venv/Scripts/python.exe tests/parity/routing.py
 cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked
 ```
@@ -58,8 +59,10 @@ cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked
 
 覆盖登录错误、键盘提交、添加模型、保存前获取列表、三种协议输出与思考参数、草稿冲突恢复、角色卡 UI 导入及首条聊天；抓取真正的上游请求进行断言。覆盖明暗主题、390／1440 像素宽度，证据含 basic/parameters/chat 截图和 report.json，不调用真实模型。
 
+`model_sync.py` 验证真实页面中的批量同步：搜索多选、全选、跨搜索保留选择、跳过已添加模型、列表失败重试、目录版本冲突恢复、首次输入 API 后一次添加多个模型及返回保留草稿。覆盖明暗主题和 390／1440 像素宽度、键盘勾选及长模型 ID；真实请求验证模型和输出参数、独立凭据副本。另通过 RPC 检查非法复制请求被拒绝且磁盘文件不变。截图、请求和报告保存在 `nast-model-sync-*` 临时目录。
+
 `routing.py` 额外验证三协议流式和 JSON 的输出额度用尽、部分结果保存、不切换备用模型、冻结输入预算以及无密钥日志。长中文历史覆盖三种协议与自定义模型名，检查最新问题保留、旧历史裁剪和 Anthropic 续写只发送一份正文。模拟模型服务可用 `finish_reason` 编排结束原因。
 
 桥接测试使用本地假 QQ 网关、假 NAST WebSocket 和真实 HTTP 请求接收器，验证慢生成期间网关心跳不中断、重复事件不重复生成、超长中文／emoji 全字符发送、发送失败保留尾部与重启后续读。未连接真实 QQ 账号，不代表已在真实 QQ 平台完成端到端验收。
 
-模型表单复用项目已有的 shadcn Dialog、Field、Select、Collapsible，以及官方 Popover + Command combobox 示例；基础字段参考 [Cline OpenAI Compatible 配置](https://docs.cline.bot/provider-config/openai-compatible)。未新增自制基础 UI 组件。
+模型表单复用项目已有的 shadcn Dialog、Field、Select、Collapsible、ScrollArea，以及官方 Checkbox 多选表单示例；基础字段参考 [Cline OpenAI Compatible 配置](https://docs.cline.bot/provider-config/openai-compatible)。未新增自制基础 UI 组件。

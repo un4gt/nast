@@ -92,9 +92,10 @@ async def main():
                         before = await rpc(page,'model_catalog.get')
                         await page.get_by_role('button',name='获取模型列表',exact=True).click()
                         await page.get_by_placeholder('搜索模型…').fill('gpt')
-                        await page.get_by_placeholder('搜索模型…').press('ArrowDown')
-                        await page.get_by_placeholder('搜索模型…').press('Enter')
-                        await expect(page.get_by_label('模型 ID',exact=True)).to_have_value('gpt-4o')
+                        dialog = page.get_by_role('dialog',name='同步模型',exact=True)
+                        await dialog.get_by_role('checkbox',name='gpt-4o',exact=True).focus()
+                        await page.keyboard.press('Space')
+                        await expect(dialog.get_by_role('checkbox',name='gpt-4o',exact=True)).to_be_checked()
                         assert await rpc(page,'model_catalog.get') == before, 'Discovery must not save the draft'
                     else:
                         await page.get_by_label('模型 ID',exact=True).fill('native-test')
@@ -121,7 +122,7 @@ async def main():
                     await page.screenshot(path=str(artifact/f'{name}-parameters.png'),full_page=True)
                     assert not await page.evaluate('document.documentElement.scrollWidth > innerWidth+1')
                     assert not await dialog.evaluate('(el)=>el.scrollWidth > el.clientWidth+1')
-                    await page.get_by_role('button',name='保存模型',exact=True).click()
+                    await page.get_by_role('button',name='添加 1 个模型' if protocol=='openai' else '保存模型',exact=True).click()
                     await expect(dialog).not_to_be_visible()
                     catalog = await rpc(page,'model_catalog.get')
                     model = next(m for m in catalog['models'] if m['display_name'] == name)

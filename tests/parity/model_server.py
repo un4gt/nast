@@ -40,6 +40,9 @@ class ModelServer(ThreadingHTTPServer):
         self.lock = threading.Lock()
         self.plans: dict[str, list[dict]] = {}
         self.output = output
+        self.models = ['gpt-4o']
+        self.model_lists = []
+        self.list_failures = 0
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -64,8 +67,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.endswith("/models"):
-            self.send_json(200, {"object": "list", "data": [
-                {"id": "gpt-4o", "object": "model", "owned_by": "parity"}]})
+            self.server.model_lists.append({'path':self.path, 'credential_hash':hashlib.sha256(self.headers.get('Authorization','').encode()).hexdigest()})
+            if self.server.list_failures:
+                self.server.list_failures -= 1
+                self.send_json(503, {'error':{'message':'Scripted model discovery failure'}})
+                return
+            self.send_json(200, {"object":"list", "data":[
+                {"id":id,"object":"model","owned_by":"parity"} for id in self.server.models]})
         elif self.path == "/health":
             self.send_json(200, {"ok": True})
         elif self.path == "/captures":
