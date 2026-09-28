@@ -2,7 +2,45 @@
 
 把 SillyTavern 浏览器端的核心生成逻辑全部移入 Rust 服务端的重新实现（非移植，按行为语义重写）。
 
-[使用手册](docs/src/intro.md) · [ST 对齐实施与验收](docs/ST_PARITY_IMPLEMENTATION.md) · [功能缺口审计](docs/ST_PARITY_AUDIT.md)
+[服务器部署教程](docs/src/deployment.md) · [使用手册](docs/src/intro.md) · [ST 对齐实施与验收](docs/ST_PARITY_IMPLEMENTATION.md) · [功能缺口审计](docs/ST_PARITY_AUDIT.md)
+
+## 服务器部署（直接拉取镜像）
+
+服务器使用 **Linux x86_64 / amd64 + Docker Compose v2**。无需克隆源码，也无需安装 Rust 或 Node.js。
+
+[完整教程：安装 Docker → 域名与 Nginx → HTTPS 证书和续期 → QQ → 更新、备份与恢复](docs/src/deployment.md)
+
+首次部署，在服务器的新目录中下载配置：
+
+```bash
+mkdir -p ~/nast
+cd ~/nast
+umask 077
+curl -fL https://raw.githubusercontent.com/un4gt/nast/main/deploy/compose.yaml -o compose.yaml
+curl -fL https://raw.githubusercontent.com/un4gt/nast/main/deploy/.env.example -o .env
+curl -fL https://raw.githubusercontent.com/un4gt/nast/main/deploy/nginx.conf -o nginx.conf
+chmod 600 .env
+nano .env
+```
+
+在 `.env` 填写 `NAST_USERNAME`、`NAST_PASSWORD`，没有默认密码。然后：
+
+```bash
+sudo docker compose config --quiet
+sudo docker compose pull
+sudo docker compose up -d --no-build
+sudo docker compose ps
+curl -fsS http://127.0.0.1:8000/healthz
+```
+
+默认仅监听服务器本机 `127.0.0.1:8000`。有域名时，按[教程](docs/src/deployment.md)配置宿主机 Nginx 和 Certbot，启用 HTTPS 后设置 `NAST_PUBLIC_ORIGIN`、`NAST_COOKIE_SECURE`；暂时没有域名，可在自己的电脑运行 `ssh -N -L 18000:127.0.0.1:8000 用户名@服务器IP`，再打开 `http://127.0.0.1:18000` 登录。
+
+登录后导入角色卡，在「设置 → 模型」添加模型；同一 API 下的多个模型可批量同步。可选 QQ 接入：在同一 `.env` 设置 `COMPOSE_PROFILES=qq` 和随机 `NAST_BRIDGE_TOKEN`，再执行上述 pull/up 命令，查看 `sudo docker compose logs -f qq` 扫码。详见[完整部署教程](docs/src/deployment.md)；Discord 和飞书暂未实现。
+
+- 核心镜像：`ghcr.io/un4gt/nast:latest`；桥接镜像：`ghcr.io/un4gt/nast-bridges:latest`，均可公开拉取。
+- [镜像部署 Compose](deploy/compose.yaml) 无 `build` 字段，网页与 QQ 共用一份 `.env`，配置不同于下方源码部署。
+- 数据卷默认 `nast_nast-data` / `nast_qq-creds`；更新前备份，勿用 `down -v` 删除数据。
+- 更新仍执行 `docker compose pull` 和 `docker compose up -d --no-build`；镜像也提供 `sha-完整提交SHA` 标签及版本标签，支持固定摘要部署。
 
 ## 架构
 
@@ -25,7 +63,7 @@ nast/
 └── web/                  # rsbuild + react + tailwind + zustand
 ```
 
-## Docker 部署（核心服务）
+## 本机源码构建 Docker 镜像
 
 ```bash
 cp .env.example .env        # 填写 NAST_USERNAME 和 NAST_PASSWORD
@@ -41,33 +79,13 @@ docker compose up -d --build
 首次升级到带认证版本前先补齐环境变量；已有数据卷保留。网页、上传、头像、TTS 和 WebSocket 均由服务端认证保护。
 详见[登录与部署认证](docs/src/guide/authentication.md)、[QQ 与多平台桥接接入](docs/src/bridges.md)。
 
-### GHCR 预构建镜像
+### 镜像发布规则
 
-`.github/workflows/images.yml` 在推送 `main`、推送 `v*` 标签或手动触发时，
-构建并发布 `ghcr.io/<owner>/<repo>`（名称自动转小写，目前提供 `linux/amd64`）。
-同一工作流也发布桥接镜像 `ghcr.io/<owner>/<repo>-bridges`；本仓库对应 `ghcr.io/un4gt/nast-bridges`。
-PR 只构建和测试；核心镜像通过隔离数据目录的启动、升级迁移与重启测试，桥接镜像通过运行库及许可证检查后才发布。
-工作流使用 `GITHUB_TOKEN`，无需额外配置 Docker 密钥；仓库／组织需允许 Actions 写入 Packages。
+`.github/workflows/images.yml` 在推送 `main`、`v*` 标签或手动触发时发布核心与桥接镜像，当前平台为 `linux/amd64`。PR 只构建和验证；核心镜像经过隔离启动、迁移与重启检查，桥接经过运行库和许可证检查。
 
-- `latest`、`main`：默认 `main` 分支的最新构建。
-- `sha-<完整提交 SHA>`：定位具体代码版本。
-- `v1.2.3` 标签：同时发布 `v1.2.3`、`1.2.3`、`1.2`；预发布标签不更新稳定的 `1.2`。
+`latest` / `main` 对应默认分支；`sha-完整提交SHA` 定位具体提交；例如 `v1.2.3` 会发布 `v1.2.3`、`1.2.3`、`1.2` 标签，预发布标签不更新稳定的 `1.2`。部署可在 `.env` 中通过 `NAST_IMAGE` / `BRIDGE_IMAGE` 选择标签或摘要。
 
-替换下方 `<owner>/<repo>` 为实际 GitHub 仓库的小写名称：
-
-```bash
-docker network create nast-net    # 已存在时跳过
-docker volume create nast-data
-docker run -d --name nast --restart unless-stopped \
-  --network nast-net --env-file .env \
-  -p 8000:8000 -v nast-data:/app/data \
-  ghcr.io/<owner>/<repo>:latest
-```
-
-`docker run --env-file` 的环境文件值不要包裹引号；Compose 的 `.env` 支持单引号。
-首次发布后，如需允许匿名拉取，在 GitHub Packages 中将包可见性设为 Public；
-私有包则先使用有 `read:packages` 权限的令牌执行 `docker login ghcr.io`。
-精确部署版本可使用工作流摘要中的 `ghcr.io/<owner>/<repo>@sha256:…`。
+工作流使用 `GITHUB_TOKEN`，需要 Actions 写入 Packages 权限。Fork 后镜像名自动使用 `ghcr.io/<owner>/<repo>` 和 `ghcr.io/<owner>/<repo>-bridges`；如需匿名拉取，在 GitHub Packages 设置包可见性为 Public。
 
 ## 运行（本机裸跑）
 

@@ -7,6 +7,8 @@
 - QQ SDK 的源码与许可证位于 `vendor/qqbot-connector`，无需仓库外目录。
 - 完整教程：[平台选择、认证、网络、持久化与排错](../docs/src/bridges.md)。
 
+服务器仅拉取镜像时，使用[统一部署教程](../docs/src/deployment.md)和仓库 `deploy/compose.yaml`，在同一 `.env` 配置网页与 QQ；下文适用于本目录的独立桥接 Compose。
+
 ## 只部署 QQ
 
 先从仓库根目录部署 NAST，配置登录账号与 `NAST_BRIDGE_TOKEN`，并在网页导入角色、配置模型。然后：

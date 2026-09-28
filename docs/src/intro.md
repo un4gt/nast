@@ -12,14 +12,10 @@
 ## 它不是什么
 
 - 不是 SillyTavern 的 fork：没有复用 ST 前端，提示拼装语义以 ST v1.18.0 为基准逐条对齐（对照差异见仓库 `docs/ST_PARITY_AUDIT.md`）
-- 当前阶段模型接入仅 OpenAI 兼容 `/chat/completions`（自定义 baseURL，覆盖 OpenRouter / DeepSeek / 中转 / 本地 vLLM）
+- 模型接入支持 OpenAI 兼容、Anthropic 和 Gemini 协议，可配置自定义端点；不提供托管模型服务或内置 API 密钥。
 
-## 一分钟预览
+## 开始使用
 
-```bash
-cd web && npm install && npm run build && cd ..
-cargo run            # http://127.0.0.1:8000
-```
+服务器直接拉取镜像，按[服务器部署教程](./deployment.md)完成账号、Nginx、HTTPS 及可选 QQ 配置，无需编译源码。本机源码开发见[快速开始](./getting-started.md)。
 
-导入角色卡 → 设置 → 连接（填 baseURL / API 密钥 / 模型）→ 开聊。
-Docker 部署、QQ 机器人接入见[快速开始](./getting-started.md)。
+登录 → 导入角色卡 → 设置 → 模型（填端点、API 密钥和模型）→ 开聊。

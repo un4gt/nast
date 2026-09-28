@@ -1,0 +1,51 @@
+name: nast
+
+services:
+  nast:
+    image: ${NAST_IMAGE:-ghcr.io/un4gt/nast:latest}
+    restart: unless-stopped
+    environment:
+      NAST_BIND: 0.0.0.0
+      NAST_PORT: 8000
+      NAST_USERNAME: ${NAST_USERNAME:?Set NAST_USERNAME in .env}
+      NAST_PASSWORD: ${NAST_PASSWORD:?Set NAST_PASSWORD in .env}
+      NAST_BRIDGE_TOKEN: ${NAST_BRIDGE_TOKEN:-}
+      NAST_PUBLIC_ORIGIN: ${NAST_PUBLIC_ORIGIN:-}
+      NAST_COOKIE_SECURE: ${NAST_COOKIE_SECURE:-false}
+      NAST_PLUGIN_TIMEOUT_SECS: ${NAST_PLUGIN_TIMEOUT_SECS:-10}
+    ports:
+      - "${NAST_HTTP_BIND:-127.0.0.1}:${NAST_HTTP_PORT:-8000}:8000"
+    volumes:
+      - nast-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  qq:
+    image: ${BRIDGE_IMAGE:-ghcr.io/un4gt/nast-bridges:latest}
+    profiles: ["qq"]
+    command: ["bridge-qq"]
+    restart: unless-stopped
+    depends_on:
+      nast:
+        condition: service_healthy
+    environment:
+      BRIDGE_NAST_SERVER: ws://nast:8000/ws
+      BRIDGE_NAST_TOKEN: ${NAST_BRIDGE_TOKEN:-}
+      BRIDGE_AVATAR: ${BRIDGE_AVATAR:-}
+      BRIDGE_MAX_CHARS: ${BRIDGE_MAX_CHARS:-1500}
+      BRIDGE_GEN_TIMEOUT_SECS: ${BRIDGE_GEN_TIMEOUT_SECS:-240}
+      BRIDGE_QQ_CRED_FILE: /data/qqbot-credentials.json
+      BRIDGE_SESSIONS_PATH: /data/bridge-sessions.json
+      RUST_LOG: info
+    volumes:
+      - qq-creds:/data
+
+volumes:
+  nast-data:
+    name: ${NAST_DATA_VOLUME:-nast_nast-data}
+  qq-creds:
+    name: ${QQ_DATA_VOLUME:-nast_qq-creds}

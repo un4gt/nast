@@ -2,7 +2,9 @@
 
 NAST 使用一个部署级账号保护同一份数据，暂不提供多用户、注册或权限分组。网页显示登录页；服务端同时验证 HTTP 数据接口和 WebSocket，不能通过绕过页面直接读取聊天、上传文件或调用模型。
 
-## Docker 配置
+## 部署配置
+
+服务器直接使用 GHCR 镜像请从[服务器部署教程](../deployment.md)开始，其中包含可下载的 Compose、Nginx 配置、证书申请和续期命令。镜像部署文件位于 `deploy/`，没有 `build` 字段。
 
 复制 `.env.example` 为 `.env`，填写：
 
@@ -17,23 +19,15 @@ NAST_COOKIE_SECURE=false
 没有默认密码。Compose 缺少用户名或密码时会直接提示配置错误；服务端只配置其中一项也会拒绝启动。`.env` 已被 Git 和 Docker 构建上下文忽略。包含 `$` 或 `#` 的密码在 Compose 的 `.env` 中使用单引号，避免插值或注释。
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d --no-build
 ```
 
-打开 `http://127.0.0.1:8000`，使用上面的账号登录。只想运行 GHCR 镜像时：
-
-```bash
-docker network create nast-net    # 已存在时跳过
-docker volume create nast-data
-docker run -d --name nast --restart unless-stopped \
-  --network nast-net --env-file .env \
-  -p 8000:8000 -v nast-data:/app/data \
-  ghcr.io/un4gt/nast:latest
-```
-
-`docker run --env-file` 不按 Compose 规则移除引号或展开变量，使用这个命令时 `.env` 的值不要包裹引号。环境文件包含账号信息，不要提交或放进静态资源目录。
+以上命令使用下载的 `deploy/compose.yaml`。默认端口只对服务器本机开放，通过教程中的 SSH 隧道或 HTTPS 域名登录。仓库根目录的 `docker-compose.yml` 则用于本机源码构建，启动命令为 `docker compose up -d --build`。环境文件包含账号信息，不要提交或放进静态资源目录。
 
 ## HTTPS 与反向代理
+
+Nginx 完整配置、Certbot 安装、证书申请及 `renew --dry-run` 验证见[服务器部署教程](../deployment.md)。
 
 公网部署通过 HTTPS 反向代理访问，并填写实际站点源：
 
@@ -54,7 +48,7 @@ NAST_COOKIE_SECURE=true
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-在 NAST 的 `.env` 中设置 `NAST_BRIDGE_TOKEN`，在 `nast-bridges` 的 `.env` 中设置相同值的 `BRIDGE_NAST_TOKEN`，随后重建相应容器。令牌至少 32 字符，仅包含字母、数字或 `-_.~`。无需将网页登录密码交给桥接。
+使用 `deploy/compose.yaml` 时，在同一 `.env` 设置 `COMPOSE_PROFILES=qq` 和 `NAST_BRIDGE_TOKEN`，Compose 会自动向两个服务传入一致的令牌。使用根目录和 `nast-bridges/` 的两份源码 Compose 时，分别设置核心的 `NAST_BRIDGE_TOKEN` 与桥接的 `BRIDGE_NAST_TOKEN` 为相同值。修改后重建相应容器。令牌至少 32 字符，仅包含字母、数字或 `-_.~`。无需将网页登录密码交给桥接。
 
 桥接在 WebSocket 握手的 `Authorization: Bearer …` 请求头发送令牌，正常连接、重连和取消生成的控制连接均携带。令牌拥有这个单用户服务的 API 权限，不能放到 URL、客户端页面或聊天消息里。远程桥接使用 `wss://`；同一 Docker 网络使用 `ws://nast:8000/ws`。未设置 `NAST_BRIDGE_TOKEN` 时，服务端不接受桥接令牌认证。
 

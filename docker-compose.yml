@@ -1,4 +1,5 @@
 # nast 本地 Docker 部署（仅核心服务）。
+# 服务器直接拉取镜像请使用 deploy/compose.yaml，教程见 docs/src/deployment.md。
 #
 # 使用：
 #   1. docker compose up -d --build

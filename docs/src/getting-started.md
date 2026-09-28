@@ -1,5 +1,11 @@
 # 快速开始
 
+## 服务器直接使用镜像
+
+按[服务器部署教程](./deployment.md)下载 `deploy/compose.yaml` 与环境模板，配置用户名／密码后执行 `docker compose pull` 和 `docker compose up -d --no-build`。无需克隆源码或编译。教程包含 Ubuntu 的 Docker 安装、Nginx、HTTPS 证书与续期、无域名的 SSH 隧道、QQ 接入及更新备份。
+
+下面的命令适用于已经克隆本仓库的本机源码开发。
+
 ## 本机裸跑
 
 ```bash
@@ -14,7 +20,7 @@ cargo run
 
 前端开发模式（HMR）：终端 1 `cargo run -p nast-server`，终端 2 `cd web && npm run dev` → http://localhost:3000（devserver 已代理 `/ws`、`/upload`、`/thumbnail`、`/api/tts`）。
 
-## Docker 部署（核心服务）
+## 本机源码构建 Docker 镜像
 
 ```bash
 cp .env.example .env        # 必须填写 NAST_USERNAME 和 NAST_PASSWORD

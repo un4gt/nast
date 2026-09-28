@@ -2,6 +2,8 @@
 
 `nast-bridges/` 位于当前 NAST 仓库内，统一提交与发布；保留独立的 Cargo 工作区和镜像。每个平台运行一个容器，通过 NAST 的 `/ws` RPC 连接同一个服务；角色、模型、世界书和聊天仍由 NAST 保存。
 
+**服务器仅拉取镜像**：优先使用[服务器部署教程](./deployment.md)中的 `deploy/compose.yaml`，网页与 QQ 共用一份 `.env`，通过 `COMPOSE_PROFILES=qq` 启用桥接。该教程包含 Nginx、HTTPS、更新和备份。本文后面的部署命令适用于源码仓库中两份独立 Compose 的布局；两者的环境文件和网络配置不要混用。
+
 ## 先确认平台支持状态
 
 | 平台 | 当前状态 | 配置入口 |
