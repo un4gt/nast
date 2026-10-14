@@ -16,10 +16,60 @@ use rand::SeedableRng;
 use nast_model::group::Group;
 use serde_json::{json, Value};
 
-pub async fn generate_group(state: SharedState, mut params: Value) -> RpcResult {
-    if let Some(command) = crate::rpc::builtin_model_command(&params) {
-        return crate::rpc::model_command(state, json!({"conversation":{"kind":"group","group_id":params["id"],"chat_id":params["chat_id"]},"argument":command})).await;
+pub async fn auto(state: SharedState, method: &str, params: Value) -> RpcResult {
+    if method == "groups.auto_status" {
+        return Ok(state.auto_group.read().await.as_ref().map(|(_, data, _)| data.clone()).unwrap_or(Value::Null));
     }
+    if method == "groups.auto_stop" {
+        if let Some((_, _, token)) = state.auto_group.write().await.take() { token.cancel(); }
+        return Ok(json!({"ok":true}));
+    }
+    let id = param_str(&params, "id")?;
+    let chat = param_str(&params, "chat_id")?;
+    let mut group = crate::group_sessions::owned(&state, Some(id), chat)?;
+    group.chat_id = chat.to_string();
+    let token = tokio_util::sync::CancellationToken::new();
+    let instance = uuid::Uuid::new_v4().to_string();
+    let data = json!({"id":id,"chat_id":chat,"delay":group.auto_mode_delay.max(1)});
+    {
+        let mut guard = state.auto_group.write().await;
+        if let Some((_, _, old)) = guard.take() { old.cancel(); }
+        *guard = Some((instance.clone(), data.clone(), token.clone()));
+    }
+    let worker = state.clone();
+    actix_web::rt::spawn(async move {
+        let max_turns = params["max_turns"].as_u64().unwrap_or(u64::MAX);
+        for _ in 0..max_turns {
+            tokio::select! {
+                _ = token.cancelled() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(group.auto_mode_delay.max(1) as u64)) => {}
+            }
+            if worker.generation.read().await.abort.is_some() { continue; }
+            let result = generate_group(worker.clone(), json!({"id":group.id,"chat_id":chat_id(&group),"trigger":"automatic"})).await;
+            if result.is_err() { break; }
+        }
+        let mut guard = worker.auto_group.write().await;
+        if guard.as_ref().is_some_and(|(id,_,_)| id == &instance) { *guard = None; }
+        worker.hub.emit("group_auto_changed", guard.as_ref().map(|(_,data,_)|data.clone()).unwrap_or(Value::Null));
+    });
+    state.hub.emit("group_auto_changed", data.clone());
+    Ok(data)
+}
+
+fn chat_id(group: &Group) -> &str { &group.chat_id }
+
+pub async fn generate_group(state: SharedState, mut params: Value) -> RpcResult {
+    params["task_id"] = json!(crate::routing::task_id(&params));
+    if let Some(result) = crate::commands::prepare(state.clone(), &mut params, true).await? { return Ok(result); }
+    let owner = crate::group_sessions::owned(&state, Some(param_str(&params, "id")?), param_str(&params, "chat_id")?)?;
+    if let Some(member) = params["member"].as_str().filter(|m| !m.is_empty()) {
+        if !owner.members.iter().any(|a| a == member) { return Err(RpcError::BadRequest("not a group member".into())); }
+        read_character(&state, member)?;
+    }
+    if !["normal", "regenerate", "swipe", "continue", "quiet", "impersonate"].contains(&params["type"].as_str().unwrap_or("normal")) {
+        return Err(RpcError::BadRequest("unsupported group generation type".into()));
+    }
+    params["batch_id"] = json!(chrono::Utc::now().timestamp_millis());
     let task_id = crate::routing::task_id(&params);
     params["task_id"] = json!(task_id);
     let abort = tokio_util::sync::CancellationToken::new();
@@ -32,20 +82,44 @@ pub async fn generate_group(state: SharedState, mut params: Value) -> RpcResult 
         guard.abort = Some(abort.clone());
         guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     }
-    let result = generate_group_inner(state.clone(), params, abort).await;
+    let mut context = json!({"type":"group","is_group":true,"group_id":params["id"],"chat_id":params["chat_id"],"task_id":task_id,
+        "batch_id":params["batch_id"],"generation_type":params["type"].as_str().unwrap_or("normal"),
+        "conversation":{"kind":"group","group_id":params["id"],"chat_id":params["chat_id"]},
+        "group":owner,
+        "trigger":params["trigger"].as_str().unwrap_or(if params["member"].is_string() { "member" } else if params["user_message"].as_str().is_some_and(|m| !m.is_empty()) { "user" } else { "automatic" })});
+    for event in ["generation_started", "group_batch_started"] {
+        state.hub.emit(event, context.clone());
+        crate::plugins::dispatch(&state.plugins, event, context.clone()).await;
+    }
+    let rollback = if params["type"] == "regenerate" {
+        state.user.read_group_chat(params["chat_id"].as_str().unwrap_or("")).ok()
+    } else { None };
+    let result = generate_group_inner(state.clone(), params, abort.clone(), context.clone()).await;
+    if result.is_err() {
+        if let Some(previous) = rollback {
+            let chat_id = context["chat_id"].as_str().unwrap();
+            let has_new_reply = state.user.read_group_chat(chat_id).ok().is_some_and(|c| c.0.iter().skip(1).any(|m| m["extra"]["gen_id"] == context["batch_id"]));
+            if !has_new_reply { if let Err(error) = state.user.save_group_chat(chat_id, &previous, false) { tracing::error!("group regeneration rollback failed: {error}"); } }
+        }
+    }
+    context["success"] = json!(result.is_ok());
+    context["cancelled"] = json!(abort.is_cancelled());
+    if let Err(error) = &result { context["error"] = json!(error.to_string()); }
+    for event in ["group_batch_ended", "generation_ended"] {
+        crate::plugins::dispatch(&state.plugins, event, context.clone()).await;
+    }
     {
         let mut guard = state.generation.write().await;
         guard.abort = None;
         guard.info = None;
+        guard.group_progress = Value::Null;
         guard.text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     }
-    state.hub.emit("generation_ended", json!({"type":"group"}));
-    let host = state.plugins.lock().unwrap();
-    let _ = host.dispatch("generation_ended", &json!({"type":"group"}));
+    for event in ["group_batch_ended", "generation_ended"] { state.hub.emit(event, context.clone()); }
     result
 }
 
-async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_util::sync::CancellationToken) -> RpcResult {
+async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_util::sync::CancellationToken, mut context: Value) -> RpcResult {
     let group_id = param_str(&params, "id")?;
     let chat_id = param_str(&params, "chat_id")?;
     // 触发单成员（force_chid 语义）：仅该成员回复
@@ -54,16 +128,8 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let groups = state.user.list_groups()?;
-    let group = groups
-        .iter()
-        .find(|g| g.id == group_id)
-        .ok_or_else(|| RpcError::NotFound(format!("group {group_id}")))?
-        .clone();
-
-    if !group.chats.iter().any(|id| id == chat_id) && group.chat_id != chat_id {
-        return Err(RpcError::BadRequest("chat does not belong to group".into()));
-    }
+    let group = crate::group_sessions::owned(&state, Some(group_id), chat_id)?;
+    context["group"] = json!(group);
     if !force_member.is_empty() && !group.members.contains(&force_member) {
         return Err(RpcError::BadRequest("forced character is not a group member".into()));
     }
@@ -84,6 +150,8 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
         "regenerate" => GenerationType::Regenerate,
         "swipe" => GenerationType::Swipe,
         "continue" => GenerationType::Continue,
+        "quiet" => GenerationType::Quiet,
+        "impersonate" => GenerationType::Impersonate,
         _ => return Err(RpcError::BadRequest("unsupported group generation type".into())),
     };
     if matches!(generation_type, GenerationType::Swipe | GenerationType::Continue) {
@@ -93,6 +161,9 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
             .ok_or_else(|| RpcError::BadRequest("reply character is no longer a group member".into()))?.to_string();
     }
     if generation_type == GenerationType::Regenerate {
+        let backup = state.user.root.join("backups").join(format!("group-regenerate-{}-{chat_id}.jsonl", uuid::Uuid::new_v4()));
+        let bytes = chat.0.iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        nast_storage::atomic_write(&backup, bytes.as_bytes())?;
         let last = chat.0.last().filter(|m| m["is_user"] == false)
             .ok_or_else(|| RpcError::BadRequest("nothing to regenerate".into()))?;
         let generation_id = last["extra"]["gen_id"].clone();
@@ -126,6 +197,19 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
                 ch,
             ));
         }
+    }
+
+    if !force_member.is_empty() && !members.iter().any(|(m,_)| m.avatar == force_member) {
+        return Err(RpcError::BadRequest("forced member card is missing".into()));
+    }
+    if force_member.is_empty() && generation_type == GenerationType::Quiet {
+        force_member = chat.0.iter().skip(1).rev().find(|m| m["is_user"] != true && m["extra"]["type"] != "narrator")
+            .and_then(|m| m["original_avatar"].as_str()).filter(|a| members.iter().any(|(m,_)| &m.avatar == a))
+            .map(str::to_string).or_else(||members.first().map(|(m,_)|m.avatar.clone())).unwrap_or_default();
+    }
+    if force_member.is_empty() && generation_type == GenerationType::Impersonate && !members.is_empty() {
+        use rand::Rng;
+        force_member = members[rand::thread_rng().gen_range(0..members.len())].0.avatar.clone();
     }
 
     // persona 名（用户消息署名）
@@ -167,7 +251,6 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
         name
     };
 
-    state.hub.emit("generation_started", json!({"type": "group"}));
     // 用户消息（可选）先落盘；插件 user_input 钩子可改写
     let user_message = params
         .get("user_message")
@@ -177,14 +260,9 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
     let user_message = if user_message.is_empty() {
         String::new()
     } else {
-        let transformed = {
-            let host = state.plugins.lock().unwrap();
-            host.dispatch(
-                "user_input",
-                &json!({"text": user_message, "is_group": true}),
-            )
-            .unwrap_or_else(|| user_message.to_string())
-        };
+        context["text"] = json!(user_message);
+        let transformed = crate::plugins::dispatch(&state.plugins, "user_input", context.clone()).await
+            .unwrap_or_else(||user_message.to_string());
         let settings = state.settings.read().await.clone();
         // No character is selected while submitting the group user message.
         // Apply shared global/preset rules once, before the member generation loop.
@@ -204,15 +282,23 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
         let index = chat.0.len() - 1;
         state.hub.emit("message_sent", json!(index));
         state.hub.emit("user_message_rendered", json!(index));
-        user_message.to_string()
+        context["index"] = json!(index);
+        context["message"] = chat.0.last().cloned().unwrap_or(Value::Null);
+        crate::plugins::dispatch(&state.plugins, "message_saved", context.clone()).await;
+        transformed
     };
 
     // 最后发言者 & 自上次用户消息后的未发言成员
-    let last_speaker = find_last_speaker(&chat);
+    let last = chat.0.last().filter(|_|chat.0.len() > 1);
+    let last_speaker = last.filter(|m| m["is_user"] != true)
+        .and_then(|m| m[if group.activation_strategy == 3 { "original_avatar" } else { "name" }].as_str()).map(str::to_string);
+    let activation_text = if user_message.is_empty() {
+        last.filter(|m| m["is_system"] != true).and_then(|m|m["mes"].as_str()).unwrap_or("")
+    } else { &user_message };
     let unspoken = unspoken_since_user(&chat, &members);
 
     // 激活成员（触发单成员时跳过策略）
-    let activated: Vec<String> = if !force_member.is_empty() {
+    let mut activated: Vec<String> = if !force_member.is_empty() {
         vec![force_member.clone()]
     } else {
         let mut rng = rand::rngs::StdRng::from_seed(rand::random());
@@ -220,16 +306,26 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
         nast_engine::group_chat::activate_members(
             &group,
             &member_only,
-            &user_message,
+            activation_text,
             last_speaker.as_deref(),
             &unspoken,
             !user_message.is_empty(),
             &mut rng,
         )
     };
+    context["eligible_members"] = json!(members.iter().filter(|(m,_)| !group.disabled_members.contains(&m.avatar)).map(|(m,_)| &m.avatar).collect::<Vec<_>>());
+    context["queue"] = json!(activated);
+    if force_member.is_empty() && matches!(generation_type, GenerationType::Normal | GenerationType::Regenerate) {
+        if let Some(selection) = crate::plugins::dispatch_json(&state.plugins, "group_queue", context.clone()).await {
+            activated = serde_json::from_value(selection["queue"].clone()).unwrap_or(activated);
+        }
+    }
+    context["queue"] = json!(activated);
+    context["stage"] = json!("queued");
+    state.generation.write().await.group_progress = context.clone();
+    state.hub.emit("group_progress", context.clone());
     if activated.is_empty() {
-        state.user.save_group_chat(chat_id, &chat, false)?;
-        return Ok(json!({"activated": [], "chat_id": chat_id}));
+        return Ok(json!({"activated": [], "replies":[], "chat_id": chat_id,"task_id":task_id}));
     }
 
     // 生成会话
@@ -273,19 +369,9 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
         progress,
     };
 
-    // 插件事件：群生成开始
-    {
-        let host = state.plugins.lock().unwrap();
-        let _ = host.dispatch(
-            "generation_started",
-            &json!({"type": "group", "group": group.name}),
-        );
-    }
-
-    // 逐成员生成
-    let gen_id = chrono::Utc::now().timestamp_millis();
+    let gen_id = params["batch_id"].as_i64().unwrap();
     let mut replies: Vec<Value> = Vec::new();
-    for avatar in &activated {
+    for (position, avatar) in activated.iter().enumerate() {
         if session.abort.is_cancelled() { break; }
         let (_member, member_ch) = members
             .iter()
@@ -295,19 +381,38 @@ async fn generate_group_inner(state: SharedState, params: Value, abort: tokio_ut
             .hub
             .emit("group_member_drafted", json!(member_ch.name));
 
+        context["queue"] = json!(&activated[position..]);
+        context["member"] = json!(avatar);
+        context["stage"] = json!("member_started");
+        {
+            let mut progress = state.generation.write().await;
+            progress.group_progress = context.clone();
+            progress.text.lock().unwrap().clear();
+            progress.reasoning.lock().unwrap().clear();
+        }
+        state.hub.emit("group_progress", context.clone());
+        crate::plugins::dispatch(&state.plugins, "group_member_started", context.clone()).await;
+        if session.abort.is_cancelled() { break; }
         let p = GenerateParams {
-            group: Some(crate::generate::GroupContext { group: group.clone(), members: members.clone(), generation_id:gen_id }),
+            group: Some(crate::generate::GroupContext { group: group.clone(), members: members.clone(), generation_id:gen_id, trigger:context["trigger"].as_str().unwrap_or("automatic").into() }),
             generation_type: if generation_type == GenerationType::Regenerate { GenerationType::Normal } else { generation_type },
             avatar: avatar.clone(),
             chat_file: chat_id.to_string(),
-            user_message: String::new(),
+            user_message: if generation_type == GenerationType::Quiet { params["user_message"].as_str().unwrap_or("").into() } else { String::new() },
             character: member_ch.clone(),
             is_group: true,
         };
         session.oai = serde_json::from_value(settings_snapshot["oai_settings"].clone()).unwrap_or_default();
         session.routing.configure_prompt(&mut session.oai);
-        let result = session.run_content(&p).await.map_err(RpcError::generation)?;
-        replies.push(json!({"name":member_ch.name,"text":result.text,"reasoning":result.reasoning,"routing":result.routing}));
+        let result = session.run_content(&p).await;
+        context["success"] = json!(result.is_ok());
+        context["stage"] = json!("member_ended");
+        context["queue"] = json!(&activated[position+1..]);
+        state.generation.write().await.group_progress = context.clone();
+        state.hub.emit("group_progress", context.clone());
+        crate::plugins::dispatch(&state.plugins, "group_member_ended", context.clone()).await;
+        let result = result.map_err(RpcError::generation)?;
+        replies.push(json!({"avatar":avatar,"name":member_ch.name,"text":result.text,"reasoning":result.reasoning,"routing":result.routing}));
         if result.routing["status"] == "incomplete" { break; }
         if session.abort.is_cancelled() { break; }
     }
@@ -355,17 +460,6 @@ pub(crate) fn init_group_chat(
     Ok(chat)
 }
 
-fn find_last_speaker(chat: &ChatFile) -> Option<String> {
-    chat.0
-        .iter()
-        .skip(1)
-        .rev()
-        .find(|m| m.get("is_user").and_then(|v| v.as_bool()) == Some(false))
-        .and_then(|m| m.get("name"))
-        .and_then(|n| n.as_str())
-        .map(|s| s.to_string())
-}
-
 fn unspoken_since_user(chat: &ChatFile, members: &[(GroupMember, Character)]) -> Vec<String> {
     let mut spoken: Vec<String> = Vec::new();
     for m in chat.0.iter().skip(1).rev() {
@@ -373,7 +467,8 @@ fn unspoken_since_user(chat: &ChatFile, members: &[(GroupMember, Character)]) ->
         if is_user {
             break;
         }
-        if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
+        if m["is_system"] == true || m["extra"]["type"] == "narrator" { continue; }
+        if let Some(name) = m.get("original_avatar").and_then(|n| n.as_str()) {
             if !spoken.contains(&name.to_string()) {
                 spoken.push(name.to_string());
             }
@@ -381,7 +476,7 @@ fn unspoken_since_user(chat: &ChatFile, members: &[(GroupMember, Character)]) ->
     }
     members
         .iter()
-        .filter(|(gm, _)| !spoken.contains(&gm.name))
+        .filter(|(gm, _)| !spoken.contains(&gm.avatar))
         .map(|(gm, _)| gm.avatar.clone())
         .collect()
 }

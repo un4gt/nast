@@ -27,6 +27,7 @@ pub struct GroupContext {
     pub group: nast_model::group::Group,
     pub members: Vec<(nast_engine::group_chat::GroupMember, nast_model::card::Character)>,
     pub generation_id: i64,
+    pub trigger: String,
 }
 
 pub struct GenerateParams {
@@ -110,11 +111,11 @@ impl<'a> GenerateSession<'a> {
         );
         self.dispatch_plugin(
             "generation_started",
-            &json!({"type": params.generation_type.as_str()}),
-        );
+            &self.plugin_context(&params, json!({"type": params.generation_type.as_str()})),
+        ).await;
         let result = self.run_content(&params).await;
         self.hub.emit("generation_ended", json!({"task_id":self.routing.task_id,"conversation":self.routing.conversation}));
-        self.dispatch_plugin("generation_ended", &json!({}));
+        self.dispatch_plugin("generation_ended", &self.plugin_context(&params, json!({"success":result.is_ok()}))).await;
         result
     }
 
@@ -153,24 +154,9 @@ impl<'a> GenerateSession<'a> {
             let user_name = metadata
                 .map(|m| self.resolve_persona(&m).name)
                 .unwrap_or_else(|| "User".into());
-            // 斜杠命令：插件注册的 /cmd 优先于 user_input 钩子；空结果 = 吞掉消息
-            let mut effective = p.user_message.clone();
-            if effective.starts_with('/') {
-                let cmd_result = {
-                    let host = self.plugins.lock().unwrap();
-                    host.run_command(&effective)
-                };
-                if let Some(applied) = cmd_result {
-                    if applied.is_empty() {
-                        self.hub
-                            .emit("toast", json!({"message": "command handled", "type": "info"}));
-                        return Ok(GenerateResult { text: String::new(), saved: false, routing: Value::Null, reasoning:String::new() });
-                    }
-                    effective = applied;
-                }
-            }
+            let effective = p.user_message.clone();
             // 插件钩子：user_input 可改写用户消息
-            let user_text = self.transform_or(&"user_input", &json!({"text": effective}), &effective);
+            let user_text = self.transform_or("user_input", &self.plugin_context(p, json!({"text": effective})), &effective).await;
             let scripts = self.collect_regex_scripts(&p.character, &chat.metadata());
             let user_text = nast_engine::regex_engine::get_regexed_string(&user_text,
                 nast_model::regex_script::RP_USER_INPUT, &scripts, &Default::default(),
@@ -214,7 +200,7 @@ impl<'a> GenerateSession<'a> {
         } else { crate::prompt_bridge::assemble_with_macros(&self.oai, &input) };
         self.check_prompt(&assembled)?;
         // 插件钩子：prompt_built 可整体重写拼装消息
-        let assembled = apply_prompt_plugin(self.plugins, assembled);
+        let assembled = apply_prompt_plugin(self.plugins, assembled, self.plugin_context(p, json!({}))).await;
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
@@ -276,7 +262,7 @@ impl<'a> GenerateSession<'a> {
 
         // 插件钩子：ai_output 可改写 AI 回复
         let streamed = self
-            .transform_or(&"ai_output", &json!({"text": streamed, "name": char_name}), &streamed);
+            .transform_or("ai_output", &self.plugin_context(p, json!({"text": streamed, "name": char_name})), &streamed).await;
 
         // cleanUpMessage 管线（script.js:6383-6533）：停止串剥离/正则默认 pass/
         // 名字清理/endoftext 截断/fixMarkdown
@@ -382,6 +368,7 @@ impl<'a> GenerateSession<'a> {
                     extra.time_to_first_token = Some(ttft);
                 }
                 let swipe_info = SwipeInfo {
+                    other: Default::default(),
                     send_date: Some(now.clone()),
                     gen_started: Some(gen_started.clone()),
                     gen_finished: Some(now.clone()),
@@ -432,6 +419,7 @@ impl<'a> GenerateSession<'a> {
                     swipes: Some(vec![streamed.clone()]),
                     swipe_id: Some(0),
                     swipe_info: Some(vec![SwipeInfo {
+                        other: Default::default(),
                         send_date: Some(now.clone()),
                         gen_started: Some(gen_started.clone()),
                         gen_finished: Some(now.clone()),
@@ -448,7 +436,7 @@ impl<'a> GenerateSession<'a> {
         let chat_id = chat.0.len() as i64 - 1;
         self.hub.emit("message_received", json!(chat_id));
         self.hub.emit("character_message_rendered", json!(chat_id));
-        self.dispatch_plugin("message_saved", &json!({"index": chat_id}));
+        self.dispatch_plugin("message_saved", &self.plugin_context(p, json!({"index": chat_id, "message":chat.0.last()}))).await;
         Ok(GenerateResult { text: streamed, saved: true, routing: route_metadata, reasoning })
     }
 
@@ -470,6 +458,7 @@ impl<'a> GenerateSession<'a> {
         };
         let assembled = crate::prompt_bridge::assemble_impersonate(&self.oai, &input, &impersonation_prompt);
         self.check_prompt(&assembled)?;
+        let assembled = apply_prompt_plugin(self.plugins, assembled, self.plugin_context(p, json!({}))).await;
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
@@ -478,7 +467,7 @@ impl<'a> GenerateSession<'a> {
         self.save_chat_for(p, &chat)?;
         let routing = outcome.metadata(&self.routing);
         if outcome.complete { self.hub.emit("conversation_model_changed", json!({"conversation":self.routing.conversation,"state":chat.0[0]["chat_metadata"]["nast_model"]})); }
-        let text = outcome.text;
+        let text = self.transform_or("ai_output", &self.plugin_context(p, json!({"text":outcome.text})), &outcome.text).await;
         // cleanUpMessage（isImpersonate：USER_INPUT 正则 pass + 停止串剥离）
         let metadata = chat.metadata();
         let scripts = self.collect_regex_scripts(&p.character, &metadata);
@@ -508,6 +497,7 @@ impl<'a> GenerateSession<'a> {
         let input = self.build_assemble_input(p, &history);
         let assembled = crate::prompt_bridge::assemble_quiet(&self.oai, &input, &p.user_message);
         self.check_prompt(&assembled)?;
+        let assembled = apply_prompt_plugin(self.plugins, assembled, self.plugin_context(p, json!({}))).await;
         chat.0[0]["chat_metadata"] = json!(input.metadata_after_assembly());
         self.commit_globals(&input).await?;
         self.save_chat_for(p, &chat)?;
@@ -516,7 +506,7 @@ impl<'a> GenerateSession<'a> {
         self.save_chat_for(p, &chat)?;
         let routing = outcome.metadata(&self.routing);
         if outcome.complete { self.hub.emit("conversation_model_changed", json!({"conversation":self.routing.conversation,"state":chat.0[0]["chat_metadata"]["nast_model"]})); }
-        let text = outcome.text;
+        let text = self.transform_or("ai_output", &self.plugin_context(p, json!({"text":outcome.text})), &outcome.text).await;
         Ok(GenerateResult { text, saved: false, routing, reasoning:outcome.reasoning })
     }
 
@@ -1029,21 +1019,28 @@ impl<'a> GenerateSession<'a> {
         Ok(outcome)
     }
 
-    /// 派发插件事件（无转换返回）。
-    fn dispatch_plugin(&self, event: &str, data: &serde_json::Value) {
-        if let Ok(host) = self.plugins.lock() {
-            let _ = host.dispatch(event, data);
+    fn plugin_context(&self, p: &GenerateParams, mut data: Value) -> Value {
+        data["conversation"] = json!(self.routing.conversation);
+        data["task_id"] = json!(self.routing.task_id);
+        data["is_group"] = json!(p.is_group);
+        data["chat_id"] = json!(p.chat_file);
+        data["member"] = json!(p.avatar);
+        data["generation_type"] = json!(p.generation_type.as_str());
+        if let Some(g) = &p.group {
+            data["group_id"] = json!(g.group.id);
+            data["group"] = json!(g.group);
+            data["batch_id"] = json!(g.generation_id);
+            data["trigger"] = json!(g.trigger);
         }
+        data
     }
 
-    /// 派发转换类钩子：返回插件改写文本或 fallback 原文。
-    fn transform_or(&self, event: &str, data: &serde_json::Value, fallback: &str) -> String {
-        if let Ok(host) = self.plugins.lock() {
-            if let Some(text) = host.dispatch(event, data) {
-                return text;
-            }
-        }
-        fallback.to_string()
+    async fn dispatch_plugin(&self, event: &str, data: &Value) {
+        crate::plugins::dispatch(self.plugins, event, data.clone()).await;
+    }
+
+    async fn transform_or(&self, event: &str, data: &Value, fallback: &str) -> String {
+        crate::plugins::dispatch(self.plugins, event, data.clone()).await.unwrap_or_else(||fallback.to_string())
     }
 
     fn read_chat_for(&self, p: &GenerateParams) -> Result<ChatFile, String> {
@@ -1401,21 +1398,19 @@ pub fn build_injections(p: &GenerateParams) -> Vec<InChatInjection> {    let mut
 }
 
 /// prompt_built 插件钩子：{messages=[{role,content},...]} 重写拼装结果。
-fn apply_prompt_plugin(
+async fn apply_prompt_plugin(
     plugins: &std::sync::Mutex<nast_plugin::PluginHost>,
     assembled: AssembleOutput,
+    mut data: Value,
 ) -> AssembleOutput {
-    let data = json!({
-        "messages": assembled
+    data["messages"] = json!(
+        assembled
             .chat
             .iter()
             .map(|m| json!({"role": m.role, "content": m.content, "name": m.name}))
-            .collect::<Vec<_>>(),
-    });
-    let rewritten = {
-        let host = plugins.lock().unwrap();
-        host.dispatch_json("prompt_built", &data)
-    };
+            .collect::<Vec<_>>()
+    );
+    let rewritten = crate::plugins::dispatch_json(plugins, "prompt_built", data).await;
     let arr = match rewritten {
         Some(Value::Array(arr)) => arr,
         // {messages: [...]} 包装形态

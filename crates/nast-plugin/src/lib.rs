@@ -2,14 +2,15 @@
 //!
 //! 插件以 Lua 脚本注册事件钩子与命令，通过 nast API 表访问宿主能力。
 //! 所有 Lua 执行固定在一条专用 OS 线程上（Lua !Send），每次派发限时
-//! （NAST_PLUGIN_TIMEOUT_SECS，默认 10s），超时放行不阻塞生成管线。
+//! （NAST_PLUGIN_TIMEOUT_SECS，默认 10s），并用指令预算实际中断超时回调。
 //!
 //! 插件 API（宿主提供，无需样板代码）：
 //! - nast.on(event, fn)               注册事件钩子（可多次注册）
-//! - nast.register_command(name, fn)  注册斜杠命令 /name args... → fn(args)
+//! - nast.register_command(name, fn)  注册斜杠命令 /name args... → fn(args, context)
 //! - nast.get_var(key) / set_var      插件级 KV（plugin_vars.json 持久化）
 //! - nast.log(...)                    日志
-//! - nast.toast(message, type)        发送前端 toast（hub 广播）
+//! - nast.notify(message, type)       通用通知（日志与 hub 广播，不等待客户端）
+//! - nast.toast(message, type)        notify 的兼容入口
 //!
 //! 钩子返回值：返回非 nil 字符串 = 转换事件携带文本（user_input/ai_output）；
 //! prompt_built 事件可返回 {messages={{role=,content=},...}} 重写拼装结果。
@@ -21,7 +22,8 @@ use mlua::{Lua, Value as LuaValue};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PluginError {
@@ -64,7 +66,8 @@ enum Cmd {
     },
     RunCommand {
         input: String,
-        reply: std::sync::mpsc::Sender<Option<String>>,
+        context: JsonValue,
+        reply: std::sync::mpsc::Sender<Result<Option<String>, String>>,
     },
     List {
         reply: std::sync::mpsc::Sender<Vec<PluginInfo>>,
@@ -79,12 +82,38 @@ pub struct PluginManager {
     plugins: Vec<Plugin>,
     kv: KvStore,
     kv_path: Option<std::path::PathBuf>,
-    toast: Option<ToastFn>,
+    toast: Arc<Mutex<Option<ToastFn>>>,
 }
 
 struct Plugin {
     name: String,
     lua: Lua,
+}
+
+fn arm_budget(lua: &Lua) {
+    let deadline = Instant::now() + Duration::from_secs(std::env::var("NAST_PLUGIN_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(10).max(1));
+    let instructions = Arc::new(AtomicU64::new(0));
+    lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(10_000), move |_, _| {
+        if Instant::now() >= deadline || instructions.fetch_add(10_000, Ordering::Relaxed) >= 5_000_000 {
+            std::panic::resume_unwind(Box::new(BudgetExceeded));
+        }
+        Ok(mlua::VmState::Continue)
+    });
+}
+
+struct BudgetExceeded;
+
+fn bounded<T>(lua: &Lua, call: impl FnOnce() -> mlua::Result<T>) -> mlua::Result<T> {
+    arm_budget(lua);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(value) => value,
+        Err(error) if error.is::<BudgetExceeded>() => Err(mlua::Error::RuntimeError("plugin execution budget exceeded".into())),
+        Err(_) => Err(mlua::Error::RuntimeError("plugin callback panicked".into())),
+    }
+}
+
+fn event_hooks(lua: &Lua, event: &str) -> Option<mlua::Table> {
+    lua.globals().raw_get::<mlua::Table>("nast").ok()?.raw_get::<mlua::Table>("hooks").ok()?.raw_get::<Option<mlua::Table>>(event).ok().flatten()
 }
 
 impl PluginManager {
@@ -93,7 +122,7 @@ impl PluginManager {
             plugins: vec![],
             kv: Arc::new(Mutex::new(BTreeMap::new())),
             kv_path: None,
-            toast: None,
+            toast: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -109,12 +138,18 @@ impl PluginManager {
     }
 
     pub fn set_toast(&mut self, toast: Option<ToastFn>) {
-        self.toast = toast;
+        *self.toast.lock().unwrap() = toast;
     }
 
     /// 从源码加载插件（宿主注入 nast API 表）。
     pub fn load(&mut self, name: &str, code: &str) -> PluginResult<()> {
-        let lua = Lua::new();
+        let lua = Lua::new_with(mlua::StdLib::ALL_SAFE, mlua::LuaOptions::new().catch_rust_panics(false))?;
+        lua.set_memory_limit(32 * 1024 * 1024)?;
+        // Blocking native I/O and new coroutine threads bypass instruction deadlines.
+        for name in ["io", "os", "package", "require", "dofile", "loadfile", "coroutine"] {
+            lua.globals().set(name, LuaValue::Nil)?;
+        }
+        arm_budget(&lua);
         let kv = self.kv.clone();
         let kv_path_save = self.kv.clone();
         let plugin_name = name.to_string();
@@ -130,7 +165,7 @@ impl PluginManager {
 
         // nast.on(event, fn)
         let on_fn = lua.create_function(|lua, (event, func): (String, mlua::Function)| {
-            let nast: mlua::Table = lua.globals().get("nast")?;
+            let nast: mlua::Table = lua.globals().raw_get("nast")?;
             let hooks: mlua::Table = nast.get("hooks")?;
             let list: mlua::Table = match hooks.get::<Option<mlua::Table>>(event.clone())? {
                 Some(t) => t,
@@ -144,7 +179,7 @@ impl PluginManager {
 
         // nast.register_command(name, fn(args) -> string)
         let reg_fn = lua.create_function(|lua, (cmd, func): (String, mlua::Function)| {
-            let nast: mlua::Table = lua.globals().get("nast")?;
+            let nast: mlua::Table = lua.globals().raw_get("nast")?;
             let commands: mlua::Table = nast.get("commands")?;
             commands.set(cmd.trim_start_matches('/').to_lowercase(), func)?;
             Ok(())
@@ -169,19 +204,20 @@ impl PluginManager {
         let kv_write_path = self.kv_path.clone();
         nast.set(
             "set_var",
-            lua.create_function(move |_, (key, value): (String, LuaValue)| {
+            lua.create_function(move |lua, (key, value): (String, LuaValue)| {
                 let full = format!("plugin:{plugin_name}:{key}");
-                let json = lua_value_to_json(value);
-                kv_write.lock().unwrap().insert(full, json);
-                // 写穿落盘（小文件，直接全量）
+                let json = lua_to_json(lua, &value).ok_or_else(|| mlua::Error::external("unsupported KV value"))?;
+                let mut guard = kv_write.lock().unwrap();
+                let mut next = guard.clone();
+                next.insert(full, json);
                 if let Some(path) = &kv_write_path {
-                    if let Ok(pretty) = serde_json::to_string(&*kv_write.lock().unwrap()) {
-                        let tmp = path.with_extension("tmp");
-                        if std::fs::write(&tmp, pretty).is_ok() {
-                            let _ = std::fs::rename(&tmp, path);
-                        }
-                    }
+                    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).map_err(mlua::Error::external)?; }
+                    let bytes = serde_json::to_vec(&next).map_err(mlua::Error::external)?;
+                    let tmp = path.with_extension("tmp");
+                    std::fs::write(&tmp, bytes).map_err(mlua::Error::external)?;
+                    std::fs::rename(&tmp, path).map_err(mlua::Error::external)?;
                 }
+                *guard = next;
                 Ok(())
             })?,
         )?;
@@ -208,12 +244,14 @@ impl PluginManager {
             lua.create_function(move |_, (message, kind): (String, Option<String>)| {
                 let kind = kind.unwrap_or_else(|| "info".into());
                 tracing::info!("[plugin:{toast_name}] toast: {message}");
-                if let Some(cb) = &toast_cb {
+                if let Some(cb) = &*toast_cb.lock().unwrap() {
                     cb(&message, &kind);
                 }
                 Ok(())
             })?,
         )?;
+
+        nast.set("notify", nast.get::<mlua::Function>("toast")?)?;
 
         // nast.json_decode / json_encode（结构化钩子用）
         nast.set(
@@ -234,108 +272,111 @@ impl PluginManager {
         )?;
 
         lua.globals().set("nast", nast)?;
-        lua.load(code).set_name(name).exec()?;
+        bounded(&lua, || lua.load(code).set_name(name).exec())?;
 
         self.plugins.push(Plugin {
             name: name.to_string(),
             lua,
         });
+        self.plugins.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(())
     }
 
     /// 派发事件，收集 (插件名, 转换文本)。
     pub fn dispatch(&self, event: &str, data: &JsonValue) -> Vec<(String, String)> {
         let mut transforms = Vec::new();
+        let mut current = data.clone();
         for plugin in &self.plugins {
-            let hooks: mlua::Table = match plugin.lua.globals().get::<mlua::Table>("nast") {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let list = match hooks.get::<Option<mlua::Table>>("hooks") {
-                Ok(Some(t)) => match t.get::<Option<mlua::Table>>(event) {
-                    Ok(Some(l)) => l,
-                    _ => continue,
-                },
-                _ => continue,
-            };
-            for pair in list.sequence_values::<mlua::Function>() {
-                if let Ok(func) = pair {
-                    let data_str = data.to_string();
-                    let arg = match plugin.lua.create_string(&data_str) {
-                        Ok(s) => LuaValue::String(s),
-                        Err(_) => continue,
-                    };
-                    match func.call::<LuaValue>(arg) {
-                        Ok(result) => {
-                            if let Some(s) = result.as_str() {
-                                transforms.push((plugin.name.clone(), s.to_string()));
-                            }
-                        }
-                        Err(e) => tracing::warn!("[plugin:{}] hook {event} failed: {e}", plugin.name),
+            let Some(list) = event_hooks(&plugin.lua, event) else { continue };
+            for func in list.sequence_values::<mlua::Function>().flatten() {
+                match bounded(&plugin.lua, || func.call::<LuaValue>(current.to_string())) {
+                    Ok(LuaValue::String(text)) => {
+                        let text = text.to_string_lossy();
+                        current["text"] = JsonValue::String(text.clone());
+                        transforms.push((plugin.name.clone(), text));
                     }
+                    Ok(_) => {},
+                    Err(e) => tracing::warn!("[plugin:{}] hook {event} failed: {e}", plugin.name),
                 }
             }
         }
         transforms
     }
 
-    /// 结构化派发（prompt_built：返回 Lua 表 → JSON）。
+    /// Serial transformations retain context and the last valid result on failure.
     pub fn dispatch_json(&self, event: &str, data: &JsonValue) -> Option<JsonValue> {
+        let mut current = data.clone();
+        let mut last = None;
         for plugin in &self.plugins {
-            let hooks: mlua::Table = plugin.lua.globals().get::<mlua::Table>("nast").ok()?;
-            let list = hooks
-                .get::<Option<mlua::Table>>("hooks")
-                .ok()
-                .flatten()?
-                .get::<Option<mlua::Table>>(event)
-                .ok()
-                .flatten()?;
-            for pair in list.sequence_values::<mlua::Function>() {
-                let Ok(func) = pair else { continue };
-                let arg = LuaValue::String(plugin.lua.create_string(&data.to_string()).ok()?);
-                if let Ok(result) = func.call::<LuaValue>(arg) {
-                    if !matches!(result, LuaValue::Nil) {
-                        let json = lua_to_json(&plugin.lua, &result);
-                        // json_encode 产物（字符串）再解一层
-                        if let Some(JsonValue::String(text)) = &json {
-                            if let Ok(parsed) = serde_json::from_str::<JsonValue>(text) {
-                                return Some(parsed);
-                            }
-                        }
-                        return json;
-                    }
+            let Some(list) = event_hooks(&plugin.lua, event) else { continue };
+            for func in list.sequence_values::<mlua::Function>().flatten() {
+                let result = match bounded(&plugin.lua, || func.call::<LuaValue>(current.to_string())) {
+                    Ok(LuaValue::Nil) => continue,
+                    Ok(value) => lua_to_json(&plugin.lua, &value),
+                    Err(e) => { tracing::warn!("[plugin:{}] hook {event} failed: {e}", plugin.name); continue; }
+                };
+                let Some(mut result) = result else { continue };
+                if let JsonValue::String(text) = &result {
+                    if let Ok(parsed) = serde_json::from_str(text) { result = parsed; }
                 }
+                let field = if event == "group_queue" { "queue" } else { "messages" };
+                // Lua {} is the empty array in the queue API.
+                if event == "group_queue" && result.as_object().is_some_and(|m| m.is_empty()) {
+                    result = serde_json::json!([]);
+                }
+                let values = result.get(field).unwrap_or(&result);
+                let valid = if event == "group_queue" {
+                    values.as_array().is_some_and(|queue| {
+                        let mut seen = std::collections::HashSet::new();
+                        queue.iter().all(|a| a.as_str().is_some_and(|a|
+                            data["eligible_members"].as_array().is_some_and(|members| members.iter().any(|m| m == a))
+                            && seen.insert(a)))
+                    })
+                } else {
+                    values.as_array().is_some_and(|messages| !messages.is_empty() && messages.iter().all(|m|
+                        m["content"].is_string() && m["role"].as_str().is_some_and(|r| ["system", "user", "assistant", "tool"].contains(&r))))
+                };
+                if !valid {
+                    tracing::warn!("[plugin:{}] invalid {event} result ignored", plugin.name);
+                    continue;
+                }
+                current[field] = values.clone();
+                last = Some(current.clone());
             }
         }
-        None
+        last
     }
 
-    /// 斜杠命令："/cmd args…" → 命中则返回命令结果（可为空串 = 吞掉消息）。
     pub fn run_command(&self, input: &str) -> Option<String> {
-        let trimmed = input.trim();
-        let rest = trimmed.strip_prefix('/')?;
-        let (cmd, args) = match rest.split_once(' ') {
-            Some((c, a)) => (c.to_lowercase(), a.to_string()),
-            None => (rest.to_lowercase(), String::new()),
-        };
-        if cmd.is_empty() {
-            return None;
-        }
+        self.run_command_context(input, &JsonValue::Null)
+    }
+
+    pub fn run_command_context(&self, input: &str, context: &JsonValue) -> Option<String> {
+        self.try_run_command_context(input, context).unwrap_or_else(|_| Some(String::new()))
+    }
+
+    pub fn try_run_command_context(&self, input: &str, context: &JsonValue) -> Result<Option<String>, String> {
+        let Some(rest) = input.trim().strip_prefix('/') else { return Ok(None) };
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let cmd = parts.next().unwrap_or_default().to_lowercase();
+        let args = parts.next().unwrap_or("").trim_start();
         for plugin in &self.plugins {
-            let nast: mlua::Table = plugin.lua.globals().get::<mlua::Table>("nast").ok()?;
-            let commands: mlua::Table = nast.get("commands").ok()?;
-            if let Ok(Some(func)) = commands.get::<Option<mlua::Function>>(cmd.clone()) {
-                return match func.call::<LuaValue>(args.clone()) {
-                    Ok(LuaValue::Nil) => Some(String::new()),
-                    Ok(v) => v.as_str().map(|s| s.to_string()),
+            let Ok(nast) = plugin.lua.globals().raw_get::<mlua::Table>("nast") else { continue };
+            let Ok(commands) = nast.raw_get::<mlua::Table>("commands") else { continue };
+            if let Ok(Some(func)) = commands.raw_get::<Option<mlua::Function>>(cmd.as_str()) {
+                let context = json_to_lua(&plugin.lua, context).unwrap_or(LuaValue::Nil);
+                return match bounded(&plugin.lua, || func.call::<LuaValue>((args, context))) {
+                    Ok(LuaValue::String(v)) => Ok(Some(v.to_string_lossy())),
+                    Ok(_) => Ok(Some(String::new())),
                     Err(e) => {
                         tracing::warn!("[plugin:{}] command /{cmd} failed: {e}", plugin.name);
-                        None
+                        // A failed known command is consumed, never sent to a model as user text.
+                        Err(format!("plugin {} command /{cmd}: {e}", plugin.name))
                     }
                 };
             }
         }
-        None
+        Ok(None)
     }
 
     pub fn infos(&self) -> Vec<PluginInfo> {
@@ -344,7 +385,7 @@ impl PluginManager {
             .map(|p| {
                 let mut hooks = vec![];
                 let mut commands = vec![];
-                if let Ok(nast) = p.lua.globals().get::<mlua::Table>("nast") {
+                if let Ok(nast) = p.lua.globals().raw_get::<mlua::Table>("nast") {
                     if let Ok(Some(t)) = nast.get::<Option<mlua::Table>>("hooks") {
                         for pair in t.pairs::<String, mlua::Table>() {
                             if let Ok((k, _)) = pair {
@@ -380,19 +421,6 @@ impl Default for PluginManager {
     }
 }
 
-fn lua_value_to_json(v: LuaValue) -> JsonValue {
-    match v {
-        LuaValue::Nil => JsonValue::Null,
-        LuaValue::Boolean(b) => JsonValue::Bool(b),
-        LuaValue::Integer(i) => JsonValue::Number(i.into()),
-        LuaValue::Number(f) => {
-            serde_json::Number::from_f64(f).map(JsonValue::Number).unwrap_or(JsonValue::Null)
-        }
-        LuaValue::String(s) => JsonValue::String(s.to_string_lossy().to_string()),
-        _ => JsonValue::Null,
-    }
-}
-
 fn json_to_lua(lua: &Lua, v: &JsonValue) -> mlua::Result<LuaValue> {
     Ok(match v {
         JsonValue::Null => LuaValue::Nil,
@@ -424,6 +452,11 @@ fn json_to_lua(lua: &Lua, v: &JsonValue) -> mlua::Result<LuaValue> {
 
 /// Lua 表 → JSON（数组/对象自适应；仅用于 prompt_built 重写）。
 fn lua_to_json(lua: &Lua, v: &LuaValue) -> Option<JsonValue> {
+    lua_to_json_depth(lua, v, 0)
+}
+
+fn lua_to_json_depth(lua: &Lua, v: &LuaValue, depth: usize) -> Option<JsonValue> {
+    if depth > 64 { return None; }
     Some(match v {
         LuaValue::Nil => JsonValue::Null,
         LuaValue::Boolean(b) => JsonValue::Bool(*b),
@@ -435,15 +468,15 @@ fn lua_to_json(lua: &Lua, v: &LuaValue) -> Option<JsonValue> {
             if len > 0 {
                 let mut arr = Vec::with_capacity(len);
                 for i in 1..=len {
-                    let item = t.get::<LuaValue>(i).ok()?;
-                    arr.push(lua_to_json(lua, &item)?);
+                    let item = t.raw_get::<LuaValue>(i).ok()?;
+                    arr.push(lua_to_json_depth(lua, &item, depth + 1)?);
                 }
                 JsonValue::Array(arr)
             } else {
                 let mut map = serde_json::Map::new();
                 for pair in t.clone().pairs::<String, LuaValue>() {
                     let (k, val) = pair.ok()?;
-                    map.insert(k, lua_to_json(lua, &val)?);
+                    map.insert(k, lua_to_json_depth(lua, &val, depth + 1)?);
                 }
                 JsonValue::Object(map)
             }
@@ -460,6 +493,7 @@ pub trait GenerationHook: Send + Sync {
 }
 
 /// 插件宿主：专用线程 + 限时派发。
+#[derive(Clone)]
 pub struct PluginHost {
     tx: std::sync::mpsc::Sender<Cmd>,
     timeout: Duration,
@@ -500,8 +534,8 @@ impl PluginHost {
                         Cmd::DispatchJson { event, data, reply } => {
                             let _ = reply.send(manager.dispatch_json(&event, &data));
                         }
-                        Cmd::RunCommand { input, reply } => {
-                            let _ = reply.send(manager.run_command(&input));
+                        Cmd::RunCommand { input, context, reply } => {
+                        let _ = reply.send(manager.try_run_command_context(&input, &context));
                         }
                         Cmd::List { reply } => {
                             let _ = reply.send(manager.infos());
@@ -535,7 +569,7 @@ impl PluginHost {
                 reply: reply_tx,
             })
             .map_err(|e| PluginError::Custom(e.to_string()))?;
-        match reply_rx.recv_timeout(self.timeout) {
+        match reply_rx.recv() {
             Ok(Ok(names)) => Ok(names),
             Ok(Err(e)) => Err(PluginError::Custom(e)),
             Err(_) => Err(PluginError::Custom("plugin thread timed out".into())),
@@ -556,8 +590,8 @@ impl PluginHost {
         {
             return None;
         }
-        let lua_result = match reply_rx.recv_timeout(self.timeout) {
-            Ok(transforms) => transforms.into_iter().next().map(|(_, t)| t),
+        let lua_result = match reply_rx.recv() {
+            Ok(transforms) => transforms.into_iter().last().map(|(_, t)| t),
             Err(_) => {
                 tracing::warn!("[plugins] dispatch '{event}' timed out after {:?}", self.timeout);
                 None
@@ -588,7 +622,7 @@ impl PluginHost {
         {
             return None;
         }
-        match reply_rx.recv_timeout(self.timeout) {
+        match reply_rx.recv() {
             Ok(v) => v,
             Err(_) => {
                 tracing::warn!("[plugins] dispatch_json '{event}' timed out");
@@ -599,18 +633,26 @@ impl PluginHost {
 
     /// 斜杠命令（未命中返回 None）。
     pub fn run_command(&self, input: &str) -> Option<String> {
+        self.run_command_context(input, &JsonValue::Null)
+    }
+
+    pub fn run_command_context(&self, input: &str, context: &JsonValue) -> Option<String> {
+        self.try_run_command_context(input, context).unwrap_or_else(|_| Some(String::new()))
+    }
+
+    pub fn try_run_command_context(&self, input: &str, context: &JsonValue) -> Result<Option<String>, String> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.tx
             .send(Cmd::RunCommand {
                 input: input.to_string(),
+                context: context.clone(),
                 reply: reply_tx,
             })
-            .ok()?;
-        match reply_rx.recv_timeout(self.timeout) {
+            .map_err(|_| "plugin worker unavailable".to_string())?;
+        match reply_rx.recv() {
             Ok(v) => v,
             Err(_) => {
-                tracing::warn!("[plugins] command timed out");
-                None
+                Err("plugin worker disconnected".into())
             }
         }
     }
@@ -621,7 +663,7 @@ impl PluginHost {
         if self.tx.send(Cmd::List { reply: reply_tx }).is_err() {
             return vec![];
         }
-        reply_rx.recv_timeout(self.timeout).unwrap_or_default()
+        reply_rx.recv().unwrap_or_default()
     }
 
     pub fn register_rust_hook(&mut self, hook: std::sync::Arc<dyn GenerationHook>) {
@@ -644,8 +686,9 @@ fn reload_dir(manager: &mut PluginManager, dir: &std::path::Path) -> Result<Vec<
     fresh.toast = toast;
     let mut loaded = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+        paths.sort();
+        for path in paths {
             if path.extension().and_then(|e| e.to_str()) == Some("lua") {
                 let name = path
                     .file_stem()
@@ -783,6 +826,40 @@ nast.register_command("ping", function() return "pong" end)
 #[cfg(test)]
 mod host_tests {
     use super::*;
+
+    #[test]
+    fn interrupted_callbacks_preserve_chain_and_worker_can_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.lua"), "nast.on('user_input', function() while true do pcall(function() while true do end end) end end)").unwrap();
+        std::fs::write(dir.path().join("b.lua"), "nast.on('user_input', function(d) return nast.json_decode(d).text .. 'b' end)").unwrap();
+        let host = PluginHost::new(dir.path().into(), dir.path().join("kv.json"));
+        let started = Instant::now();
+        assert_eq!(host.dispatch("user_input", &serde_json::json!({"text":"a"})).as_deref(), Some("ab"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(host.list().len(), 2);
+        assert_eq!(host.load_dir().unwrap().len(), 2);
+        assert_eq!(host.dispatch("user_input", &serde_json::json!({"text":"c"})).as_deref(), Some("cb"));
+    }
+
+    #[test]
+    fn queue_chain_skips_missing_hooks_and_rejects_invalid_replacements() {
+        let mut pm = PluginManager::new();
+        pm.load("a", "nast.on('other', function() end)").unwrap();
+        pm.load("b", "nast.on('group_queue', function(d) return {'b.png','a.png'} end)").unwrap();
+        pm.load("c", "nast.on('group_queue', function(d) local q=nast.json_decode(d).queue; assert(q[1]=='b.png'); return {'outsider'} end)").unwrap();
+        let data = serde_json::json!({"queue":["a.png"],"eligible_members":["a.png","b.png"],"task_id":"test"});
+        assert_eq!(pm.dispatch_json("group_queue", &data).unwrap()["queue"], serde_json::json!(["b.png","a.png"]));
+        pm.load("d", "nast.on('group_queue', function() return {} end)").unwrap();
+        assert_eq!(pm.dispatch_json("group_queue", &data).unwrap()["queue"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn command_context_and_cyclic_return_are_bounded() {
+        let mut pm = PluginManager::new();
+        pm.load("a", "nast.register_command('ctx', function(args,ctx) return ctx.group_id .. ':' .. args end); nast.on('prompt_built', function() local t={};t.t=t;return t end)").unwrap();
+        assert_eq!(pm.run_command_context("/ctx\thello", &serde_json::json!({"group_id":"g"})).as_deref(), Some("g:hello"));
+        assert!(pm.dispatch_json("prompt_built", &serde_json::json!({"messages":[]})).is_none());
+    }
 
     #[test]
     fn host_dispatch_latency_with_missing_dir() {

@@ -128,13 +128,13 @@ export default function App({ onLogout }: { onLogout?: () => void }) {
   return (
     <SidebarProvider
       className="app-shell"
-      style={{ '--sidebar-width': '17rem' } as React.CSSProperties}
+      style={{ '--sidebar-width': '18rem', '--sidebar-width-icon': '3.5rem' } as React.CSSProperties}
     >
       <LeftSidebar onOpenSettings={() => setShowSettings(true)} onLogout={onLogout} />
 
-      <SidebarInset className="min-w-0 overflow-hidden">
+      <SidebarInset className="min-w-0 overflow-hidden bg-transparent md:py-2 md:pr-2 xl:pr-0">
         <div
-          className="relative flex h-full min-h-0 flex-col"
+          className="relative flex h-full min-h-0 flex-col md:workspace-panel md:overflow-hidden"
           onDragEnter={(e) => {
             if (!e.dataTransfer.types.includes('Files')) return;
             e.preventDefault();
@@ -156,10 +156,10 @@ export default function App({ onLogout }: { onLogout?: () => void }) {
             Array.from(e.dataTransfer.files).forEach((f) => void importFile(f).catch(() => {}));
           }}
         >
-          <header className="flex h-16 shrink-0 items-center gap-3 border-b bg-card/60 px-3 sm:px-5">
+          <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border/60 px-3 sm:px-5 max-md:glass max-md:rounded-none max-md:border-x-0 max-md:border-t-0">
             <SidebarTrigger className="size-9 shrink-0" title="切换侧栏（Ctrl / ⌘ + B）" />
             {(activeChar || activeGroup) && (
-              <Avatar className="hidden size-9 shrink-0 sm:flex">
+              <Avatar className="hidden size-9 shrink-0 rounded-xl ring-1 ring-primary/20 sm:flex">
                 {activeChar && <AvatarImage src={activeChar.avatarUrl} alt={activeChar.name} />}
                 <AvatarFallback>
                   {activeGroup ? <Users className="size-4" /> : activeChar?.name.slice(0, 1)}
@@ -167,7 +167,7 @@ export default function App({ onLogout }: { onLogout?: () => void }) {
               </Avatar>
             )}
             <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <h1 className="truncate text-sm font-semibold">
+              <h1 className="truncate font-display text-base font-semibold leading-tight">
                 {activeGroup?.name ?? activeChar?.name ?? '对话空间'}
               </h1>
               <p
@@ -215,14 +215,14 @@ export default function App({ onLogout }: { onLogout?: () => void }) {
           <TtsControls onSettings={() => { setSettingsSection('tts'); setShowSettings(true); }} />
 
           {activeGroup ? (
-            <GroupChatArea key={activeGroupId} />
+            <GroupChatArea key={`${activeGroupId}:${activeGroup.chat_id}`} />
           ) : activeAvatar ? (
             <ChatArea key={`${activeAvatar}:${activeChatName}`} />
           ) : (
             <WelcomeScreen onOpenSettings={() => setShowSettings(true)} />
           )}
           {dragOver && (
-            <div className="pointer-events-none absolute inset-2 z-20 flex flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-primary bg-background/95">
+            <div className="pointer-events-none absolute inset-2 z-20 flex animate-rise-in flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-primary/70 bg-background/85 backdrop-blur-sm">
               <Upload className="size-9 text-primary" />
               <p className="font-medium">松开，导入角色卡</p>
               <p className="text-sm text-muted-foreground">支持 SillyTavern PNG / JSON 格式</p>

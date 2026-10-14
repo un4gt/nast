@@ -46,6 +46,16 @@ python tests/parity/model_server.py --port 19999 --output requests.jsonl
 
 ## 模型添加与普通 HTTP
 
+重构后前端与真实后端的独立联调回归（不需要 SillyTavern）：
+
+```powershell
+cargo build
+npm --prefix web run build
+.cache/st-parity-venv/Scripts/python.exe tests/parity/frontend_integration.py
+```
+
+该脚本使用隔离数据、真实 Rust 服务和本地模型服务，检查登录/注销、角色编辑与重命名、设置及模型配置保存、聊天生成落盘及消息编辑、世界书关闭时保存，以及角色资料延迟加载、连接就绪前打开模型设置。每次运行输出证据目录，保存截图、服务日志和 `report.json`；不调用真实第三方模型。
+
 构建最新服务端和网页后运行：
 
 ```powershell
@@ -66,3 +76,29 @@ cargo test --manifest-path nast-bridges/Cargo.toml --workspace --locked
 桥接测试使用本地假 QQ 网关、假 NAST WebSocket 和真实 HTTP 请求接收器，验证慢生成期间网关心跳不中断、重复事件不重复生成、超长中文／emoji 全字符发送、发送失败保留尾部与重启后续读。未连接真实 QQ 账号，不代表已在真实 QQ 平台完成端到端验收。
 
 模型表单复用项目已有的 shadcn Dialog、Field、Select、Collapsible、ScrollArea，以及官方 Checkbox 多选表单示例；基础字段参考 [Cline OpenAI Compatible 配置](https://docs.cline.bot/provider-config/openai-compatible)。未新增自制基础 UI 组件。
+
+## 群聊服务端验收
+
+```powershell
+cargo build --release --locked
+npm --prefix web run build
+$env:NAST_TEST_BINARY="$PWD/target/release/nast.exe"
+node tests/group_schedule_parity.cjs
+.cache/st-parity-venv/Scripts/python.exe tests/parity/group_headless.py
+.cache/st-parity-venv/Scripts/python.exe tests/parity/group_ui.py
+$env:NAST_GROUP_PARITY_ROUNDS='25'
+.cache/st-parity-venv/Scripts/python.exe tests/parity/run.py --stage groups --skip-build --output .cache/groupchat/parity-300
+```
+
+调度脚本从固定 ST 提交提取原函数，运行 12,000 组可重放随机输入。`group_headless.py` 不启动浏览器、不获取插件清单，覆盖 Lua 命令、上下文、队列、通知、超时、KV 重启、task_id 重放、断连、停止、429/503/断流、未知字段往返及 2,000 次会话操作。`group_ui.py` 覆盖六种主题/视口组合，并比较同一初始聊天从网页和无浏览器 RPC 运行后的完整请求与消息状态。三个集成脚本复制可执行文件到独立证据目录，避免 Windows 文件锁影响继续构建。
+
+300 个双端生成场景由三种卡片组装模式 × 25 轮不同输入与累积历史 × normal/regenerate/swipe/continue 构成；不等于 300 类不同功能。高级 STScript 和 JavaScript 扩展不在运行时范围内。详见 `docs/GROUPCHAT_IMPLEMENTATION.md` 与 `docs/GROUPCHAT_LUA.md`。
+
+可选真实模型使用独立环境变量 `NAST_GROUP_TEST_MODEL_URL`（OpenAI 兼容 base URL，例如以 /v1 结尾）、`NAST_GROUP_TEST_MODEL`、`NAST_GROUP_TEST_API_KEY`。不读取日常用户配置，密钥不写入应用数据和请求证据。`NAST_GROUP_TEST_REQUEST_LIMIT` 默认 1,000，可调低；两端、成员、重试共用同一个硬上限，达到上限或输入超额即拒绝。代理使用完整 JSON UTF-8 字节数加消息封装余量作保守输入上界（8,192），输出不超过 512。
+
+```powershell
+$env:NAST_GROUP_PARITY_ROUNDS='1'
+.cache/st-parity-venv/Scripts/python.exe tests/parity/run.py --stage groups --skip-build --real-model --output .cache/groupchat/real-model
+```
+
+真实模式检查发言身份、顺序、候选数量、非空输出和预算，不比较实际文字；保留逐次请求、原始流式响应及聊天状态，语义身份和上下文仍需逐项审核。报告单列外部服务失败及实际调用次数。没有独立配置时不运行，不把本地模拟成功计为真实模型成功。

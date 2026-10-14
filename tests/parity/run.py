@@ -124,13 +124,20 @@ async def execute(args):
     artifact = Path(args.output).resolve() if args.output else Path(tempfile.mkdtemp(prefix="nast-st-parity-"))
     artifact.mkdir(parents=True, exist_ok=True)
     print(f"Evidence: {artifact}", flush=True)
-    binary = ROOT / "target" / "debug" / ("nast.exe" if os.name == "nt" else "nast")
+    binary = Path(os.environ.get("NAST_TEST_BINARY", ROOT / "target" / "debug" / ("nast.exe" if os.name == "nt" else "nast")))
     if not args.skip_build:
         subprocess.run(["cargo", "build", "--bin", "nast"], cwd=ROOT, check=True)
         subprocess.run(["npm.cmd" if os.name == "nt" else "npm", "run", "build"], cwd=ROOT / "web", check=True)
     if not (ST / "node_modules").exists():
         raise RuntimeError("Install reference dependencies with npm ci in refrence/SillyTavern")
-    server = ModelServer(output=artifact / "requests.jsonl")
+    isolated_binary = artifact / binary.name
+    shutil.copy2(binary, isolated_binary)
+    binary = isolated_binary
+    if args.real_model:
+        from real_model import RealModelServer
+        server = RealModelServer(output=artifact / "requests.jsonl")
+    else:
+        server = ModelServer(output=artifact / "requests.jsonl")
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     model_url = f"http://127.0.0.1:{server.server_port}"
@@ -164,6 +171,9 @@ async def execute(args):
                 st_page.on("pageerror", lambda error: errors.append({"app": "st", "error": str(error)}))
                 nast_page.on("pageerror", lambda error: errors.append({"app": "nast", "error": str(error)}))
                 oai = await initialize_st(st_page, f"http://127.0.0.1:{st_port}", model_url + "/st/v1")
+                if args.real_model:
+                    oai['stream_openai'] = True
+                    await st_page.evaluate("async()=>{const {getContext}=await import('/scripts/st-context.js');getContext().chatCompletionSettings.stream_openai=true;}")
                 await nast_page.goto(f"http://127.0.0.1:{nast_port}")
                 settings = {"oai_settings": {**oai, "custom_url": model_url + "/nast/v1"},
                             "power_user": {"username": "User"}}
@@ -198,6 +208,9 @@ async def execute(args):
             log.close()
         server.shutdown()
         server.server_close()
+        if args.real_model:
+            report['real_model']={'attempts':server.attempts,'limit':server.limit,'failures':server.failures,
+                'input_limit':8192,'output_limit':512,'semantic_review':'Raw requests, responses and saved messages require identity/context review; no exact wording comparison.'}
         write_json(artifact / "report.json", report)
     return 0 if report["cases"] and all(case["passed"] for case in report["cases"]) else 1
 
@@ -207,5 +220,6 @@ if __name__ == "__main__":
     parser.add_argument("--stage", choices=["cards", "embedded", "worlds", "macros", "groups", "management", "ui", "all"], default="all")
     parser.add_argument("--output")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--real-model", action="store_true", help="Use only independent NAST_GROUP_TEST_* credentials with a shared hard request budget")
     args = parser.parse_args()
     raise SystemExit(asyncio.run(execute(args)))

@@ -49,6 +49,7 @@ pub struct GenerationControl {
     /// 本次生成目标（generate.status 展示）
     pub info: Option<GenerationInfo>,
     pub phase: Arc<std::sync::Mutex<Value>>,
+    pub group_progress: Value,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -61,6 +62,8 @@ pub struct GenerationInfo {
 }
 
 pub struct AppState {
+    pub tasks: std::sync::Mutex<std::collections::BTreeMap<String, (String, tokio::sync::watch::Sender<Option<Value>>)>>,
+    pub auto_group: RwLock<Option<(String, Value, tokio_util::sync::CancellationToken)>>,
     pub catalog: std::sync::Mutex<crate::model_catalog::Catalog>,
     pub user: UserData,
     pub hub: EventHub,
@@ -87,20 +90,16 @@ impl AppState {
         {
             let hub_cb = hub.clone();
             host.set_toast(std::sync::Arc::new(move |message: &str, kind: &str| {
+                hub_cb.emit("notification", serde_json::json!({"message":message,"type":kind}));
                 hub_cb.emit(
                     "toast",
                     serde_json::json!({"message": message, "type": kind}),
                 );
             }));
         }
-        match host.load_dir() {
-            Ok(names) if !names.is_empty() => {
-                tracing::info!("plugins loaded: {:?}", names);
-            }
-            Err(e) => tracing::warn!("plugin load failed: {e}"),
-            _ => {}
-        }
         Self {
+            tasks: Default::default(),
+            auto_group: RwLock::new(None),
             catalog: std::sync::Mutex::new(catalog),
             user,
             hub,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { BrainCog, Check, Copy, Pencil, Trash2, X, Volume2, Square } from 'lucide-react';
+import { BrainCog, Check, Copy, Pencil, Trash2, X, Volume2, Square, EyeOff, GitBranch } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Spinner } from '@/components/ui/spinner';
@@ -89,13 +89,13 @@ export function MessageBubble({
   return (
     <article
       className={cn(
-        'group flex w-full min-w-0 gap-2.5 sm:gap-3',
+        'chat-message-enter group flex w-full min-w-0 gap-2.5 sm:gap-3',
         m.is_user ? 'justify-end' : 'justify-start',
       )}
       aria-label={`${m.name} 的消息`}
     >
       {!m.is_user && (
-        <Avatar className="mt-1 size-8 shrink-0 rounded-xl sm:size-9">
+        <Avatar className="mt-1 size-8 shrink-0 rounded-xl ring-1 ring-primary/15 sm:size-10">
           {char?.avatarUrl ? (
             <AvatarImage src={char.avatarUrl} alt={m.name} className="size-full object-cover" />
           ) : null}
@@ -157,6 +157,10 @@ export function MessageBubble({
           >
             {copied ? <Check /> : <Copy />}
           </Button>
+          {group && <>
+            <Button variant="ghost" size="icon" className="size-8" disabled={!connected || generating || saving} aria-label={m.is_system ? '恢复消息参与提示词' : '隐藏消息'} onClick={() => void rpc.call('groups.hide_message', { id: useStore.getState().activeGroupId, chat_id: group.chatId, index, hidden: !m.is_system }).then(reloadChat)}><EyeOff /></Button>
+            <Button variant="ghost" size="icon" className="size-8" disabled={!connected || generating || saving} aria-label="从此消息创建分支" onClick={() => void rpc.call<any>('groups.branch', { id: useStore.getState().activeGroupId, chat_id: group.chatId, index }).then(g => useStore.getState().openGroup(g.id))}><GitBranch /></Button>
+          </>}
           <Button
             variant="ghost"
             size="icon"
@@ -233,8 +237,8 @@ export function MessageBubble({
         )}
       </div>
       {m.is_user && (
-        <Avatar className="mt-1 hidden size-8 shrink-0 sm:flex">
-          <AvatarFallback className="bg-secondary text-xs text-secondary-foreground">
+        <Avatar className="mt-1 hidden size-8 shrink-0 rounded-xl sm:flex">
+          <AvatarFallback className="rounded-xl bg-secondary text-xs text-secondary-foreground">
             我
           </AvatarFallback>
         </Avatar>

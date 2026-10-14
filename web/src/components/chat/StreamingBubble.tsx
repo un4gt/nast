@@ -20,7 +20,7 @@ export function StreamingBubble({
   }, [text]);
   return (
     <div className="flex w-full min-w-0 justify-start gap-2.5 sm:gap-3" aria-label={`${name} 正在回复`}>
-      <Avatar className="mt-1 size-8 shrink-0 rounded-xl sm:size-9">
+      <Avatar className="mt-1 size-8 shrink-0 rounded-xl ring-1 ring-primary/15 sm:size-10">
         <AvatarFallback className="rounded-xl bg-accent text-xs text-primary">
           {name.slice(0, 2) || '…'}
         </AvatarFallback>

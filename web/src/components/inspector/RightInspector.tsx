@@ -1,3 +1,5 @@
+import { GroupPanel } from './GroupPanel';
+import { useStore } from '@/store';
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
@@ -36,6 +38,7 @@ function InspectorBody({
   setTab: (t: Tab) => void;
   onOpenWorldEditor: () => void;
 }) {
+  const isGroup = !!useStore(s => s.activeGroupId);
   return (
     <Tabs
       value={tab}
@@ -44,22 +47,22 @@ function InspectorBody({
     >
       <TabsList
         aria-label="详情分类"
-        className="mx-3 my-3 grid h-auto shrink-0 grid-cols-5 gap-0.5"
+        className="mx-3 my-3 grid h-auto shrink-0 grid-cols-5 gap-0.5 rounded-xl bg-muted/70 p-1"
       >
         {TABS.map((t) => (
           <TabsTrigger
             key={t.id}
             value={t.id}
-            className="flex flex-col gap-1.5 px-0 py-2 text-[11px]"
+            className="flex flex-col gap-1.5 rounded-lg px-0 py-2 text-[11px] data-[state=active]:bg-card data-[state=active]:text-primary data-[state=active]:shadow-sm"
           >
             <t.icon className="size-4" />
-            {t.label}
+            {t.id === 'character' && isGroup ? '群聊' : t.label}
           </TabsTrigger>
         ))}
       </TabsList>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-5">
         <TabsContent value="character" className="mt-0">
-          <CharacterPanel />
+          {isGroup ? <GroupPanel /> : <CharacterPanel />}
         </TabsContent>
         <TabsContent value="world" className="mt-0">
           <WorldInfoPanel onOpenEditor={onOpenWorldEditor} />
@@ -88,12 +91,13 @@ export function RightInspector({
   onOpenWorldEditor: () => void;
 }) {
   const [tab, setTab] = useState<Tab>('character');
+  const isGroup = !!useStore(s => s.activeGroupId);
 
   if (collapsed) {
     return (
       <aside
         aria-label="对话详情"
-        className="hidden h-full w-14 shrink-0 flex-col items-center gap-2 border-l bg-sidebar py-3 xl:flex"
+        className="hidden h-[calc(100%-1rem)] w-14 shrink-0 flex-col items-center gap-2 self-center rounded-2xl py-3 xl:mx-2 xl:flex glass"
       >
         <Tooltip>
           <TooltipTrigger asChild>
@@ -117,7 +121,7 @@ export function RightInspector({
                 variant="ghost"
                 size="icon"
                 className="size-9"
-                aria-label={t.label}
+                aria-label={t.id === 'character' && isGroup ? '群聊' : t.label}
                 onClick={() => {
                   setTab(t.id);
                   onToggleCollapse();
@@ -126,7 +130,7 @@ export function RightInspector({
                 <t.icon />
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="left">{t.label}</TooltipContent>
+            <TooltipContent side="left">{t.id === 'character' && isGroup ? '群聊' : t.label}</TooltipContent>
           </Tooltip>
         ))}
       </aside>
@@ -136,10 +140,10 @@ export function RightInspector({
   return (
     <aside
       aria-label="对话详情"
-      className="hidden h-full w-80 shrink-0 flex-col border-l bg-sidebar xl:flex"
+      className="hidden h-[calc(100%-1rem)] w-80 shrink-0 flex-col self-center overflow-hidden rounded-2xl xl:mx-2 xl:flex glass"
     >
-      <div className="flex h-16 shrink-0 items-center gap-1 border-b px-4">
-        <span className="flex-1 text-sm font-medium">对话详情</span>
+      <div className="flex h-16 shrink-0 items-center gap-1 border-b border-border/60 px-4">
+        <span className="flex-1 font-display text-base font-semibold">对话详情</span>
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -171,11 +175,12 @@ export function InspectorMobileSheet({
   onOpenWorldEditor: () => void;
 }) {
   const [tab, setTab] = useState<Tab>('character');
+  const isGroup = !!useStore(s => s.activeGroupId);
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" className="w-80 max-w-[88vw] gap-0 p-0 sm:max-w-[88vw]">
+      <SheetContent side="right" className="w-[22rem] max-w-[92vw] gap-0 rounded-l-2xl border-l-0 p-0 sm:max-w-[92vw]">
         <SheetHeader className="shrink-0 border-b px-4 py-3">
-          <SheetTitle className="text-sm">对话详情</SheetTitle>
+          <SheetTitle className="font-display text-base">对话详情</SheetTitle>
           <SheetDescription className="sr-only">角色、世界书、作者注记与生成参数</SheetDescription>
         </SheetHeader>
         <div className="flex min-h-0 flex-1 flex-col">

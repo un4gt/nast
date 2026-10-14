@@ -1,10 +1,27 @@
+import animate from 'tailwindcss-animate';
+
 /** @type {import('tailwindcss').Config} */
 export default {
   darkMode: ['class'],
   content: ['./src/**/*.{ts,tsx}'],
   theme: {
   	extend: {
+      fontFamily: {
+        sans: ['Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'system-ui', 'sans-serif'],
+        display: ['Fraunces', 'Songti SC', 'Noto Serif SC', 'Georgia', 'serif'],
+      },
+      spacing: {
+        '4.5': '1.125rem',
+        'control-sm': 'var(--control-sm)',
+        'control-md': 'var(--control-md)',
+        'control-lg': 'var(--control-lg)',
+      },
+      opacity: { 12: '0.12', 15: '0.15', 45: '0.45', 85: '0.85' },
+      ringWidth: { 3: '3px' },
+      boxShadow: { xs: '0 1px 2px 0 rgb(0 0 0 / 0.05)' },
   		colors: {
+        success: 'hsl(var(--success))',
+        warning: 'hsl(var(--warning))',
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
   			ring: 'hsl(var(--ring))',
@@ -51,8 +68,10 @@ export default {
   		},
   		borderRadius: {
   			lg: 'var(--radius)',
-  			md: 'calc(var(--radius) - 2px)',
-  			sm: 'calc(var(--radius) - 4px)'
+        md: 'calc(var(--radius) - 4px)',
+        sm: 'calc(var(--radius) - 6px)',
+        xl: 'calc(var(--radius) + 4px)',
+        '2xl': 'calc(var(--radius) + 8px)',
   		},
   		keyframes: {
   			'accordion-down': {
@@ -73,10 +92,11 @@ export default {
   			}
   		},
   		animation: {
+        'rise-in': 'rise-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both',
   			'accordion-down': 'accordion-down 0.2s ease-out',
   			'accordion-up': 'accordion-up 0.2s ease-out'
   		}
   	}
   },
-  plugins: [],
+  plugins: [animate],
 };

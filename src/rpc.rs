@@ -78,18 +78,23 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "chats.set_persona" => chats_set_persona(state, params),
         "chats.set_world" => chats_set_world(state, params),
         "chats.update_message" => chats_update_message(state, params),
-        "plugins.list" => plugins_list(state),
-        "plugins.reload" => plugins_reload(state),
+        "commands.execute" => Box::pin(crate::commands::execute(state, params)).await,
+        "plugins.list" => plugins_list(state).await,
+        "plugins.reload" => plugins_reload(state).await,
         "generate.run" => generate_run(state, params).await,
         "generate.stop" => generate_stop(state, params).await,
         "generate.status" => generate_status(state).await,
+        "groups.auto_start" | "groups.auto_stop" | "groups.auto_status" => crate::group_gen::auto(state, method, params).await,
+        "groups.from_private" => crate::group_sessions::from_private(state, params).await,
         "groups.create" => groups_create(state, params),
-        "groups.edit" => groups_edit(state, params),
-        "groups.delete" => groups_delete(state, params),
+        "groups.edit" => group_mutation(state, method, params).await,
+        "groups.delete" => group_mutation(state, method, params).await,
         "groups.get" => groups_get(state),
         "groups.chats" => groups_chats(state, params),
         "groups.new_chat" | "groups.open_chat" | "groups.rename_chat" | "groups.delete_chat"
-        | "groups.import_chat" | "groups.export_chat" | "groups.set_world" | "groups.swipe" => crate::group_sessions::manage(state, method, params).await,
+        | "groups.import_chat" | "groups.export_chat" | "groups.set_world" | "groups.swipe"
+        | "groups.set_metadata" | "groups.set_note" | "groups.set_persona" | "groups.add_message"
+        | "groups.hide_message" | "groups.delete_swipe" | "groups.branch" | "groups.parent" | "groups.history" => crate::group_sessions::manage(state, method, params).await,
         "generate.group" => crate::group_gen::generate_group(state, params).await,
         "chats.swipe" => chats_swipe(state, params).await,
         "chats.new" => chats_new(state, params),
@@ -99,8 +104,8 @@ pub async fn dispatch(state: SharedState, method: &str, params: Value) -> RpcRes
         "worlds.delete" => worlds_delete(state, params),
         "groups.all" => groups_all(state),
         "groups.get_chat" => groups_get_chat(state, params),
-        "groups.update_message" => groups_update_message(state, params),
-        "groups.delete_message" => groups_delete_message(state, params),
+        "groups.update_message" => group_mutation(state, method, params).await,
+        "groups.delete_message" => group_mutation(state, method, params).await,
         "presets.list" => presets_list(state),
         "presets.get" => presets_get(state, params),
         "presets.save" => presets_save(state, params),
@@ -542,32 +547,25 @@ fn groups_create(state: SharedState, params: Value) -> RpcResult {
     let mut group: nast_model::group::Group = serde_json::from_value(
         params.get("group").cloned().unwrap_or(json!({})),
     )
-    .unwrap_or_default();
+    .map_err(|e| RpcError::BadRequest(format!("invalid group: {e}")))?;
     group.id = uuid::Uuid::new_v4().to_string();
     if group.name.is_empty() {
         group.name = "New Group".into();
     }
-    let chat_id = nast_storage::humanized_date_time();
+    let chat_id = format!("{}-{}", nast_storage::humanized_date_time(), uuid::Uuid::new_v4());
     group.chat_id = chat_id.clone();
     group.chats = vec![chat_id];
+    crate::group_gen::init_group_chat(&state, &group, &group.chat_id)?;
     state.user.save_group(&group)?;
     serde_json::to_value(&group).map_err(|e| RpcError::Internal(e.to_string()))
 }
 
-fn groups_edit(state: SharedState, params: Value) -> RpcResult {
-    let group: nast_model::group::Group = serde_json::from_value(
-        params
-            .get("group")
-            .cloned()
-            .ok_or_else(|| RpcError::BadRequest("missing group".into()))?,
-    )
-    .map_err(|e| RpcError::BadRequest(format!("invalid group: {e}")))?;
-    state.user.save_group(&group)?;
-    Ok(json!({"ok": true}))
-}
-
 fn groups_delete(state: SharedState, params: Value) -> RpcResult {
-    let id = param_str(&params, "id")?;
+    let id = crate::library::leaf(param_str(&params, "id")?)?;
+    let group = state.user.list_groups()?.into_iter().find(|g|g.id == id).ok_or_else(||RpcError::NotFound("group".into()))?;
+    let backup = state.user.root.join("backups").join(format!("group-deleted-{}-{id}.json", uuid::Uuid::new_v4()));
+    nast_storage::atomic_write(&backup, serde_json::to_string(&group).map_err(|e|RpcError::Internal(e.to_string()))?.as_bytes())?;
+    // Keep the original chat files for recovery together with the group snapshot.
     state.user.delete_group(id)?;
     Ok(json!({"ok": true}))
 }
@@ -794,14 +792,15 @@ fn chats_update_message(state: SharedState, params: Value) -> RpcResult {
     Ok(json!({"ok": true, "mes": edited}))
 }
 
-fn plugins_list(state: SharedState) -> RpcResult {
-    let host = state.plugins.lock().unwrap();
-    Ok(json!({ "plugins": host.list(), "lua": host.lua_names() }))
+async fn plugins_list(state: SharedState) -> RpcResult {
+    let host = state.plugins.lock().unwrap().clone();
+    let list = tokio::task::spawn_blocking(move || host.list()).await.map_err(|e| RpcError::Internal(e.to_string()))?;
+    Ok(json!({ "lua":list.iter().map(|p| &p.name).collect::<Vec<_>>(), "plugins": list }))
 }
 
-fn plugins_reload(state: SharedState) -> RpcResult {
-    let host = state.plugins.lock().unwrap();
-    let loaded = host.load_dir().map_err(|e| RpcError::Internal(e.to_string()))?;
+async fn plugins_reload(state: SharedState) -> RpcResult {
+    let host = state.plugins.lock().unwrap().clone();
+    let loaded = tokio::task::spawn_blocking(move || host.load_dir()).await.map_err(|e| RpcError::Internal(e.to_string()))?.map_err(|e| RpcError::Internal(e.to_string()))?;
     Ok(json!({ "loaded": loaded }))
 }
 
@@ -864,6 +863,9 @@ pub(crate) fn select_swipe(chat: &mut ChatFile, direction: &str) -> RpcResult {
     let current = last["swipe_id"].as_u64().unwrap_or(0) as usize;
     let swipes = last["swipes"].as_array().filter(|items| !items.is_empty())
         .ok_or_else(|| RpcError::BadRequest("message has no candidates".into()))?;
+    if direction == "right" && current + 1 >= swipes.len() {
+        return Ok(json!({"swipe_id":current,"mes":last["mes"],"needs_generation":true}));
+    }
     let selected = match direction {
         "left" => current.saturating_sub(1),
         "right" => (current + 1).min(swipes.len() - 1),
@@ -935,17 +937,13 @@ fn groups_all(state: SharedState) -> RpcResult {
 /// 读取群聊天文件（group chats/<chat_id>.jsonl）；不存在时按成员开场白初始化。
 fn groups_get_chat(state: SharedState, params: Value) -> RpcResult {
     let chat_id = param_str(&params, "chat_id")?;
+    let owner = crate::group_sessions::owned(&state, params["id"].as_str(), chat_id)?;
     let chat = match state.user.read_group_chat(chat_id) {
         Ok(c) => c,
-        Err(_) => {
-            // 找到拥有该 chat_id 的群并初始化
-            let groups = state.user.list_groups()?;
-            let group = groups
-                .into_iter()
-                .find(|g| g.chats.iter().any(|c| c == chat_id))
-                .ok_or_else(|| RpcError::NotFound(format!("group chat {chat_id}")))?;
-            crate::group_gen::init_group_chat(&state, &group, chat_id)?
+        Err(nast_storage::StorageError::NotFound(_)) => {
+            crate::group_gen::init_group_chat(&state, &owner, chat_id)?
         }
+        Err(error) => return Err(error.into()),
     };
     Ok(serde_json::to_value(chat.0).map_err(|e| RpcError::Internal(e.to_string()))?)
 }
@@ -959,7 +957,9 @@ fn param_str<'a>(params: &'a Value, key: &str) -> Result<&'a str, RpcError> {
 
 // ---------- generate ----------
 
-async fn generate_run(state: SharedState, params: Value) -> RpcResult {
+pub(crate) async fn generate_run(state: SharedState, mut params: Value) -> RpcResult {
+    params["task_id"] = json!(crate::routing::task_id(&params));
+    if let Some(result) = crate::commands::prepare(state.clone(), &mut params, false).await? { return Ok(result); }
     use crate::generate::{GenerateParams, GenerateSession};
     use nast_model::chat::GenerationType;
 
@@ -980,7 +980,6 @@ async fn generate_run(state: SharedState, params: Value) -> RpcResult {
     };
     let character = read_character(&state, &avatar)?;
     let conversation = crate::model_catalog::Conversation::Private { avatar:avatar.clone(), chat_file:chat_file.clone() };
-    if let Some(command) = builtin_model_command(&params) { return model_command(state, json!({"conversation":conversation,"argument":command})).await; }
     let task_id = crate::routing::task_id(&params);
     let routing;
     let abort = tokio_util::sync::CancellationToken::new();
@@ -1062,6 +1061,7 @@ async fn generate_status(state: SharedState) -> RpcResult {
         "cancelling": guard.abort.as_ref().is_some_and(|a|a.is_cancelled()),
         "info": guard.info,
         "route_state": *guard.phase.lock().unwrap(),
+        "group":guard.group_progress,
     }))
 }
 
@@ -1070,6 +1070,7 @@ async fn generate_stop(state: SharedState, params: Value) -> RpcResult {
     if let Some(task_id) = params["task_id"].as_str() {
         if guard.info.as_ref().map(|i|i.task_id.as_str()) != Some(task_id) { return Ok(json!({"ok":false,"reason":"task_mismatch"})); }
     }
+    if let Some((_, _, token)) = state.auto_group.write().await.take() { token.cancel(); }
     if let Some(abort) = &guard.abort {
         abort.cancel();
     }
@@ -1081,12 +1082,6 @@ async fn generate_stop(state: SharedState, params: Value) -> RpcResult {
 fn unused(_: CardSpec, _: Uuid) {}
 
 
-pub fn builtin_model_command(params: &Value) -> Option<String> {
-    let message = params["user_message"].as_str()?.trim();
-    let mut parts = message.splitn(2, char::is_whitespace);
-    if !parts.next()?.eq_ignore_ascii_case("/model") { return None; }
-    Some(parts.next().unwrap_or("").trim().to_string())
-}
 pub(crate) async fn model_command(state: SharedState, params: Value) -> RpcResult {
     let argument = params["argument"].as_str().unwrap_or("").trim();
     let set = !argument.is_empty() && argument != "info";
@@ -1100,4 +1095,35 @@ pub(crate) async fn model_command(state: SharedState, params: Value) -> RpcResul
         format!("当前模型：{current} ({id})\n{}：{}\n上游模型：{}",if active.is_some(){"已成功使用的路由"}else{"下次候选路由"},route.and_then(|r|r["id"].as_str()).unwrap_or("不可用"),route.and_then(|r|r["upstream_model"].as_str()).unwrap_or("不可用"))
     } else { format!("当前模型：{current} ({id})\n可选模型：\n{}",catalog.models.iter().map(|m|format!("/model {} — {}",m.id,m.display_name)).collect::<Vec<_>>().join("\n")) };
     Ok(json!({"text":text,"saved":false,"command":true,"view":view}))
+}
+
+async fn group_mutation(state: SharedState, method: &str, params: Value) -> RpcResult {
+    let guard = state.generation.write().await;
+    if guard.abort.is_some() { return Err(RpcError::BadRequest("stop generation before editing group data".into())); }
+    if method == "groups.edit" {
+        let patch = params["group"].as_object().ok_or_else(||RpcError::BadRequest("missing group".into()))?;
+        let id = patch.get("id").and_then(Value::as_str).ok_or_else(||RpcError::BadRequest("missing id".into()))?;
+        crate::library::leaf(id)?;
+        let old = state.user.list_groups()?.into_iter().find(|g|g.id == id).ok_or_else(||RpcError::NotFound("group".into()))?;
+        let mut merged = json!(old);
+        for (key, value) in patch { merged[key] = value.clone(); }
+        if merged["chats"] != json!(old.chats) || merged["chat_id"] != json!(old.chat_id) {
+            return Err(RpcError::BadRequest("use group session operations to change chats".into()));
+        }
+        let group: nast_model::group::Group = serde_json::from_value(merged).map_err(|e|RpcError::BadRequest(e.to_string()))?;
+        let mut seen = std::collections::HashSet::new();
+        for avatar in &group.members {
+            crate::library::leaf(avatar)?;
+            if !seen.insert(avatar) { return Err(RpcError::BadRequest("duplicate member".into())); }
+        }
+        state.user.save_group(&group)?;
+        return Ok(json!({"ok":true,"group":group}));
+    }
+    if method == "groups.delete" { return groups_delete(state.clone(), params); }
+    crate::group_sessions::owned(&state, params["id"].as_str(), param_str(&params,"chat_id")?)?;
+    match method {
+        "groups.update_message" => groups_update_message(state.clone(), params),
+        "groups.delete_message" => groups_delete_message(state.clone(), params),
+        _ => unreachable!(),
+    }
 }

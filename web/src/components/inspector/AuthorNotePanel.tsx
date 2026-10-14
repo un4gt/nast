@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Check, Loader2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -34,7 +34,9 @@ interface NoteDraft {
 const DEFAULT_NOTE: NoteDraft = { prompt: '', interval: 1, depth: 4, position: 1, role: 0 };
 
 export function AuthorNotePanel() {
-  const { chatMetadata, activeChatName, setNote } = useStore();
+  const fieldId = useId();
+  const { chatMetadata, activeChatName: privateChat, activeGroupId, groups, setNote } = useStore();
+  const activeChatName = activeGroupId ? groups.find(g => g.id === activeGroupId)?.chat_id : privateChat;
   const [draft, setDraft] = useState<NoteDraft>(DEFAULT_NOTE);
   const [saving, setSaving] = useState(false);
 
@@ -85,8 +87,8 @@ export function AuthorNotePanel() {
       </div>
 
       <div className="flex flex-col gap-2">
-        <Label className="text-xs text-muted-foreground">内容</Label>
-        <Textarea
+        <Label htmlFor={fieldId + "-author-note-text"} className="text-xs text-muted-foreground">内容</Label>
+        <Textarea id={fieldId + "-author-note-text"}
           value={draft.prompt}
           onChange={(e) => setDraft((d) => ({ ...d, prompt: e.target.value }))}
           placeholder="注入到提示的指导文本…"

@@ -115,6 +115,10 @@ export function ChatActionsMenu({ avatar }: { avatar: string }) {
           <MessageSquarePlus />
           新聊天
         </DropdownMenuItem>
+        {activeChatName && <DropdownMenuItem disabled={busy || useStore.getState().generating} onClick={() => {
+          setBusy(true);
+          void rpc.call<any>('groups.from_private', { avatar, chat_file: activeChatName }).then(g => useStore.getState().openGroup(g.id)).finally(() => setBusy(false));
+        }}>转为群聊</DropdownMenuItem>}
         {activeChatName && (
           <>
             <DropdownMenuItem

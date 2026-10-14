@@ -246,7 +246,9 @@ async function main() {
     console.error('FAIL 异常:', e.message);
   } finally {
     rpc.close();
+    const exited = new Promise(resolve => child.once('exit', resolve));
     child.kill();
+    await exited;
     mock.close();
     fs.rmSync(tmp, { recursive: true, force: true });
   }

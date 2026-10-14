@@ -1,7 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { LogIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -57,36 +56,39 @@ export default function AuthGate() {
 
   if (session?.authenticated) return <App onLogout={session.enabled ? () => void logout() : undefined} />;
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-background p-5">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle><h1>登录 NAST</h1></CardTitle>
-          <CardDescription>登录后继续你的角色与对话。</CardDescription>
-        </CardHeader>
-        {checking ? <CardContent><p role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner />正在连接…</p></CardContent> :
-          <form onSubmit={event => void login(event)}>
-            <CardContent>
+    <main className="relative flex h-dvh items-center justify-center overflow-y-auto p-5">
+      <div aria-hidden className="pointer-events-none absolute -top-32 left-1/2 size-[36rem] -translate-x-1/2 rounded-full bg-primary/15 blur-3xl" />
+      <div className="relative my-auto w-full max-w-[24rem] shrink-0 animate-rise-in">
+        <div className="mb-7 flex flex-col items-center text-center">
+          <div className="welcome-mark mb-5 size-14 rounded-2xl shadow-lg shadow-primary/15">
+            <span className="font-display text-2xl font-semibold">N</span>
+          </div>
+          <h1 className="font-display text-[1.75rem] font-semibold leading-tight">欢迎回到 NAST</h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">你的私人 AI 酒馆，角色与故事都在这里等你。</p>
+        </div>
+        <div className="workspace-panel p-6 sm:p-7">
+          {checking ? <p role="status" className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground"><Spinner />正在连接服务…</p> :
+            <form onSubmit={event => void login(event)} className="flex flex-col gap-5">
               <FieldGroup>
                 {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
                 {session && <>
                   <Field data-invalid={!!error} data-disabled={busy}>
                     <FieldLabel htmlFor="username">用户名</FieldLabel>
-                    <Input id="username" name="username" autoComplete="username" autoFocus required maxLength={256} value={username} onChange={e => setUsername(e.target.value)} disabled={busy} aria-invalid={!!error} />
+                    <Input id="username" name="username" className="h-control-lg" autoComplete="username" autoFocus required maxLength={256} value={username} onChange={e => setUsername(e.target.value)} disabled={busy} aria-invalid={!!error} />
                   </Field>
                   <Field data-invalid={!!error} data-disabled={busy}>
                     <FieldLabel htmlFor="password">密码</FieldLabel>
-                    <Input id="password" name="password" type="password" autoComplete="current-password" required maxLength={1024} value={password} onChange={e => setPassword(e.target.value)} disabled={busy} aria-invalid={!!error} />
+                    <Input id="password" name="password" type="password" className="h-control-lg" autoComplete="current-password" required maxLength={1024} value={password} onChange={e => setPassword(e.target.value)} disabled={busy} aria-invalid={!!error} />
                   </Field>
                 </>}
               </FieldGroup>
-            </CardContent>
-            <CardFooter>
-              {session ? <Button type="submit" className="w-full" disabled={busy || !username || !password}>
-                {busy ? <Spinner /> : <LogIn data-icon="inline-start" />}{busy ? '正在登录…' : '登录'}
-              </Button> : <Button type="button" className="w-full" onClick={() => setRetry(value => value + 1)}>重新连接</Button>}
-            </CardFooter>
-          </form>}
-      </Card>
+              {session ? <Button type="submit" size="lg" className="w-full" disabled={busy || !username || !password}>
+                {busy ? <Spinner /> : <LogIn data-icon="inline-start" />}{busy ? '正在登录…' : '进入酒馆'}
+              </Button> : <Button type="button" size="lg" className="w-full" onClick={() => setRetry(value => value + 1)}>重新连接</Button>}
+            </form>}
+        </div>
+        <p className="mt-5 text-center text-xs text-muted-foreground/80">数据仅保存在你的私人服务器上</p>
+      </div>
     </main>
   );
 }

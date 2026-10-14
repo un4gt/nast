@@ -24,7 +24,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Plus, Trash2 } from 'lucide-react';
+import { BookOpen, Download, Plus, Save, Search, Trash2, Upload } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 import { useWorldStore, type WIEntry } from './worldStore';
 import { pushToast } from './toasts';
 
@@ -73,81 +74,110 @@ export default function WorldEditor({ onClose }: { onClose: () => void }) {
     [e.comment, e.content, ...e.key].join(' ').toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   const selectedEntry = entries[selected];
 
+  const importInput = <input ref={upload} type="file" accept=".json" className="hidden" aria-label="导入世界书" onChange={(event) => {
+    const file = event.target.files?.[0]; event.target.value = '';
+    if (!file) return;
+    void work(async () => {
+      const name = newName.trim() || file.name.replace(/\.json$/i, '');
+      if ((await rpc.call<string[]>('worlds.list', {})).includes(name)) throw new Error('已有同名书。请填写新书名称后重新导入。');
+      const book = JSON.parse(await file.text());
+      if (!book.entries || Array.isArray(book.entries)) throw new Error('请选择 ST 世界书 JSON；卡内书请在角色面板导入。');
+      await flush(); await rpc.call('worlds.save', { name, book });
+      await loadWorlds(); await openWorld(name); setNewName(''); pushToast('世界书已导入', 'success');
+    });
+  }} />;
+  const entryCount = Object.keys(entries).length;
+
   return (
     <Dialog open onOpenChange={(open) => { if (!open) close(); }}>
-      <DialogContent className="flex h-[88dvh] max-w-5xl flex-col overflow-hidden" aria-busy={busy}>
-        <DialogHeader>
-          <DialogTitle>世界书管理</DialogTitle>
-          <DialogDescription>选择一条设定编辑。切换书籍或关闭时自动保存，导入与导出使用兼容 ST 的 JSON。</DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-wrap items-center gap-2">
-          <Select value={activeWorld ?? ''} onValueChange={(name) => void work(async () => { await flush(); await openWorld(name); })} disabled={busy}>
-            <SelectTrigger className="w-48" aria-label="选择世界书"><SelectValue placeholder="选择世界书…" /></SelectTrigger>
-            <SelectContent><SelectGroup>{worlds.map((name) => <SelectItem key={name} value={name}>{name}</SelectItem>)}</SelectGroup></SelectContent>
-          </Select>
-          <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="新书名称" aria-label="新书名称" className="w-36" disabled={busy} />
-          <Button variant="secondary" size="sm" disabled={busy || !newName.trim()} onClick={() => void work(async () => {
-            await flush(); await createWorld(newName.trim()); setNewName('');
-          })}><Plus data-icon="inline-start" />新建</Button>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => upload.current?.click()}>导入</Button>
-          <input ref={upload} type="file" accept=".json" className="hidden" aria-label="导入世界书" onChange={(event) => {
-            const file = event.target.files?.[0]; event.target.value = '';
-            if (!file) return;
-            void work(async () => {
-              const name = newName.trim() || file.name.replace(/\.json$/i, '');
-              if ((await rpc.call<string[]>('worlds.list', {})).includes(name)) throw new Error('已有同名书。请填写新书名称后重新导入。');
-              const book = JSON.parse(await file.text());
-              if (!book.entries || Array.isArray(book.entries)) throw new Error('请选择 ST 世界书 JSON；卡内书请在角色面板导入。');
-              await flush(); await rpc.call('worlds.save', { name, book });
-              await loadWorlds(); await openWorld(name); setNewName(''); pushToast('世界书已导入', 'success');
-            });
-          }} />
-          {activeWorld && <>
-            <Button variant="outline" size="sm" disabled={busy} onClick={() => void work(async () => {
+      <DialogContent className="flex h-[min(92dvh,900px)] w-[calc(100%-1.5rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0 sm:p-0" aria-busy={busy}>
+        <DialogHeader className="flex-row flex-wrap items-center gap-x-4 gap-y-2 space-y-0 border-b border-border/70 px-5 py-4 pr-12 text-left">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent text-primary"><BookOpen className="size-5" /></div>
+          <div className="min-w-0 flex-1">
+            <DialogTitle className="font-display text-lg">世界书</DialogTitle>
+            <DialogDescription className="text-xs">切换书籍或关闭时自动保存；导入与导出使用兼容 ST 的 JSON。</DialogDescription>
+          </div>
+          {activeWorld && <div className="flex flex-wrap items-center gap-1.5">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => void work(async () => {
               await flush(); const book = await rpc.call('worlds.get', { name: activeWorld });
               downloadBlob(new Blob([JSON.stringify(book, null, 2)], { type: 'application/json' }), activeWorld + '.json');
-            })}>导出</Button>
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => {
+            })}><Download data-icon="inline-start" />导出</Button>
+            <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={busy} onClick={() => {
               if (window.confirm('删除“' + activeWorld + '”？角色中的关联不会自动替换。')) void work(async () => {
                 await deleteWorld(activeWorld); markDirty(false);
               });
-            }}>删除书籍</Button>
+            }}><Trash2 data-icon="inline-start" />删除书籍</Button>
             <Button size="sm" disabled={busy || !dirty} onClick={() => void work(async () => { await flush(); pushToast('世界书已保存', 'success'); })}>
-              {busy ? '处理中…' : dirty ? '保存修改' : '已保存'}
+              {busy ? <Spinner /> : <Save data-icon="inline-start" />}{busy ? '处理中…' : dirty ? '保存修改' : '已保存'}
             </Button>
-          </>}
+          </div>}
+        </DialogHeader>
+
+        <div className="grid min-h-0 flex-1 grid-rows-[auto_1fr] md:grid-cols-[18rem_1fr] md:grid-rows-1">
+          <aside className="flex min-h-0 flex-col gap-3 border-b border-border/70 bg-muted/30 p-3 md:border-r md:border-b-0">
+            <Select value={activeWorld ?? ''} onValueChange={(name) => void work(async () => { await flush(); await openWorld(name); })} disabled={busy}>
+              <SelectTrigger className="w-full bg-card/70" aria-label="选择世界书"><SelectValue placeholder="选择世界书…" /></SelectTrigger>
+              <SelectContent><SelectGroup>{worlds.map((name) => <SelectItem key={name} value={name}>{name}</SelectItem>)}</SelectGroup></SelectContent>
+            </Select>
+            <div className="flex gap-1.5">
+              <Input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="新书名称" aria-label="新书名称" className="h-control-sm min-w-0 flex-1 text-sm" disabled={busy} />
+              <Button variant="secondary" size="sm" disabled={busy || !newName.trim()} onClick={() => void work(async () => {
+                await flush(); await createWorld(newName.trim()); setNewName('');
+              })}><Plus data-icon="inline-start" />新建</Button>
+              <Button variant="outline" size="icon-sm" disabled={busy} onClick={() => upload.current?.click()} aria-label="导入世界书" title="导入"><Upload /></Button>
+              {importInput}
+            </div>
+            {activeWorld && <>
+              <Separator className="bg-border/70" />
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索标题、关键词、内容…" aria-label="搜索世界书条目" className="h-control-sm pl-8 text-sm" />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-muted-foreground">{filtered.length === entryCount ? `${entryCount} 条设定` : `${filtered.length} / ${entryCount} 条`}</span>
+                <Button size="sm" variant="ghost" className="h-7" disabled={busy} onClick={() => {
+                  const before = new Set(Object.keys(entries)); addEntry(); markDirty(true);
+                  setSelected(Object.keys(useWorldStore.getState().entries).find((key) => !before.has(key)) ?? '');
+                }}><Plus data-icon="inline-start" />添加条目</Button>
+              </div>
+              <div className="-mx-1 flex max-h-40 min-h-0 flex-col gap-0.5 overflow-y-auto px-1 md:max-h-none md:flex-1" aria-label="世界书条目列表">
+                {filtered.map(([uid, entry]) => <button type="button" key={uid} aria-pressed={selected === uid} disabled={busy}
+                  onClick={() => setSelected(uid)} title={entry.comment || entry.key.join(', ')}
+                  className={'flex w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left transition-colors ' + (selected === uid ? 'bg-card shadow-sm ring-1 ring-primary/25' : 'hover:bg-card/60')}>
+                  <span className="flex w-full items-center gap-2">
+                    <span className={'size-1.5 shrink-0 rounded-full ' + (entry.disable ? 'bg-muted-foreground/40' : entry.constant ? 'bg-primary' : 'bg-success')} aria-hidden />
+                    <span className={'truncate text-sm font-medium ' + (entry.disable ? 'text-muted-foreground line-through' : '')}>{entry.disable ? '已禁用 · ' : ''}{entry.comment || entry.key.join(', ') || '未命名条目'}</span>
+                    {entry.constant && <span className="ml-auto shrink-0 rounded bg-primary/12 px-1.5 text-[10px] text-primary">常驻</span>}
+                  </span>
+                  <span className="w-full truncate pl-3.5 text-[11px] text-muted-foreground">{entry.key.length ? entry.key.join(' · ') : '无关键词'}</span>
+                </button>)}
+                {filtered.length === 0 && <p className="px-3 py-6 text-center text-xs text-muted-foreground">{entryCount ? '没有匹配的条目' : '这本书还是空的'}</p>}
+              </div>
+            </>}
+          </aside>
+
+          <section className="min-h-0 min-w-0">
+            {activeWorld ? <ScrollArea className="h-full">
+              <fieldset disabled={busy} className="mx-auto min-w-0 max-w-3xl p-4 sm:p-6">
+                {selectedEntry ? <EntryCard key={activeWorld + '/' + selected} uid={selected} e={selectedEntry}
+                  onChange={(patch) => { updateEntry(selected, patch); markDirty(true); }}
+                  onDelete={() => { if (!busy) { deleteEntry(selected); markDirty(true); } }} /> :
+                  <WorldEmpty title="还没有选中条目" text="点击“添加条目”写下第一条设定，或从左侧选择一条。" />}
+              </fieldset>
+            </ScrollArea> : <WorldEmpty title="打开一本世界书" text="在左侧选择、新建或导入一本世界书，让角色记住这个世界的地名、规则与历史。" />}
+          </section>
         </div>
-        <Separator />
-        {activeWorld ? <div className="flex min-h-0 flex-1 flex-col gap-4 sm:flex-row">
-          <div className="flex shrink-0 flex-col gap-2 sm:w-52">
-            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索条目…" aria-label="搜索世界书条目" />
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">{filtered.length} 条设定</span>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => {
-                const before = new Set(Object.keys(entries)); addEntry(); markDirty(true);
-                setSelected(Object.keys(useWorldStore.getState().entries).find((key) => !before.has(key)) ?? '');
-              }}><Plus data-icon="inline-start" />添加</Button>
-            </div>
-            <div className="flex max-h-28 gap-1 overflow-auto sm:max-h-none sm:flex-1 sm:flex-col" aria-label="世界书条目列表">
-              {filtered.map(([uid, entry]) => <Button key={uid} variant={selected === uid ? 'secondary' : 'ghost'}
-                className="shrink-0 justify-start sm:w-full" aria-pressed={selected === uid} disabled={busy}
-                onClick={() => setSelected(uid)} title={entry.comment || entry.key.join(', ')}>
-                <span className="truncate">{entry.disable ? '已禁用 · ' : ''}{entry.comment || entry.key.join(', ') || '未命名条目'}</span>
-              </Button>)}
-            </div>
-          </div>
-          <ScrollArea className="min-h-0 min-w-0 flex-1">
-            <fieldset disabled={busy} className="min-w-0 pr-3">
-              {selectedEntry ? <EntryCard key={activeWorld + '/' + selected} uid={selected} e={selectedEntry}
-                onChange={(patch) => { updateEntry(selected, patch); markDirty(true); }}
-                onDelete={() => { if (!busy) { deleteEntry(selected); markDirty(true); } }} /> :
-                <p className="py-8 text-center text-sm text-muted-foreground">还没有条目，点击“添加”写下第一条设定。</p>}
-            </fieldset>
-          </ScrollArea>
-        </div> : <p className="py-12 text-center text-sm text-muted-foreground">选择、新建或导入一本世界书。</p>}
       </DialogContent>
     </Dialog>
   );
+}
+
+function WorldEmpty({ title, text }: { title: string; text: string }) {
+  return <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-8 text-center">
+    <div className="welcome-mark size-14"><BookOpen className="size-6" strokeWidth={1.5} /></div>
+    <p className="font-display text-lg font-semibold">{title}</p>
+    <p className="max-w-sm text-sm text-muted-foreground">{text}</p>
+  </div>;
 }
 
 function EntryCard({
@@ -164,13 +194,14 @@ function EntryCard({
   const posNum = typeof e.position === 'number' ? e.position : 0;
 
   return (
-    <div className="flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-3 sm:p-4">
+    <div className="flex min-w-0 animate-rise-in flex-col gap-5">
       <div className="flex flex-wrap items-center gap-2">
         <Input
           value={e.comment}
           onChange={(ev) => onChange({ comment: ev.target.value })}
           placeholder="标题/备注"
-          className="h-9 min-w-0 basis-full sm:flex-1 sm:basis-auto"
+          aria-label="条目标题"
+          className="h-control-lg min-w-0 basis-full border-transparent bg-transparent px-0 font-display text-xl font-semibold shadow-none focus-visible:border-transparent focus-visible:ring-0 sm:flex-1 sm:basis-auto"
         />
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <Switch
@@ -216,10 +247,11 @@ function EntryCard({
         value={e.content}
         onChange={(ev) => onChange({ content: ev.target.value })}
         placeholder="内容（支持宏）"
-        rows={8}
-        className="min-h-0 resize-y"
+        aria-label="条目内容"
+        rows={10}
+        className="min-h-0 resize-y rounded-xl bg-card/70 p-4 leading-relaxed"
       />
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="flex flex-wrap items-end gap-3 rounded-xl border border-border/70 bg-card/50 p-4">
         <div className="flex flex-col gap-1">
           <Label className="text-xs text-muted-foreground">位置</Label>
           <Select
@@ -340,7 +372,7 @@ function AdvancedEntry({ e, onChange }: { e: WIEntry; onChange: (patch: Partial<
     ['matchCharacterPersonality', '扫描角色性格'], ['matchCharacterDepthPrompt', '扫描角色深度提示'],
     ['matchScenario', '扫描场景'], ['matchCreatorNotes', '扫描作者说明'],
   ];
-  return <details className="border-t pt-3">
+  return <details className="rounded-xl border border-border/70 bg-card/50 p-4">
     <summary className="cursor-pointer text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">高级激活规则</summary>
     <FieldGroup className="mt-4 gap-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

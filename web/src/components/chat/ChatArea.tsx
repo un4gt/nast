@@ -109,8 +109,7 @@ export function ChatArea() {
     sending.current = true;
     setPending(true);
     try {
-      // ST 语义：斜杠命令在发送前拦截——内置命令本地执行、未知命令拦截、
-      // 自定义命令展开为文本、插件命令透传
+      // 浏览器处理导航和朗读；业务命令、Lua 和自定义文本统一交给后端。
       if (text.startsWith('/')) {
         let commandChangedInput = false;
         const r = await runSlashCommand(text, {

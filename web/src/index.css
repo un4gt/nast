@@ -1,70 +1,150 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-@layer base {
-  :root {
-    --background: 250 25% 98%;
-    --foreground: 246 18% 18%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 12%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 12%;
-    --primary: 256 48% 49%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 250 18% 94%;
-    --secondary-foreground: 240 10% 16%;
-    --muted: 250 18% 95%;
-    --muted-foreground: 246 7% 45%;
-    --accent: 256 42% 94%;
-    --accent-foreground: 256 45% 37%;
-    --destructive: 0 72% 48%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 248 16% 90%;
-    --input: 248 16% 85%;
-    --ring: 256 48% 49%;
-    --radius: 0.75rem;
-    --sidebar-background: 250 22% 96%;
-    --sidebar-foreground: 240 10% 12%;
-    --sidebar-primary: 256 48% 49%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 256 36% 91%;
-    --sidebar-accent-foreground: 256 45% 32%;
-    --sidebar-border: 248 16% 89%;
-    --sidebar-ring: 256 48% 49%;
-    --success: 157 45% 34%;
-  }
 
-  .dark {
-    --background: 246 16% 9%;
-    --foreground: 246 16% 92%;
-    --card: 246 14% 12%;
-    --card-foreground: 240 8% 91%;
-    --popover: 246 14% 14%;
-    --popover-foreground: 240 8% 91%;
-    --primary: 256 61% 73%;
-    --primary-foreground: 252 30% 13%;
-    --secondary: 240 7% 16%;
-    --secondary-foreground: 240 8% 91%;
-    --muted: 240 7% 15%;
-    --muted-foreground: 246 9% 66%;
-    --accent: 254 23% 21%;
-    --accent-foreground: 260 30% 92%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 246 12% 20%;
-    --input: 246 12% 25%;
-    --ring: 256 61% 73%;
-    --sidebar-background: 246 16% 11%;
-    --sidebar-foreground: 240 8% 91%;
-    --sidebar-primary: 256 61% 73%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 254 23% 21%;
-    --sidebar-accent-foreground: 240 8% 91%;
-    --sidebar-border: 246 12% 19%;
-    --sidebar-ring: 256 61% 73%;
-    --success: 157 40% 62%;
+
+/* ============ NAST 设计基础：Warm Light / Warm Dark ============ */
+:root {
+  /* 暖纸色底 + 琥珀主色 + 陶土强调 */
+  --background: 36 38% 96%;
+  --foreground: 24 22% 14%;
+  --card: 38 45% 99%;
+  --card-foreground: 24 22% 14%;
+  --popover: 38 45% 99%;
+  --popover-foreground: 24 22% 14%;
+  --primary: 24 72% 46%;
+  --primary-foreground: 36 60% 98%;
+  --secondary: 34 30% 91%;
+  --secondary-foreground: 24 22% 18%;
+  --muted: 34 26% 92%;
+  --muted-foreground: 26 12% 42%;
+  --accent: 30 58% 91%;
+  --accent-foreground: 22 60% 30%;
+  --destructive: 4 66% 48%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 32 22% 85%;
+  --input: 32 20% 80%;
+  --ring: 24 72% 46%;
+  --success: 140 32% 36%;
+  --warning: 38 88% 44%;
+  --radius: 0.875rem;
+  --sidebar-background: 35 34% 94%;
+  --sidebar-foreground: 24 22% 14%;
+  --sidebar-primary: 24 72% 46%;
+  --sidebar-primary-foreground: 36 60% 98%;
+  --sidebar-accent: 30 48% 88%;
+  --sidebar-accent-foreground: 22 60% 28%;
+  --sidebar-border: 32 22% 86%;
+  --sidebar-ring: 24 72% 46%;
+
+  /* 毛玻璃：仅用于悬浮层（顶栏、浮动工作区、弹层），正文区保持实底 */
+  --glass-bg: 38 45% 99% / 0.72;
+  --glass-border: 32 30% 70% / 0.28;
+  --glass-blur: 18px;
+  --glass-shadow: 0 1px 0 hsl(0 0% 100% / 0.6) inset, 0 12px 32px -12px hsl(24 40% 20% / 0.18);
+  --ambient-a: 28 90% 70% / 0.22;
+  --ambient-b: 12 70% 65% / 0.14;
+
+  /* 组件尺寸体系 */
+  --control-sm: 2rem;   /* 32 */
+  --control-md: 2.5rem; /* 40 */
+  --control-lg: 2.75rem;/* 44 */
+  --workspace-max: 76rem;
+  --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', system-ui, sans-serif;
+  --font-display: 'Fraunces', 'Songti SC', 'Noto Serif SC', Georgia, serif;
+
+  --chat-font-scale: 1;
+  --chat-width: 100%;
+}
+
+.dark {
+  /* 烛光夜色：深可可底 + 暖金主色 */
+  --background: 24 16% 8%;
+  --foreground: 34 30% 90%;
+  --card: 24 14% 11%;
+  --card-foreground: 34 30% 90%;
+  --popover: 24 14% 12%;
+  --popover-foreground: 34 30% 90%;
+  --primary: 32 78% 62%;
+  --primary-foreground: 24 30% 10%;
+  --secondary: 24 10% 16%;
+  --secondary-foreground: 34 24% 88%;
+  --muted: 24 10% 15%;
+  --muted-foreground: 30 10% 62%;
+  --accent: 26 26% 19%;
+  --accent-foreground: 34 60% 86%;
+  --destructive: 4 64% 56%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 26 12% 20%;
+  --input: 26 12% 25%;
+  --ring: 32 78% 62%;
+  --success: 140 30% 58%;
+  --warning: 38 85% 60%;
+  --sidebar-background: 24 15% 10%;
+  --sidebar-foreground: 34 30% 90%;
+  --sidebar-primary: 32 78% 62%;
+  --sidebar-primary-foreground: 24 30% 10%;
+  --sidebar-accent: 26 24% 18%;
+  --sidebar-accent-foreground: 34 40% 90%;
+  --sidebar-border: 26 12% 18%;
+  --sidebar-ring: 32 78% 62%;
+
+  --glass-bg: 24 14% 12% / 0.66;
+  --glass-border: 34 40% 80% / 0.09;
+  --glass-shadow: 0 1px 0 hsl(34 60% 90% / 0.05) inset, 0 16px 40px -14px hsl(0 0% 0% / 0.6);
+  --ambient-a: 30 80% 45% / 0.16;
+  --ambient-b: 12 60% 40% / 0.1;
+}
+
+
+
+@keyframes accordion-down { from { height: 0 } to { height: var(--radix-accordion-content-height) } }
+@keyframes accordion-up { from { height: var(--radix-accordion-content-height) } to { height: 0 } }
+@keyframes rise-in { from { opacity: 0; transform: translateY(6px) scale(0.99) } to { opacity: 1; transform: none } }
+
+/* 原生控件与伪元素沿用主题边框。 */
+@layer base {
+  *, ::after, ::before, ::backdrop, ::file-selector-button {
+    border-color: hsl(var(--border));
   }
+  button:not(:disabled), [role='button']:not(:disabled) { cursor: pointer; }
+}
+
+/* 毛玻璃与氛围工具类 */
+@layer utilities {
+.glass {
+  background: hsl(var(--glass-bg));
+  border: 1px solid hsl(var(--glass-border));
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.4);
+}
+}
+@layer utilities {
+.ambient-bg {
+  background-color: hsl(var(--background));
+  background-image:
+    radial-gradient(60rem 40rem at 10% -10%, hsl(var(--ambient-a)), transparent 60%),
+    radial-gradient(50rem 36rem at 100% 110%, hsl(var(--ambient-b)), transparent 60%);
+  background-attachment: fixed;
+}
+}
+@layer utilities {
+.workspace-panel {
+  @apply glass rounded-2xl;
+}
+}
+@layer utilities {
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+}
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { background: hsl(var(--popover)); }
 }
 
 @layer base {
@@ -72,8 +152,8 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground antialiased;
-    font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+    @apply ambient-bg text-foreground antialiased;
+    font-family: var(--font-sans);
   }
   html,
   body,
@@ -103,10 +183,6 @@
 }
 
 /* 消息内容排版 */
-:root {
-  --chat-font-scale: 1;
-  --chat-width: 100%;
-}
 
 .msg-content {
   min-width: 0;
@@ -188,21 +264,23 @@
     margin-inline: auto;
   }
   .composer-surface {
-    @apply rounded-2xl border bg-card p-3 shadow-sm transition-shadow;
+    @apply rounded-2xl border bg-card/90 p-3 transition-[box-shadow,border-color] duration-200;
+    box-shadow: 0 10px 30px -18px hsl(24 40% 15% / 0.35);
   }
   .composer-surface:focus-within {
-    border-color: hsl(var(--primary) / 0.55);
-    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.08);
+    border-color: hsl(var(--primary) / 0.5);
+    box-shadow: 0 0 0 4px hsl(var(--primary) / 0.1), 0 10px 30px -18px hsl(24 40% 15% / 0.35);
   }
   .composer-input {
     @apply min-h-[56px] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:ring-0;
     max-height: 180px;
   }
   .message-surface {
-    @apply rounded-2xl border bg-card px-4 py-3 sm:px-5 sm:py-4;
+    @apply rounded-2xl rounded-tl-md border border-border/70 bg-card/85 px-4 py-3 sm:px-5 sm:py-4;
+    box-shadow: 0 1px 2px hsl(24 30% 20% / 0.05);
   }
   .message-surface[data-user='true'] {
-    @apply border-transparent bg-accent text-accent-foreground;
+    @apply rounded-tl-2xl rounded-tr-md border-primary/15 bg-accent text-accent-foreground;
   }
   .message-tools {
     @apply flex items-center gap-0.5;
@@ -215,6 +293,9 @@
   }
   .safe-bottom {
     padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+  .chat-message-enter {
+    @apply animate-rise-in;
   }
   .welcome-mark {
     @apply flex size-16 items-center justify-center rounded-[1.4rem] border border-primary/15 bg-accent text-primary;
@@ -234,6 +315,13 @@
 @media (max-width: 767px) {
   .chat-column {
     width: 100%;
+  }
+  /* 移动端：消息区更贴边、输入框贴底悬浮 */
+  .message-surface {
+    padding: 0.7rem 0.9rem;
+  }
+  .composer-surface {
+    @apply rounded-[1.25rem] p-2.5;
   }
   input,
   textarea,

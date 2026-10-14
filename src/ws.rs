@@ -96,12 +96,48 @@ async fn handle_rpc(state: SharedState, mut session: Session, raw: String) {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let mut params = req.get("params").cloned().unwrap_or(Value::Null);
-    if matches!(method.as_str(), "generate.run" | "generate.group") && params.is_object() {
+    if matches!(method.as_str(), "generate.run" | "generate.group" | "commands.execute") && params.is_object() {
         params["task_id"] = serde_json::json!(crate::routing::task_id(&params));
         tracing::info!(event="generation_requested", method, task_id=params["task_id"].as_str().unwrap_or(""));
     }
 
     let task_id = params["task_id"].as_str().unwrap_or("").to_string();
+    let mut completion = None;
+    if matches!(method.as_str(), "generate.run" | "generate.group" | "commands.execute") && !task_id.is_empty() {
+        let fingerprint = serde_json::json!({"method":method,"params":params}).to_string();
+        let existing = {
+            let mut tasks = state.tasks.lock().unwrap();
+            if let Some((previous, sender)) = tasks.get(&task_id) {
+                if previous != &fingerprint { Some(Err("task_id reused with different parameters")) } else { Some(Ok(sender.subscribe())) }
+            } else {
+                // Keep a bounded replay window; never evict a task still executing.
+                if tasks.len() >= 256 {
+                    if let Some(key) = tasks.iter().find(|(_,(_,tx))| tx.borrow().is_some()).map(|(k,_)|k.clone()) { tasks.remove(&key); }
+                }
+                if tasks.len() >= 256 {
+                    Some(Err("task capacity reached; retry after running tasks finish"))
+                } else {
+                    let (sender, _) = tokio::sync::watch::channel(None);
+                    tasks.insert(task_id.clone(), (fingerprint, sender.clone()));
+                    completion = Some(sender);
+                    None
+                }
+            }
+        };
+        if let Some(existing) = existing {
+            let payload = match existing {
+                Err(message) => serde_json::json!({"error":{"code":"conflict","message":message}}),
+                Ok(mut receiver) => loop {
+                    if let Some(payload) = receiver.borrow().clone() { break payload; }
+                    if receiver.changed().await.is_err() { break serde_json::json!({"error":{"code":"internal","message":"task unavailable"}}); }
+                }
+            };
+            let mut reply = payload; reply["id"] = id;
+            let _ = session.text(reply.to_string()).await;
+            return;
+        }
+    }
+
     let started = std::time::Instant::now();
     let result = rpc::dispatch(state, &method, params).await;
     let reply = match result {
@@ -120,6 +156,7 @@ async fn handle_rpc(state: SharedState, mut session: Session, raw: String) {
             serde_json::json!({"id": id, "error": {"code": code, "message": e.to_string(),"diagnostic":diagnostic}})
         }
     };
+    if let Some(sender) = completion { sender.send_replace(Some(reply.clone())); }
     if session.text(reply.to_string()).await.is_err() {
         tracing::warn!(event="rpc_delivery_failed", method, task_id, elapsed_ms=started.elapsed().as_millis() as u64);
     }

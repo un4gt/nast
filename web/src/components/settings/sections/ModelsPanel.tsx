@@ -31,12 +31,20 @@ export function ModelsPanel() {
   const saveLock = useRef(false);
   const [sync, setSync] = useState<ModelSyncDraft>();
   const presetOutput = useStore(s => s.settings?.oai_settings?.openai_max_tokens ?? 300);
+  const connected = useStore(s => s.connected);
 
   const load = async () => {
     try { setCatalog(await rpc.call<Catalog>('model_catalog.get')); setError(''); return true; }
     catch (e) { setError(String(e)); return false; }
   };
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    void rpc.call<Catalog>('model_catalog.get').then(value => {
+      if (!cancelled) { setCatalog(value); setError(''); }
+    }).catch(e => { if (!cancelled) setError(String(e)); });
+    return () => { cancelled = true; };
+  }, [connected]);
   const route = edit?.model.routes.find(r => r.id === edit.routeId);
   const patch = (change: (r: Route) => void) => setEdit(current => {
     if (!current) return current;

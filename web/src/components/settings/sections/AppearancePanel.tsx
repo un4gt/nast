@@ -38,19 +38,31 @@ function ThemeField() {
       >
         <ToggleGroupItem
           value="light"
-          className="h-20 flex-col gap-2 rounded-xl"
+          className="h-auto flex-col items-stretch gap-2.5 rounded-xl p-2.5 data-[state=on]:border-primary data-[state=on]:bg-accent/60 data-[state=on]:ring-3 data-[state=on]:ring-primary/15"
           aria-label="浅色主题"
         >
-          <Sun className="size-5" />
-          浅色
+          <span aria-hidden className="flex h-16 gap-1.5 rounded-lg border border-black/5 p-1.5" style={{ background: 'hsl(36 38% 96%)' }}>
+            <span className="w-1/4 rounded-md" style={{ background: 'hsl(38 45% 99%)' }} />
+            <span className="flex flex-1 flex-col justify-end gap-1 rounded-md p-1.5" style={{ background: 'hsl(38 45% 99%)' }}>
+              <span className="h-1.5 w-3/4 rounded-full opacity-30" style={{ background: 'hsl(24 72% 46%)' }} />
+              <span className="h-2.5 w-1/3 self-end rounded-full" style={{ background: 'hsl(24 72% 46%)' }} />
+            </span>
+          </span>
+          <span className="flex items-center gap-1.5 px-0.5 text-sm"><Sun className="size-4" />Warm Light</span>
         </ToggleGroupItem>
         <ToggleGroupItem
           value="dark"
-          className="h-20 flex-col gap-2 rounded-xl"
+          className="h-auto flex-col items-stretch gap-2.5 rounded-xl p-2.5 data-[state=on]:border-primary data-[state=on]:bg-accent/60 data-[state=on]:ring-3 data-[state=on]:ring-primary/15"
           aria-label="深色主题"
         >
-          <Moon className="size-5" />
-          深色
+          <span aria-hidden className="flex h-16 gap-1.5 rounded-lg border border-black/5 p-1.5" style={{ background: 'hsl(24 16% 8%)' }}>
+            <span className="w-1/4 rounded-md" style={{ background: 'hsl(24 14% 13%)' }} />
+            <span className="flex flex-1 flex-col justify-end gap-1 rounded-md p-1.5" style={{ background: 'hsl(24 14% 13%)' }}>
+              <span className="h-1.5 w-3/4 rounded-full opacity-30" style={{ background: 'hsl(32 78% 62%)' }} />
+              <span className="h-2.5 w-1/3 self-end rounded-full" style={{ background: 'hsl(32 78% 62%)' }} />
+            </span>
+          </span>
+          <span className="flex items-center gap-1.5 px-0.5 text-sm"><Moon className="size-4" />Warm Dark</span>
         </ToggleGroupItem>
       </ToggleGroup>
     </div>

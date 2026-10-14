@@ -306,18 +306,8 @@ impl BridgeContext {
                     return Some(self.bind_world(&msg.source_key, &q).await);
                 }
                 _ => {
-                    // 自定义命令：展开为文本走生成
-                    if let Some(expansion) = self.custom_command_text(&cmd).await {
-                        if !expansion.is_empty() {
-                            return self.generate_reply(&msg.source_key, &expansion).await;
-                        }
-                    }
-                    // 插件命令：透传服务端 Lua 执行（无文本产出则不回复）
-                    if self.is_plugin_command(&cmd).await {
-                        return self.generate_reply_raw(&msg.source_key, &text).await;
-                    }
-                    tracing::info!("[{}] 拦截未知命令 /{cmd}", msg.source_key);
-                    return Some(format!("未知命令 /{cmd}，发送 /help 查看可用命令。"));
+                    // The backend resolves builtins, custom commands, Lua commands and unknown input.
+                    return self.generate_reply_raw(&msg.source_key, &text).await;
                 }
             }
         }

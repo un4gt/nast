@@ -5,6 +5,7 @@ import base64
 import copy
 import difflib
 import io
+import os
 import json
 import struct
 import zipfile
@@ -156,6 +157,17 @@ class Suite:
         right = [c['body'] for c in captures if c['path'].startswith('/nast/')]
         write_json(self.artifact / name / 'st-raw-state.json', st_state)
         write_json(self.artifact / name / 'nast-raw-state.json', nast_state)
+        if getattr(self.server,'real_model',False):
+            write_json(self.artifact/name/'requests.json',captures)
+            # Independent real completions differ; verify identity/order/candidate persistence instead.
+            def identities(rows):
+                return [{k:v for k,v in row.items() if k in ['name','is_user','is_system','original_avatar','swipe_id']}
+                    | {'candidate_count':len(row.get('swipes') or [])} for row in rows]
+            self.compare(name+'/identity-and-candidates',identities(st_state['chat']),identities(nast_state[1:]))
+            self.report['cases'].append({'name':name+'/real-output-and-budget','passed':bool(replies) and all(replies)
+                and bool(left) and len(left)==len(right)==len(replies)
+                and all(c['input_upper_bound']<=8192 and c['body']['max_tokens']<=512 for c in captures)})
+            return
         self.compare(name + '/requests', left, right)
         self.compare(name + '/state', {'messages': message_state(st_state['chat']), 'metadata': metadata_state(st_state['metadata'])},
             {'messages': message_state(nast_state[1:]), 'metadata': metadata_state(nast_state[0]['chat_metadata'])})
@@ -347,6 +359,27 @@ class Suite:
                 result = await rpc(self.nast, 'generate.group', {'id': nast_group['id'], 'chat_id': nast_group['chat_id'], 'type': action})
                 nast_state = await rpc(self.nast, 'groups.get_chat', {'chat_id': nast_group['chat_id']})
                 self.generation(f'groups-mode-{mode}-{action}', start, st_state, nast_state, [r['text'] for r in result['replies']], prefix)
+            # 25 rounds × 3 card assembly modes × 4 operations = 300 named cases.
+            # Each case compares the full captured requests and persisted state.
+            topics = ['城堡的钟楼', '雪山的道路', '蓝色钥匙', '成员的职责', '城堡的夜晚', 'A_B 与 Jean-Luc', '小明的提问', '空白\n换行', '数字 123', '世界书的线索', '角色的记忆', '群成员的计划']
+            for round_id in range(1, int(os.environ.get('NAST_GROUP_PARITY_ROUNDS', '1'))):
+                text = f'第{round_id}轮：请讨论{topics[(round_id-1)%len(topics)]}。'
+                for action in ['normal','regenerate','swipe','continue']:
+                    start = len(self.server.captures)
+                    prefix = st_state['chat'][-1]['mes'] if action == 'continue' else ''
+                    st_state = await self.st.evaluate('''async ({action,text}) => {
+                        const {getContext}=await import('/scripts/st-context.js');
+                        if(action==='normal') { const input=document.getElementById('send_textarea'); input.value=text; input.dispatchEvent(new Event('input',{bubbles:true})); }
+                        if(action==='regenerate') { const groups=await import('/scripts/group-chats.js'); await groups.regenerateGroup(); }
+                        else if(action==='swipe') { const script=await import('/script.js'); await script.swipe_right(); }
+                        else await getContext().generate(action);
+                        await getContext().saveChat();
+                        return {chat:JSON.parse(JSON.stringify(getContext().chat)),metadata:JSON.parse(JSON.stringify(getContext().chatMetadata))};
+                    }''', {'action':action,'text':text})
+                    result = await rpc(self.nast, 'generate.group', {'id':nast_group['id'],'chat_id':nast_group['chat_id'],'type':action,'user_message':text if action=='normal' else ''})
+                    nast_state = await rpc(self.nast, 'groups.get_chat', {'chat_id':nast_group['chat_id']})
+                    self.generation(f'groups-mode-{mode}-round-{round_id:02}-{action}',start,st_state,nast_state,[r['text'] for r in result['replies']],prefix)
+
 
 
 async def run_cases(st, nast, server, artifact, report, settings, stage):

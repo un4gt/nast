@@ -98,7 +98,7 @@ interface AppState {
   createGroup: (name: string, members: string[]) => Promise<void>;
   saveGroup: (group: Group) => Promise<void>;
   deleteGroup: (groupId: string) => Promise<void>;
-  sendGroup: (text: string, member?: string, type?: 'normal' | 'regenerate' | 'swipe' | 'continue') => Promise<boolean>;
+  sendGroup: (text: string, member?: string, type?: 'normal' | 'regenerate' | 'swipe' | 'continue' | 'quiet' | 'impersonate') => Promise<boolean>;
   importFile: (file: File) => Promise<void>;
   deleteCharacter: (avatar: string) => Promise<void>;
   deleteMessage: (index: number) => Promise<void>;
@@ -208,13 +208,14 @@ export const useStore = create<AppState>((set, get) => ({
     set({ generating: true, streamingText: '', streamingReasoning: '' });
     let ok = true;
     try {
-      const result = await rpc.call<{ replies?: { routing?: { status?: string } }[] }>('generate.group', {
+      const result = await rpc.call<{ command?: boolean; status?: string; text?: string; replies?: { routing?: { status?: string } }[] }>('generate.group', {
         id: g.id,
         chat_id: g.chat_id,
         user_message: text,
         type,
         ...(member ? { member } : {}),
       });
+      if (result.command) { if (result.text) pushToast(result.text, result.status === 'unknown' ? 'error' : 'info'); await get().openGroup(g.id); return result.status !== 'unknown'; }
       if (result.replies?.some(reply => reply.routing?.status === 'incomplete')) ok = false;
       const raw = await rpc.call<any[]>('groups.get_chat', { chat_id: g.chat_id });
       set({ messages: raw.slice(1), chatMetadata: raw[0]?.chat_metadata ?? null });
@@ -345,12 +346,9 @@ export const useStore = create<AppState>((set, get) => ({
     set({ generating: true, streamingText: '', streamingReasoning: '' });
     let ok = true;
     try {
-      await rpc.call('generate.run', {
-        avatar: activeAvatar,
-        chat_file: activeChatName,
-        type: 'normal',
-        user_message: text,
-      });
+      const result = await rpc.call<any>('generate.run', { avatar: activeAvatar, chat_file: activeChatName, type: 'normal', user_message: text });
+      if (result.command && result.text) pushToast(result.text, result.status === 'unknown' ? 'error' : 'info');
+      if (result.status === 'unknown') ok = false;
       await get().reloadChat();
     } catch {
       ok = false;
@@ -443,7 +441,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   stopGeneration: async () => {
     await rpc.call('generate.stop', {});
-    set({ generating: false });
+    // The server retains ownership until the active member has finished saving.
   },
 
   appendStreamToken: (t) => set((s) => ({ streamingText: (s.streamingText ?? '') + t })),
@@ -455,6 +453,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setNote: async (note) => {
+    const group = get().groups.find(g => g.id === get().activeGroupId);
+    if (group) { await rpc.call('groups.set_note', { id: group.id, chat_id: group.chat_id, note }); await get().reloadChat(); return; }
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName) return;
     await rpc.call('chats.set_note', { avatar: activeAvatar, file_name: activeChatName, note });
@@ -462,6 +462,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   setChatPersona: async (persona) => {
+    const group = get().groups.find(g => g.id === get().activeGroupId);
+    if (group) { await rpc.call('groups.set_persona', { id: group.id, chat_id: group.chat_id, persona }); await get().reloadChat(); return; }
     const { activeAvatar, activeChatName } = get();
     if (!activeAvatar || !activeChatName) return;
     await rpc.call('chats.set_persona', { avatar: activeAvatar, file_name: activeChatName, persona });

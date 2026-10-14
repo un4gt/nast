@@ -19,14 +19,14 @@ export function WelcomeScreen({ onOpenSettings }: { onOpenSettings: () => void }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-      <div className="m-auto w-full max-w-2xl px-5 py-10 sm:px-10">
+      <div className="m-auto w-full max-w-2xl animate-rise-in px-5 py-10 sm:px-10">
         <Empty className="flex-none gap-7 px-0 py-0 md:p-0">
           <div className="welcome-mark">
             <MessageCircle className="size-8" strokeWidth={1.5} />
           </div>
           <EmptyHeader className="max-w-md gap-3">
             <p className="text-xs font-medium tracking-[0.2em] text-primary">NOT A SILLYTAVERN</p>
-            <EmptyTitle className="text-2xl font-semibold tracking-tight sm:text-3xl">
+            <EmptyTitle className="font-display text-3xl font-semibold sm:text-4xl">
               故事，从一次对话开始。
             </EmptyTitle>
             <EmptyDescription>
@@ -66,12 +66,12 @@ export function WelcomeScreen({ onOpenSettings }: { onOpenSettings: () => void }
                 <Button
                   key={character.avatar}
                   variant="outline"
-                  className="h-auto min-w-0 justify-start gap-3 p-3"
+                  className="h-auto min-w-0 justify-start gap-3 rounded-xl p-3 transition-[transform,box-shadow,background-color] hover:-translate-y-0.5 hover:shadow-md hover:shadow-primary/10"
                   disabled={!connected || Boolean(character.error)}
                   title={character.error}
                   onClick={() => void selectCharacter(character.avatar).catch(() => {})}
                 >
-                  <Avatar className="size-10 shrink-0">
+                  <Avatar className="size-10 shrink-0 rounded-xl">
                     <AvatarImage src={character.avatarUrl} alt={character.name} />
                     <AvatarFallback>{character.name.slice(0, 1)}</AvatarFallback>
                   </Avatar>

@@ -167,14 +167,14 @@ export function LeftSidebar({ onOpenSettings, onLogout }: { onOpenSettings: () =
   };
 
   return (
-    <Sidebar collapsible="icon">
+    <Sidebar collapsible="icon" variant="floating">
       <SidebarHeader className="gap-4 p-4 group-data-[collapsible=icon]:p-2">
         <div className="flex h-8 items-center gap-3">
-          <div className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-primary text-lg font-semibold text-primary-foreground">
-            n
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-primary/70 font-display text-lg font-semibold text-primary-foreground shadow-md shadow-primary/25">
+            N
           </div>
           <div className="flex flex-col overflow-hidden group-data-[collapsible=icon]:hidden">
-            <span className="text-lg font-semibold leading-none tracking-tight">
+            <span className="font-display text-xl font-semibold leading-none">
               nast<span className="text-primary">.</span>
             </span>
             <span className="mt-1 text-[11px] leading-tight text-muted-foreground">
@@ -318,7 +318,7 @@ export function LeftSidebar({ onOpenSettings, onLogout }: { onOpenSettings: () =
             <SidebarGroupLabel>群组</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {groups.map((g) => (
+                {groups.filter(g => (!favOnly || g.fav) && (!query.trim() || g.name.toLowerCase().includes(query.trim().toLowerCase()) || (Array.isArray(g.tags) && g.tags.some(t => String(t).toLowerCase().includes(query.trim().toLowerCase()))))).map((g) => (
                   <SidebarMenuItem key={g.id}>
                     <SidebarMenuButton
                       isActive={activeGroupId === g.id}
@@ -328,6 +328,7 @@ export function LeftSidebar({ onOpenSettings, onLogout }: { onOpenSettings: () =
                       tooltip={g.name}
                     >
                       <Avatar className="size-7">
+                        {!!g.avatar_url && <AvatarImage src={String(g.avatar_url)} alt={g.name} />}
                         <AvatarFallback className="bg-secondary text-[10px] text-secondary-foreground">
                           {g.name.slice(0, 2)}
                         </AvatarFallback>
@@ -374,7 +375,7 @@ export function LeftSidebar({ onOpenSettings, onLogout }: { onOpenSettings: () =
         )}
       </SidebarContent>
 
-      <SidebarFooter className="border-t p-3 group-data-[collapsible=icon]:p-2">
+      <SidebarFooter className="border-t border-sidebar-border/70 p-3 group-data-[collapsible=icon]:p-2">
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton

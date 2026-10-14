@@ -56,6 +56,9 @@ export function GroupSessionTools() {
       </Field>
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" size="sm" disabled={disabled} onClick={() => void operate('groups.new_chat')}>新会话</Button>
+        <Button variant="outline" size="sm" disabled={disabled} onClick={() => void operate('groups.branch')}>创建分支</Button>
+        <Button variant="outline" size="sm" disabled={disabled} onClick={() => void operate('groups.branch', { bookmark: true })}>创建书签</Button>
+        {!!chatMetadata?.main_chat && <Button variant="outline" size="sm" disabled={disabled} onClick={() => void operate('groups.parent')}>返回主会话</Button>}
         <Button variant="outline" size="sm" disabled={disabled} onClick={() => fileInput.current?.click()}>导入 JSONL</Button>
         <Button variant="outline" size="sm" disabled={disabled} onClick={() => void operate('groups.export_chat')}>导出 JSONL</Button>
         <Button variant="ghost" size="sm" disabled={disabled} onClick={() => {

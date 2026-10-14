@@ -16,7 +16,7 @@ use rand::RngCore;
 
 /// [0, n) 随机整数（避开 gen 保留字，封装 RngCore）。
 fn rng_range(rng: &mut impl RngCore, n: usize) -> usize {
-    (rng.next_u64() % n as u64) as usize
+    (rng_f64(rng) * n as f64).floor() as usize
 }
 
 /// [0,1) 随机浮点。
@@ -41,54 +41,52 @@ pub fn activate_natural(
     last_speaker: Option<&str>,
     rng: &mut impl RngCore,
 ) -> Vec<String> {
-    let mut activated: Vec<String> = Vec::new();
-    let allow_self = group.allow_self_responses;
-
-    let candidates: Vec<&GroupMember> = members
-        .iter()
-        .filter(|m| !group.disabled_members.contains(&m.avatar))
-        .filter(|m| {
-            if !allow_self {
-                last_speaker.map(|ls| m.name != ls).unwrap_or(true)
-            } else {
-                true
+    let enabled = enabled_avatars(group, members);
+    let banned = if group.allow_self_responses { None } else { last_speaker };
+    let find = |avatar: &str| members.iter().find(|m| m.avatar == avatar);
+    let mut activated = Vec::new();
+    for word in input_words {
+        for avatar in &enabled {
+            if let Some(member) = find(avatar) {
+                if Some(member.name.as_str()) != banned && extract_words(&member.name).contains(&word.to_lowercase()) {
+                    activated.push(avatar.clone());
+                    break;
+                }
             }
-        })
-        .collect();
-
-    // 1. 提及命中：输入词中包含成员名（大小写不敏感）
-    for m in &candidates {
-        let mentioned = input_words
-            .iter()
-            .any(|w| w.to_lowercase() == m.name.to_lowercase());
-        if mentioned {
-            activated.push(m.avatar.clone());
         }
     }
-
-    // 2. talkativeness 概率 roll（洗牌后的顺序）
-    let mut shuffled: Vec<&GroupMember> = candidates.clone();
+    let mut shuffled: Vec<_> = enabled.iter().collect();
     shuffle_refs(&mut shuffled, rng);
-    for m in shuffled {
-        let talk = if m.talkativeness.is_nan() { 0.5 } else { m.talkativeness };
-        if rng_f64(rng) < talk && !activated.contains(&m.avatar) {
-            activated.push(m.avatar.clone());
-        }
+    let mut chatty = Vec::new();
+    for avatar in shuffled {
+        let Some(member) = find(avatar) else { continue };
+        if Some(member.name.as_str()) == banned { continue; }
+        let talk = if member.talkativeness.is_nan() { 0.5 } else { member.talkativeness };
+        if talk >= rng_f64(rng) { activated.push(avatar.clone()); }
+        if talk > 0.0 { chatty.push(avatar.clone()); }
     }
-
-    // 3. 兜底：无人激活 → 从 talkativeness > 0 的成员中随机挑一个
-    if activated.is_empty() {
-        let pool: Vec<&GroupMember> = candidates
-            .iter()
-            .copied()
-            .filter(|m| m.talkativeness > 0.0)
-            .collect();
-        let pool = if pool.is_empty() { candidates.clone() } else { pool };
-        if let Some(m) = pool.get(rng_range(rng, pool.len().max(1))) {
-            activated.push(m.avatar.clone());
-        }
+    // ST's fallback deliberately permits the previous speaker, including a one-member group.
+    let pool = if chatty.is_empty() { &enabled } else { &chatty };
+    for _ in 0..pool.len() {
+        if !activated.is_empty() { break; }
+        let avatar = &pool[rng_range(rng, pool.len())];
+        if find(avatar).is_some() { activated.push(avatar.clone()); }
     }
+    let mut seen = std::collections::HashSet::new();
+    activated.retain(|a| seen.insert(a.clone()));
     activated
+}
+
+fn enabled_avatars(group: &Group, members: &[GroupMember]) -> Vec<String> {
+    let avatars = if group.members.is_empty() { members.iter().map(|m| m.avatar.clone()).collect() }
+        else { group.members.clone() };
+    avatars.into_iter().filter(|a| !group.disabled_members.contains(a)).collect()
+}
+
+/// JavaScript /\b\w+\b/gim uses ASCII word characters (no Unicode flag).
+pub fn extract_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty()).map(str::to_ascii_lowercase).collect()
 }
 
 /// LIST 激活：全部启用成员，按 members 数组顺序。
@@ -102,16 +100,11 @@ pub fn activate_list(group: &Group, members: &[GroupMember]) -> Vec<String> {
 
 /// MANUAL 激活：非用户触发 → 随机一人。
 pub fn activate_manual(group: &Group, members: &[GroupMember], rng: &mut impl RngCore) -> Vec<String> {
-    let candidates: Vec<&GroupMember> = members
-        .iter()
-        .filter(|m| !group.disabled_members.contains(&m.avatar))
-        .collect();
-    if candidates.is_empty() {
-        return vec![];
-    }
-    let m = &candidates[rng_range(rng, candidates.len())];
-    let _ = GA_NATURAL;
-    vec![m.avatar.clone()]
+    let enabled = enabled_avatars(group, members);
+    let mut candidates: Vec<_> = enabled.iter().collect();
+    shuffle_refs(&mut candidates, rng);
+    candidates.first().filter(|a| members.iter().any(|m| m.avatar == ***a))
+        .map(|a| vec![(**a).clone()]).unwrap_or_default()
 }
 
 /// POOLED 激活：自上次用户消息后未发言者优先（随机），否则排除最后发言者随机。
@@ -122,30 +115,14 @@ pub fn activate_pooled(
     last_speaker: Option<&str>,
     rng: &mut impl RngCore,
 ) -> Vec<String> {
-    let enabled: Vec<&GroupMember> = members
-        .iter()
-        .filter(|m| !group.disabled_members.contains(&m.avatar))
-        .collect();
-    // 优先：未发言者
-    let unspoken: Vec<&GroupMember> = enabled
-        .iter()
-        .filter(|m| unspoken_since_user.contains(&m.avatar))
-        .copied()
-        .collect();
-    let pool: Vec<&GroupMember> = if !unspoken.is_empty() {
-        unspoken
-    } else {
-        enabled
-            .iter()
-            .filter(|m| last_speaker.map(|ls| m.name != ls).unwrap_or(true))
-            .copied()
-            .collect()
+    let enabled = enabled_avatars(group, members);
+    let unspoken: Vec<_> = enabled.iter().filter(|a| unspoken_since_user.contains(a)).cloned().collect();
+    let pool = if !unspoken.is_empty() { unspoken } else {
+        enabled.iter().filter(|a| enabled.len() <= 1 || Some(a.as_str()) != last_speaker).cloned().collect()
     };
-    if pool.is_empty() {
-        return vec![];
-    }
-    let m = &pool[rng_range(rng, pool.len())];
-    vec![m.avatar.clone()]
+    if pool.is_empty() { return vec![]; }
+    let avatar = &pool[rng_range(rng, pool.len())];
+    if members.iter().any(|m| &m.avatar == avatar) { vec![avatar.clone()] } else { vec![] }
 }
 
 /// 统一调度入口（generateGroupWrapper 的激活部分）。
@@ -159,14 +136,10 @@ pub fn activate_members(
     is_user_input: bool,
     rng: &mut impl RngCore,
 ) -> Vec<String> {
-    let words: Vec<String> = input
-        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '.' | '!' | '?' | ';' | ':'))
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
+    let words = extract_words(input);
     match group.activation_strategy {
         GA_NATURAL => {
-            activate_natural(group, members, &words, last_speaker, rng)
+            activate_natural(group, members, &words, if is_user_input { None } else { last_speaker }, rng)
         }
         GA_LIST => activate_list(group, members),
         GA_MANUAL => {
@@ -272,7 +245,7 @@ pub fn pick_greeting(ch: &Character, rng: &mut impl RngCore) -> String {
 }
 
 fn shuffle_refs<'a, T: 'a>(v: &mut Vec<&'a T>, rng: &mut impl RngCore) {
-    for i in (1..v.len()).rev() {
+    for i in (0..v.len()).rev() {
         v.swap(i, rng_range(rng, i + 1));
     }
 }
@@ -338,7 +311,7 @@ mod tests {
         // A 是最后发言者且 talk=1（无提及）→ 兜底也不选 A？
         // 兜底池 = 候选（已排除 A）→ 空 → 无激活
         let out = activate_natural(&g, &members, &[], Some("A"), &mut rng);
-        assert_eq!(out, Vec::<String>::new());
+        assert_eq!(out, vec!["a.png"]);
         // allow_self_responses = true → 可以连发
         g.allow_self_responses = true;
         let out = activate_natural(&g, &members, &[], Some("A"), &mut rng);
@@ -368,7 +341,7 @@ mod tests {
         ];
         let mut rng = StdRng::seed_from_u64(3);
         // A 已发言 → B 优先
-        let out = activate_pooled(&g, &members, &["b.png".to_string()], Some("A"), &mut rng);
+        let out = activate_pooled(&g, &members, &["b.png".to_string()], Some("a.png"), &mut rng);
         assert_eq!(out, vec!["b.png"]);
     }
 

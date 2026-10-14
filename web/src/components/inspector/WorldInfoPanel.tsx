@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { BookOpen, BookPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -20,7 +20,10 @@ export function WorldInfoPanel({ onOpenEditor }: { onOpenEditor: () => void }) {
 }
 
 function BookBindings({ avatar, onOpenEditor }: { avatar: string | null; onOpenEditor: () => void }) {
-  const { activeChatName, chatMetadata, reloadChat, settings, saveSettings } = useStore();
+  const fieldId = useId();
+  const { activeChatName: privateChat, activeGroupId, groups, chatMetadata, reloadChat, settings, saveSettings } = useStore();
+  const group = groups.find(g => g.id === activeGroupId);
+  const activeChatName = group?.chat_id ?? privateChat;
   const [worlds, setWorlds] = useState<string[]>([]);
   const [character, setCharacter] = useState<any>(null);
   const [bookName, setBookName] = useState('');
@@ -67,7 +70,7 @@ function BookBindings({ avatar, onOpenEditor }: { avatar: string | null; onOpenE
   }, '卡内书已导入并设为角色主书');
 
   const bindChat = (name: string) => perform(async () => {
-    await rpc.call('chats.set_world', { avatar, file_name: activeChatName, world: name === NONE ? null : name });
+    await rpc.call(group ? 'groups.set_world' : 'chats.set_world', { id: group?.id, chat_id: group?.chat_id, avatar, file_name: activeChatName, world: name === NONE ? null : name });
     await reloadChat();
   }, '聊天世界书已更新');
 
@@ -103,8 +106,8 @@ function BookBindings({ avatar, onOpenEditor }: { avatar: string | null; onOpenE
                 </div>
                 <FieldDescription>导入到世界书库并关联后参与生成。导出角色卡时会携带当前主书内容。</FieldDescription>
                 <Field>
-                  <FieldLabel htmlFor="embedded-book-name">导入为</FieldLabel>
-                  <Input id="embedded-book-name" value={bookName} onChange={(event) => setBookName(event.target.value)} />
+                  <FieldLabel htmlFor={fieldId + "-embedded-book-name"}>导入为</FieldLabel>
+                  <Input id={fieldId + "-embedded-book-name"} value={bookName} onChange={(event) => setBookName(event.target.value)} />
                   {worlds.includes(bookName.trim()) && <FieldDescription>已有同名书，请更换名称，现有内容会保留。</FieldDescription>}
                 </Field>
                 <Button variant="outline" size="sm" disabled={!bookName.trim() || worlds.includes(bookName.trim())} onClick={() => void importEmbedded()}>
@@ -114,9 +117,9 @@ function BookBindings({ avatar, onOpenEditor }: { avatar: string | null; onOpenE
             ) : <FieldDescription>此角色卡未携带书籍。可以在下方关联已有世界书。</FieldDescription>}
           </FieldSet>
           <Field data-disabled={busy}>
-            <FieldLabel htmlFor="character-primary-book">角色主书</FieldLabel>
+            <FieldLabel htmlFor={fieldId + "-character-primary-book"}>角色主书</FieldLabel>
             <Select value={primary || NONE} onValueChange={(value) => void bindPrimary(value)} disabled={busy}>
-              <SelectTrigger id="character-primary-book"><SelectValue /></SelectTrigger>
+              <SelectTrigger id={fieldId + "-character-primary-book"}><SelectValue /></SelectTrigger>
               <SelectContent><SelectGroup><SelectItem value={NONE}>不关联</SelectItem>{options(primary)}</SelectGroup></SelectContent>
             </Select>
             <FieldDescription>随角色生效；群聊中仅当前发言角色的主书参与扫描。取消关联也会移除卡内副本。</FieldDescription>
@@ -127,8 +130,8 @@ function BookBindings({ avatar, onOpenEditor }: { avatar: string | null; onOpenE
             <div className="flex max-h-48 flex-col gap-3 overflow-y-auto">
               {worlds.filter((name) => name !== primary).map((name, index) => (
                 <Field key={name} orientation="horizontal">
-                  <FieldLabel htmlFor={'extra-book-' + index} className="min-w-0 flex-1 truncate" title={name}>{name}</FieldLabel>
-                  <Checkbox id={'extra-book-' + index} checked={extraBooks.includes(name)} onCheckedChange={(value) => void toggleExtra(name, value === true)} />
+                  <FieldLabel htmlFor={fieldId + '-extra-book-' + index} className="min-w-0 flex-1 truncate" title={name}>{name}</FieldLabel>
+                  <Checkbox id={fieldId + '-extra-book-' + index} checked={extraBooks.includes(name)} onCheckedChange={(value) => void toggleExtra(name, value === true)} />
                 </Field>
               ))}
               {worlds.filter((name) => name !== primary).length === 0 && <FieldDescription>暂无其他书籍，可在世界书管理器中新建或导入。</FieldDescription>}
@@ -136,10 +139,10 @@ function BookBindings({ avatar, onOpenEditor }: { avatar: string | null; onOpenE
           </FieldSet>
         </>
       )}
-      <Field data-disabled={busy || !avatar || !activeChatName}>
-        <FieldLabel htmlFor="chat-world-book">本聊天绑定</FieldLabel>
-        <Select value={chatMetadata?.world_info || chatMetadata?.world || NONE} onValueChange={(value) => void bindChat(value)} disabled={busy || !avatar || !activeChatName}>
-          <SelectTrigger id="chat-world-book"><SelectValue placeholder="先打开聊天" /></SelectTrigger>
+      <Field data-disabled={busy || (!avatar && !group) || !activeChatName}>
+        <FieldLabel htmlFor={fieldId + "-chat-world-book"}>本聊天绑定</FieldLabel>
+        <Select value={chatMetadata?.world_info || chatMetadata?.world || NONE} onValueChange={(value) => void bindChat(value)} disabled={busy || (!avatar && !group) || !activeChatName}>
+          <SelectTrigger id={fieldId + "-chat-world-book"}><SelectValue placeholder="先打开聊天" /></SelectTrigger>
           <SelectContent><SelectGroup><SelectItem value={NONE}>不关联</SelectItem>{options(chatMetadata?.world_info ?? chatMetadata?.world ?? '')}</SelectGroup></SelectContent>
         </Select>
         <FieldDescription>只影响当前聊天。所有聊天共用的书籍在设置中启用。</FieldDescription>

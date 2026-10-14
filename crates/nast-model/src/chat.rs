@@ -103,6 +103,8 @@ pub struct ChatMessage {
     pub title: Option<String>,
     /// swipe 生成期间：当条 swipe 正在流式
     pub is_streaming: Option<bool>,
+    #[serde(flatten)]
+    pub other: BTreeMap<String, Value>,
 }
 
 /// extra 对象（无 schema 自由扩展；这里列出已知键）。
@@ -151,6 +153,8 @@ pub struct SwipeInfo {
     pub gen_started: Option<String>,
     pub gen_finished: Option<String>,
     pub extra: MessageExtra,
+    #[serde(flatten)]
+    pub other: BTreeMap<String, Value>,
 }
 
 /// 整个聊天文件（header + messages）。

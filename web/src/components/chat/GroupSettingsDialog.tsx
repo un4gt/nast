@@ -1,3 +1,4 @@
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field';
 import { useEffect, useState } from 'react';
 import { Trash2, UserPlus, X } from 'lucide-react';
 import {
@@ -70,10 +71,10 @@ export function GroupSettingsDialog({
 
   if (!group || !draft) return null;
 
-  const members = group.members
+  const members = (draft.members as string[])
     .map((a) => characters.find((c) => c.avatar === a))
     .filter(Boolean);
-  const nonMembers = characters.filter((c) => !c.error && !group.members.includes(c.avatar));
+  const nonMembers = characters.filter((c) => !c.error && !draft.members.includes(c.avatar));
 
   const save = async () => {
     setBusy(true);
@@ -82,8 +83,7 @@ export function GroupSettingsDialog({
       // 持久化 talkativeness 到成员卡
       for (const [avatar, t] of Object.entries(talkativeness)) {
         await rpc
-          .call('characters.edit', { avatar, data: { talkativeness: String(t) } })
-          .catch(() => {});
+          .call('characters.edit', { avatar, data: { talkativeness: String(t) } });
       }
       pushToast('群设置已保存', 'success');
       onOpenChange(false);
@@ -115,7 +115,7 @@ export function GroupSettingsDialog({
   return (
     <>
       <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-h-[85dvh] max-w-md overflow-y-auto">
           <DialogHeader>
             <DialogTitle>群设置</DialogTitle>
             <DialogDescription>{group.name}（{group.members.length} 名成员）</DialogDescription>
@@ -208,6 +208,9 @@ export function GroupSettingsDialog({
                       <span className="w-8 shrink-0 text-right text-[10px] tabular-nums text-muted-foreground">
                         {t.toFixed(2)}
                       </span>
+                      <Button variant="ghost" size="sm" aria-label={`上移 ${m!.name}`} disabled={draft.members.indexOf(m!.avatar) === 0} onClick={() => {
+                        const next = [...draft.members]; const i = next.indexOf(m!.avatar); [next[i-1], next[i]] = [next[i], next[i-1]]; setDraft({ ...draft, members: next });
+                      }}>↑</Button>
                       <Button
                         variant="ghost"
                         size="icon"
@@ -224,6 +227,10 @@ export function GroupSettingsDialog({
             </div>
           </div>
 
+          <FieldGroup>
+            <Field><FieldLabel htmlFor="group-prefix">拼接前缀</FieldLabel><Input id="group-prefix" value={draft.generation_mode_join_prefix ?? ''} onChange={e => setDraft({ ...draft, generation_mode_join_prefix: e.target.value })} /></Field>
+            <Field><FieldLabel htmlFor="group-suffix">拼接后缀</FieldLabel><Input id="group-suffix" value={draft.generation_mode_join_suffix ?? ''} onChange={e => setDraft({ ...draft, generation_mode_join_suffix: e.target.value })} /></Field>
+          </FieldGroup>
           <DialogFooter>
             <Button
               variant="ghost"

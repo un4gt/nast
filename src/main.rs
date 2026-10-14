@@ -1,5 +1,7 @@
 //! nast 单端口服务入口：静态资源 + /ws + /upload。
 
+mod commands;
+mod plugins;
 mod connection;
 mod auth;
 mod model_catalog;

@@ -35,22 +35,20 @@ export function GroupChatArea() {
     streamingText,
     streamingReasoning,
   } = useStore();
-  const [input, setInput] = useChatDraft(`nast:draft:group:${activeGroupId ?? ''}`);
+  const group = groups.find((g) => g.id === activeGroupId);
+  const [input, setInput] = useChatDraft(`nast:draft:group:${activeGroupId ?? ''}:${group?.chat_id ?? ''}`);
+  const [queue, setQueue] = useState<string[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [currentMember, setCurrentMember] = useState<string>('');
   const sending = useRef(false);
   const [pending, setPending] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
 
-  const group = groups.find((g) => g.id === activeGroupId);
-  useEffect(() => { setAutoMode(false); }, [activeGroupId]);
   useEffect(() => {
-    if (!autoMode || generating || pending || !connected || !group) return;
-    const timer = window.setTimeout(() => {
-      void sendGroup('').then((ok) => { if (!ok) setAutoMode(false); });
-    }, Math.max(1, group.auto_mode_delay ?? 5) * 1000);
-    return () => window.clearTimeout(timer);
-  }, [autoMode, generating, pending, connected, group, sendGroup]);
+    const update = (data: any) => setAutoMode(data?.id === activeGroupId && data?.chat_id === group?.chat_id);
+    void rpc.call('groups.auto_status', {}).then(update).catch(() => {});
+    return rpc.on('group_auto_changed', update);
+  }, [activeGroupId, group?.chat_id]);
   const members = useMemo(
     () =>
       (group?.members ?? [])
@@ -59,25 +57,56 @@ export function GroupChatArea() {
     [group, characters],
   );
 
-  // 流式：成员切换（group_member_drafted 携带成员名）→ 重置缓冲；token 事件逐字追加
   useEffect(() => {
-    const offDrafted = rpc.on('group_member_drafted', (data: unknown) => {
-      const name = typeof data === 'string' ? data : String((data as any)?.name ?? '');
-      setCurrentMember(name);
-      useStore.setState({ streamingText: '', streamingReasoning: '' });
+    const matches = (data: any) => data?.group_id === activeGroupId && data?.chat_id === group?.chat_id;
+    const refresh = async () => {
+      const rows = await rpc.call<any[]>('groups.get_chat', { id: activeGroupId, chat_id: group?.chat_id });
+      const current = currentConversation();
+      if (current?.kind === 'group' && current.group_id === activeGroupId && current.chat_id === group?.chat_id) {
+        useStore.setState({ messages: rows.slice(1), chatMetadata: rows[0]?.chat_metadata ?? null });
+      }
+    };
+    const update = (data: any) => {
+      if (!matches(data)) return;
+      useStore.setState({ generating: true });
+      setQueue(data.queue ?? []);
+      if (data.member) setCurrentMember(characters.find(c => c.avatar === data.member)?.name ?? data.member);
+      if (data.stage === 'member_started') useStore.setState({ streamingText: '', streamingReasoning: '' });
+      if (data.stage === 'member_ended') void refresh().catch(() => {});
+    };
+    void rpc.call<any>('generate.status', {}).then(s => {
+      if (s.running && matches(s.group)) {
+        update(s.group);
+        useStore.setState({ streamingText: s.text ?? '', streamingReasoning: s.reasoning ?? '' });
+      }
+    }).catch(() => {});
+    const off = rpc.on('group_progress', update);
+    const started = rpc.on('group_batch_started', (data: any) => {
+      useStore.setState({ generating: true });
+      if (matches(data)) useStore.setState({ streamingText: '', streamingReasoning: '' });
     });
+    const ended = rpc.on('group_batch_ended', (data: any) => {
+      useStore.setState({ generating: false, streamingText: null, streamingReasoning: null });
+      if (matches(data)) { setQueue([]); void refresh().catch(() => {}); }
+    });
+    return () => { off(); started(); ended(); };
+  }, [activeGroupId, group?.chat_id, characters]);
+
+  // 成员切换通过带会话归属的 group_progress 处理；token 事件逐字追加。
+  useEffect(() => {
     const offToken = rpc.on('stream_token_received', (data: { text: string; conversation?: unknown }) => {
       if (data.conversation && JSON.stringify(data.conversation) !== JSON.stringify(currentConversation())) return;
       if (useStore.getState().generating) appendStreamToken(data.text);
     });
+    const offImpersonate = rpc.on('impersonate_ready', (text: string) => setInput(text));
     const offReasoning = rpc.on('stream_reasoning_received', (data: { text: string; conversation?: unknown }) => {
       if (data.conversation && JSON.stringify(data.conversation) !== JSON.stringify(currentConversation())) return;
       if (useStore.getState().generating) appendStreamReasoning(data.text);
     });
     return () => {
-      offDrafted();
       offToken();
       offReasoning();
+      offImpersonate();
     };
   }, [appendStreamToken, appendStreamReasoning]);
 
@@ -96,7 +125,7 @@ export function GroupChatArea() {
     setPending(true);
     setInput('');
     try {
-      if (/^\/(model|speak|tts-stop)(?:\s|$)/i.test(text)) {
+      if (/^\/(model|help|speak|tts-stop)(?:\s|$)/i.test(text)) {
         await runSlashCommand(text);
         return;
       }
@@ -189,6 +218,7 @@ export function GroupChatArea() {
         </Button>
       </div>
 
+      {queue.length > 0 && <p className="px-4 py-2 text-xs text-muted-foreground" role="status">发言队列：{queue.map(a => characters.find(c => c.avatar === a)?.name ?? a).join(' → ')}</p>}
       <GroupSessionTools />
       <ChatTranscript>
         {messages.length === 0 && !generating && (
@@ -254,7 +284,9 @@ export function GroupChatArea() {
             onClick={() => void sendGroup('', undefined, 'continue')}>续写</Button>
           <Button variant="ghost" size="sm" disabled={!connected || generating || pending || !messages.length || messages[messages.length - 1]?.is_user}
             onClick={() => void sendGroup('', undefined, 'swipe')}>新候选回复</Button>
-          <Button variant="ghost" size="sm" aria-pressed={autoMode} disabled={!connected} onClick={() => setAutoMode((value) => !value)}>
+          <Button variant="ghost" size="sm" disabled={!connected || generating || pending} onClick={() => void sendGroup('', undefined, 'impersonate')}>代用户生成</Button>
+          <Button variant="ghost" size="sm" disabled={!connected || generating || pending || candidates <= 1} onClick={() => void rpc.call('groups.delete_swipe', { id: group.id, chat_id: group.chat_id }).then(() => useStore.getState().reloadChat())}>删除当前候选</Button>
+          <Button variant="ghost" size="sm" aria-pressed={autoMode} disabled={!connected} onClick={() => void rpc.call(autoMode ? 'groups.auto_stop' : 'groups.auto_start', { id: group.id, chat_id: group.chat_id }).then(() => setAutoMode(!autoMode))}>
             {autoMode ? '停止自动对话' : '自动对话'}
           </Button>
           </div>
