@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Catalog {
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub channels: Vec<Channel>,
     pub version: u64,
     pub default_model: String,
     pub models: Vec<Model>,
@@ -25,7 +29,11 @@ pub struct Model {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Route {
     pub id: String,
+    #[serde(default)]
+    pub channel_id: String,
+    #[serde(default)]
     pub provider: String,
+    #[serde(default)]
     pub protocol: String,
     pub upstream_model: String,
     pub priority: i64,
@@ -40,6 +48,7 @@ pub struct RouteConfig {
     pub context_limit: Option<i64>,
     pub input_limit: Option<i64>,
     pub output_limit: Option<i64>,
+    pub supports_images: Option<bool>,
     pub connect_timeout_secs: u64,
     pub first_token_timeout_secs: u64,
     pub idle_timeout_secs: u64,
@@ -55,6 +64,7 @@ impl Default for RouteConfig {
             context_limit: None,
             input_limit: None,
             output_limit: None,
+            supports_images: None,
             connect_timeout_secs: 10,
             first_token_timeout_secs: 60,
             idle_timeout_secs: 60,
@@ -131,8 +141,101 @@ pub fn validate_parameters(route: &Route, effective_output: Option<i64>) -> Resu
     Ok(())
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Channel {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub endpoint: String,
+    pub credential_ref: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub discovered_models: Vec<String>,
+}
+fn enabled() -> bool { true }
+
 impl Catalog {
+    /// Resolve shared connections into frozen request snapshots.
+    pub fn resolve(&mut self) -> Result<(), String> {
+        for model in &mut self.models {
+            for route in &mut model.routes {
+                if route.channel_id.is_empty() { continue; }
+                let channel = self.channels.iter().find(|c| c.id == route.channel_id)
+                    .ok_or("模型引用的渠道不存在")?;
+                route.provider = channel.name.clone();
+                route.protocol = channel.protocol.clone();
+                route.config.endpoint = channel.endpoint.clone();
+                route.config.credential_ref = channel.credential_ref.clone();
+                route.config.headers = channel.headers.clone();
+            }
+        }
+        Ok(())
+    }
+    /// Preserve route IDs, including IDs pinned by existing conversations.
+    pub fn migrate_channels(&mut self, secrets: &Value) -> Result<(), String> {
+        for model in &mut self.models {
+            if self.schema_version < 2 && model.id == "default" && model.display_name == "默认模型" {
+                if let Some(route) = model.routes.first() { model.display_name = route.upstream_model.clone(); }
+            }
+            for route in &mut model.routes {
+                if !route.channel_id.is_empty() { continue; }
+                let key = route.config.credential_ref.as_deref().and_then(|k| connection::active_secret(secrets, k));
+                let existing = self.channels.iter().find(|c| c.protocol == route.protocol
+                    && c.endpoint.trim_end_matches('/') == route.config.endpoint.trim_end_matches('/')
+                    && c.headers == route.config.headers
+                    && c.credential_ref.as_deref().and_then(|k| connection::active_secret(secrets, k)) == key);
+                route.channel_id = if let Some(channel) = existing { channel.id.clone() } else {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let host = reqwest::Url::parse(&route.config.endpoint).ok()
+                        .and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "自定义渠道".into());
+                    self.channels.push(Channel { id: id.clone(), name: host, protocol: route.protocol.clone(),
+                        endpoint: route.config.endpoint.trim_end_matches('/').into(), credential_ref: route.config.credential_ref.clone(),
+                        headers: route.config.headers.clone(), enabled: true, discovered_models: vec![] });
+                    id
+                };
+            }
+        }
+        self.schema_version = 2;
+        self.resolve()
+    }
+    /// Persist connections once, on channels, never on derived route snapshots.
+    pub fn stored(&self) -> Value {
+        let mut value = json!(self);
+        for model in value["models"].as_array_mut().unwrap() {
+            for route in model["routes"].as_array_mut().unwrap() {
+                if route["channel_id"].as_str().is_some_and(|id| !id.is_empty()) {
+                    let object = route.as_object_mut().unwrap();
+                    object.remove("provider"); object.remove("protocol");
+                    let config = object.get_mut("config").unwrap().as_object_mut().unwrap();
+                    for key in ["endpoint", "credential_ref", "headers"] { config.remove(key); }
+                }
+            }
+        }
+        value
+    }
+    pub fn available_routes(&self, model: &Model) -> Vec<Route> {
+        ordered_routes(model, None).into_iter().filter(|r| r.channel_id.is_empty()
+            || self.channels.iter().any(|c| c.id == r.channel_id && c.enabled)).collect()
+    }
     pub fn validate(&self) -> Result<(), String> {
+        let mut channel_ids = HashSet::new();
+        for channel in &self.channels {
+            if !valid_id(&channel.id) || !channel_ids.insert(&channel.id) || channel.name.trim().is_empty() {
+                return Err("渠道 ID 必须唯一且名称不能为空".into());
+            }
+            // Validate connections even when no model is attached yet.
+            let probe = Catalog { schema_version: 0, channels: vec![], version: 0, default_model: "probe".into(), models: vec![Model {
+                id: "probe".into(), display_name: "probe".into(), routes: vec![Route {
+                    id: "probe".into(), channel_id: String::new(), provider: channel.name.clone(), protocol: channel.protocol.clone(),
+                    upstream_model: "probe".into(), priority: 0, enabled: true,
+                    config: RouteConfig { endpoint: channel.endpoint.clone(), headers: channel.headers.clone(), ..Default::default() },
+                }],
+            }] };
+            probe.validate()?;
+        }
         let mut ids = HashSet::new();
         let mut routes = HashSet::new();
         for m in &self.models {
@@ -140,6 +243,7 @@ impl Catalog {
                 return Err("模型 ID 必须唯一且名称不能为空".into());
             }
             for r in &m.routes {
+                if !r.channel_id.is_empty() && !channel_ids.contains(&r.channel_id) { return Err("模型引用的渠道不存在".into()); }
                 if !valid_id(&r.id) || !routes.insert(&r.id) {
                     return Err("路由 ID 必须全局唯一".into());
                 }
@@ -224,9 +328,17 @@ pub fn initialize(
 ) -> Result<Catalog, String> {
     let path = user.root.join("models.json");
     if path.exists() {
-        let c: Catalog = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let mut c: Catalog = serde_json::from_slice(&bytes)
             .map_err(|e| e.to_string())?;
+        let migrating = c.schema_version < 2;
+        c.migrate_channels(secrets)?;
         c.validate()?;
+        if migrating {
+            let backup = user.root.join("backups/pre-channels-models.json");
+            if !backup.exists() { nast_storage::atomic_write(&backup, &bytes).map_err(|e| e.to_string())?; }
+            nast_storage::atomic_write(&path, &serde_json::to_vec_pretty(&c.stored()).unwrap()).map_err(|e| e.to_string())?;
+        }
         return Ok(c);
     }
     let oai: OaiSettings =
@@ -287,14 +399,17 @@ pub fn initialize(
         config.credential_ref = Some(reference);
         user.save_secrets(secrets).map_err(|e| e.to_string())?;
     }
-    let catalog = Catalog {
+    let mut catalog = Catalog {
+        schema_version: 2,
+        channels: vec![],
         version: 1,
         default_model: "default".into(),
         models: vec![Model {
             id: "default".into(),
-            display_name: "默认模型".into(),
+            display_name: connection::model_for(&oai),
             routes: vec![Route {
                 id: "legacy".into(),
+                channel_id: String::new(),
                 provider: oai.chat_completion_source.clone(),
                 protocol: protocol.into(),
                 upstream_model: connection::model_for(&oai),
@@ -304,8 +419,9 @@ pub fn initialize(
             }],
         }],
     };
+    catalog.migrate_channels(secrets)?;
     catalog.validate()?;
-    nast_storage::atomic_write(&path, &serde_json::to_vec_pretty(&catalog).unwrap())
+    nast_storage::atomic_write(&path, &serde_json::to_vec_pretty(&catalog.stored()).unwrap())
         .map_err(|e| e.to_string())?;
     Ok(catalog)
 }
@@ -314,6 +430,9 @@ pub async fn get(state: SharedState) -> RpcResult {
     let secrets = state.secrets.read().await;
     let catalog = state.catalog.lock().unwrap();
     let mut value = json!(*catalog);
+    for c in value["channels"].as_array_mut().unwrap() {
+        c["credential_configured"] = json!(c["credential_ref"].as_str().and_then(|k| connection::active_secret(&secrets, k)).is_some());
+    }
     for m in value["models"].as_array_mut().unwrap() {
         for r in m["routes"].as_array_mut().unwrap() {
             r["credential_configured"] = json!(
@@ -328,6 +447,7 @@ pub async fn get(state: SharedState) -> RpcResult {
 }
 pub async fn save(state: SharedState, params: Value) -> RpcResult {
     let mut next: Catalog = serde_json::from_value(params["catalog"].clone()).map_err(bad)?;
+    next.resolve().map_err(bad)?;
     next.validate().map_err(bad)?;
     let copies: std::collections::HashMap<String, String> = params.get("credential_copies")
         .map(|value| serde_json::from_value(value.clone()).map_err(bad))
@@ -345,8 +465,31 @@ pub async fn save(state: SharedState, params: Value) -> RpcResult {
         }
     }
     let mut updated = secrets.clone();
+    for channel in &mut next.channels {
+        let old = current.channels.iter().find(|c| c.id == channel.id);
+        channel.credential_ref = old.and_then(|c| c.credential_ref.clone());
+        let supplied = params["channel_credentials"].get(&channel.id);
+        if old.is_some_and(|c| c.endpoint.trim_end_matches('/') != channel.endpoint.trim_end_matches('/') || c.protocol != channel.protocol)
+            && channel.credential_ref.is_some() && supplied.is_none() {
+            return Err(bad("渠道地址或协议已更改，请重新输入或清除密钥"));
+        }
+        if let Some(key) = supplied {
+            let key = key.as_str().ok_or_else(|| bad("密钥必须是字符串"))?.trim();
+            channel.credential_ref = if key.is_empty() { None } else {
+                let reference = format!("api_key_route_{}", uuid::Uuid::new_v4());
+                updated[&reference] = json!([{"id":uuid::Uuid::new_v4().to_string(),"value":key,"active":true}]);
+                Some(reference)
+            };
+        }
+    }
     for model in &mut next.models {
         for route in &mut model.routes {
+            if !route.channel_id.is_empty() {
+                if params["credentials"].get(&route.id).is_some() || copies.contains_key(&route.id) {
+                    return Err(bad("此模型已使用共享渠道，请通过 channel_credentials 更新渠道密钥"));
+                }
+                continue;
+            }
             let old = current
                 .models
                 .iter()
@@ -376,6 +519,8 @@ pub async fn save(state: SharedState, params: Value) -> RpcResult {
             }
         }
     }
+    next.migrate_channels(&updated).map_err(bad)?;
+    next.validate().map_err(bad)?;
     next.version = current
         .version
         .checked_add(1)
@@ -383,7 +528,7 @@ pub async fn save(state: SharedState, params: Value) -> RpcResult {
     state.user.save_secrets(&updated)?;
     nast_storage::atomic_write(
         &state.user.root.join("models.json"),
-        &serde_json::to_vec_pretty(&next).map_err(bad)?,
+        &serde_json::to_vec_pretty(&next.stored()).map_err(bad)?,
     )?;
     *secrets = updated;
     *current = next;
@@ -422,6 +567,7 @@ pub fn bind(chat: &mut ChatFile, default_model: &str, imported: bool) {
         let selection = metadata["nast_model"].as_object_mut().unwrap();
         selection.remove("active_route");
         selection.remove("active_route_info");
+        selection.remove("bindings");
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -480,7 +626,16 @@ pub async fn conversation(state: SharedState, params: Value, set: bool) -> RpcRe
             .ok_or_else(|| bad("缺少 model_id"))?;
         catalog.model(id).map_err(bad)?;
         if chat.0[0]["chat_metadata"]["nast_model"]["selected_model"] != id {
-            chat.0[0]["chat_metadata"]["nast_model"] = json!({"selected_model":id});
+            let selection = &mut chat.0[0]["chat_metadata"]["nast_model"];
+            let previous = selection["selected_model"].as_str().unwrap_or_default().to_string();
+            if !selection["bindings"].is_object() { selection["bindings"] = json!({}); }
+            if selection["active_route"].is_string() {
+                selection["bindings"][&previous] = json!({"route":selection["active_route"],"info":selection["active_route_info"]});
+            }
+            let binding = selection["bindings"][id].clone();
+            selection["selected_model"] = json!(id);
+            selection["active_route"] = binding["route"].clone();
+            selection["active_route_info"] = binding["info"].clone();
         }
     }
     let selection = chat.0[0]["chat_metadata"]["nast_model"].clone();
@@ -497,7 +652,11 @@ pub async fn conversation(state: SharedState, params: Value, set: bool) -> RpcRe
     let model = catalog.model(id);
     let ordered = model
         .as_ref()
-        .map(|m| ordered_routes(m, selection["active_route"].as_str()))
+        .map(|m| {
+            let mut model = (*m).clone();
+            model.routes = catalog.available_routes(m);
+            ordered_routes(&model, selection["active_route"].as_str())
+        })
         .unwrap_or_default();
     Ok(
         json!({"conversation":reference,"state":selection,"model":model.ok(),"candidate_route":ordered.first().map(|r| &r.id),"error": if ordered.is_empty() { Some("模型已删除或没有启用的路由，请在模型设置中修复或重新选择") } else { None }}),
@@ -541,6 +700,7 @@ mod tests {
     fn route(id: &str, priority: i64) -> Route {
         Route {
             id: id.into(),
+            channel_id: String::new(),
             provider: id.into(),
             protocol: "openai".into(),
             upstream_model: "test".into(),
@@ -580,6 +740,7 @@ mod tests {
     #[test]
     fn catalog_rejects_duplicate_ids_and_reserved_overrides() {
         let mut c = Catalog {
+            schema_version: 0, channels: vec![],
             version: 1,
             default_model: "m".into(),
             models: vec![Model {
@@ -602,7 +763,7 @@ mod tests {
     fn credential_copy_requires_an_explicit_saved_matching_connection() {
         let mut source = route("source", 0);
         source.config.credential_ref = Some("route_secret".into());
-        let catalog = Catalog { version: 1, default_model: "m".into(),
+        let catalog = Catalog { schema_version: 0, channels: vec![], version: 1, default_model: "m".into(),
             models: vec![Model { id: "m".into(), display_name: "M".into(), routes: vec![source.clone()] }] };
         let secrets = json!({"route_secret":[{"value":"route-key","active":true}],
             "api_key_custom":[{"value":"legacy-key","active":true}]});
@@ -616,5 +777,30 @@ mod tests {
         assert!(copy_credential(&catalog, &secrets, &target, "source").is_err());
         target.protocol = "openai".into();
         assert!(copy_credential(&catalog, &json!({"api_key_custom":[{"value":"legacy-key","active":true}]}), &target, "source").is_err());
+    }
+    #[test]
+    fn channel_migration_deduplicates_only_equivalent_credentials_and_preserves_routes() {
+        let mut a = route("a", 10); a.config.credential_ref = Some("one".into());
+        let mut b = route("b", 5); b.config.credential_ref = Some("two".into());
+        let mut c = route("c", 0); c.config.credential_ref = Some("three".into());
+        let secrets = json!({"one":[{"active":true,"value":"same"}],"two":[{"active":true,"value":"same"}],"three":[{"active":true,"value":"different"}]});
+        let mut catalog = Catalog { schema_version: 0, channels: vec![], version: 7, default_model: "m".into(),
+            models: vec![Model { id: "m".into(), display_name: "M".into(), routes: vec![a,b,c] }] };
+        catalog.migrate_channels(&secrets).unwrap();
+        assert_eq!(catalog.channels.len(), 2);
+        assert_eq!(catalog.models[0].routes[0].id, "a");
+        assert_eq!(catalog.models[0].routes[0].channel_id, catalog.models[0].routes[1].channel_id);
+        assert_ne!(catalog.models[0].routes[0].channel_id, catalog.models[0].routes[2].channel_id);
+        let stored = catalog.stored();
+        assert!(stored["models"][0]["routes"][0]["config"].get("endpoint").is_none());
+        assert!(stored["models"][0]["routes"][0]["config"].get("credential_ref").is_none());
+        let mut restored: Catalog = serde_json::from_value(stored.clone()).unwrap();
+        restored.migrate_channels(&secrets).unwrap();
+        assert_eq!(restored.stored(), stored);
+        restored.channels[0].endpoint = "https://changed.example/v1".into();
+        restored.resolve().unwrap();
+        assert_eq!(restored.models[0].routes[1].config.endpoint, "https://changed.example/v1");
+        restored.channels[0].enabled = false;
+        assert_eq!(restored.available_routes(&restored.models[0]).len(), 1);
     }
 }

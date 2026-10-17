@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { LogicalModel, Route } from '@/models';
+import type { Catalog, Channel, LogicalModel, Route } from '@/models';
 
 export const endpoints: Record<string, string> = {
   openai: 'https://api.openai.com/v1', anthropic: 'https://api.anthropic.com/v1', gemini: 'https://generativelanguage.googleapis.com/v1beta',
@@ -7,12 +7,21 @@ export const endpoints: Record<string, string> = {
 export const protocols: Record<string, string> = { openai: 'OpenAI 兼容', anthropic: 'Anthropic', gemini: 'Gemini' };
 export const object = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
 export function newConnection(): Route {
-  return { id: uuidv4(), provider: '', protocol: 'openai', upstream_model: '', priority: 0, enabled: true,
+  return { id: uuidv4(), channel_id: '', provider: '', protocol: 'openai', upstream_model: '', priority: 0, enabled: true,
     config: { endpoint: endpoints.openai, connect_timeout_secs: 10, first_token_timeout_secs: 60, idle_timeout_secs: 60, headers: {}, parameters: {}, remove_parameters: [] } };
 }
 export function newModel(): LogicalModel {
-  return { id: uuidv4(), display_name: '', routes: [newConnection()] };
+  return { id: uuidv4(), display_name: '', routes: [] };
 }
+export function newChannel(): Channel {
+  return { id: uuidv4(), name: '', protocol: 'openai', endpoint: endpoints.openai, enabled: true, headers: {}, discovered_models: [] };
+}
+export function channelRoute(channel: Channel, upstream = ''): Route {
+  const route = newConnection();
+  return { ...route, channel_id: channel.id, provider: channel.name, protocol: channel.protocol, upstream_model: upstream,
+    config: { ...route.config, endpoint: channel.endpoint, headers: channel.headers } };
+}
+export type PublishCatalog = (catalog: Catalog, credentials?: Record<string, string>) => Promise<void>;
 export function primaryConnection(model: LogicalModel): Route | undefined {
   return model.routes.filter(r => r.enabled).sort((a, b) => b.priority - a.priority)[0] ?? model.routes[0];
 }

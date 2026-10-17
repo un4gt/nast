@@ -26,6 +26,7 @@ pub struct Routing {
     pub reasoning: Arc<Mutex<String>>,
 }
 pub struct Outcome {
+    pub failed_attempts: Vec<Value>,
     pub text: String,
     pub reasoning: String,
     pub route: Route,
@@ -39,7 +40,7 @@ pub struct Outcome {
 }
 impl Outcome {
     pub fn metadata(&self, routing: &Routing) -> Value {
-        json!({"logical_model":routing.model_id,"route":self.route.id,"upstream_model":self.route.upstream_model,"task_id":routing.task_id,"finish_reason":self.finish_reason,"input_tokens":self.input_tokens,"output_tokens":self.output_tokens,"status":if self.complete {"complete"} else {"incomplete"},"error":self.error})
+        json!({"logical_model":routing.model_id,"route":self.route.id,"channel":self.route.channel_id,"upstream_model":self.route.upstream_model,"task_id":routing.task_id,"finish_reason":self.finish_reason,"input_tokens":self.input_tokens,"output_tokens":self.output_tokens,"status":if self.complete {"complete"} else {"incomplete"},"error":self.error,"failed_attempts":self.failed_attempts})
     }
 }
 pub fn task_id(params: &Value) -> String {
@@ -66,10 +67,13 @@ impl Routing {
         let model = catalog.model(&model_id).map_err(RpcError::BadRequest)?;
         let active = selected["active_route"].as_str().map(str::to_string);
         // Keep the snapshot in canonical priority order; sticky state can change between group members.
-        let routes = model_catalog::ordered_routes(model, None);
+        let mut routes = catalog.available_routes(model);
+        if params["required_capabilities"]["images"].as_bool() == Some(true) {
+            routes.retain(|r| r.config.supports_images == Some(true));
+        }
         if routes.is_empty() {
             return Err(RpcError::BadRequest(
-                "模型尚未配置可用连接，请打开模型设置编辑 API 配置".into(),
+                "没有启用且满足本次能力要求的渠道，请检查模型的渠道配置".into(),
             ));
         }
         conversation.write(state, &chat)?;
@@ -117,6 +121,16 @@ impl Routing {
         }
         oai.custom_include_body.clear();
         oai.custom_include_headers.clear();
+        // Assemble once against the largest configured candidate budget. A small
+        // primary must not truncate history before a larger fallback can be selected.
+        if self.routes.len() > 1 {
+            let max_input = self.routes.iter().map(|r| {
+                let output = output_tokens(r, oai.openai_max_tokens).unwrap_or(oai.openai_max_tokens);
+                let context = r.config.context_limit.unwrap_or(oai.openai_max_context).saturating_sub(output);
+                r.config.input_limit.map_or(context, |limit| limit.min(context))
+            }).max().unwrap_or_default();
+            oai.openai_max_context = max_input.saturating_add(oai.openai_max_tokens);
+        }
     }
     fn first(&self) -> &Route {
         self.active
@@ -129,11 +143,14 @@ impl Routing {
         if outcome.complete {
             chat.0[0]["chat_metadata"]["nast_model"]["active_route"] = json!(outcome.route.id);
             chat.0[0]["chat_metadata"]["nast_model"]["active_route_info"] = json!({"id":outcome.route.id,"provider":outcome.route.provider,"upstream_model":outcome.route.upstream_model});
+            let selection = &mut chat.0[0]["chat_metadata"]["nast_model"];
+            if !selection["bindings"].is_object() { selection["bindings"] = json!({}); }
+            selection["bindings"][&self.model_id] = json!({"route":outcome.route.id,"info":selection["active_route_info"]});
             *self.active.borrow_mut() = Some(outcome.route.id.clone());
         }
     }
     fn stage(&self, hub: &EventHub, phase: &str, route: &Route, attempt: usize) {
-        let value = json!({"conversation":self.conversation,"task_id":self.task_id,"phase":phase,"route":route.id,"attempt":attempt});
+        let value = json!({"conversation":self.conversation,"task_id":self.task_id,"phase":phase,"route":route.id,"channel_name":route.provider,"attempt":attempt});
         let mut current = self.phase.lock().unwrap();
         if *current != value {
             *current = value.clone();
@@ -157,6 +174,7 @@ impl Routing {
             ordered.insert(0, r);
         }
         let mut outcome = Outcome {
+            failed_attempts: vec![],
             text: String::new(),
             reasoning: String::new(),
             route: ordered[0].clone(),
@@ -169,16 +187,24 @@ impl Routing {
             reasoning_started: None,
         };
         'routes: for (index, route) in ordered.iter().enumerate() {
-            outcome.route = route.clone();
             let req = match prepare_request(request, route) {
                 Ok(r) => r,
                 Err(e) => {
                     log_failure(&self.task_id, route, &e, 0, &outcome);
-                    outcome.error = Some(diagnostic(&e, route));
-                    break;
+                    if outcome.text.is_empty() && outcome.reasoning.is_empty() { outcome.route = route.clone(); outcome.error = Some(diagnostic(&e, route)); }
+                    continue;
                 }
             };
             for attempt in 0..2 {
+                if !outcome.text.is_empty() || !outcome.reasoning.is_empty() {
+                    outcome.failed_attempts.push(json!({"route":outcome.route.id,"text":outcome.text,"reasoning":outcome.reasoning,"error":outcome.error}));
+                    outcome.text.clear(); outcome.reasoning.clear();
+                    outcome.first_token_at = None; outcome.reasoning_started = None;
+                    progress.lock().unwrap().clear(); self.reasoning.lock().unwrap().clear();
+                    if publish { hub.emit("generation_stream_reset", json!({"conversation":self.conversation,"task_id":self.task_id})); }
+                }
+                outcome.route = route.clone();
+                outcome.error = None;
                 outcome.finish_reason = None;
                 outcome.input_tokens = None;
                 outcome.output_tokens = None;
@@ -186,7 +212,7 @@ impl Routing {
                     hub,
                     if attempt > 0 {
                         "retrying"
-                    } else if index > 0 {
+                    } else if index > 0 || self.active.borrow().as_ref().is_some_and(|id| id != &route.id) {
                         "fallback"
                     } else {
                         "connecting"
@@ -272,13 +298,14 @@ impl Routing {
                 };
                 log_failure(&self.task_id, route, &error, attempt+1, &outcome);
                 outcome.error = Some(diagnostic(&error, route));
-                if !outcome.text.is_empty()
-                    || !outcome.reasoning.is_empty()
-                    || !error.retryable()
+                if !can_failover(&error)
                     || abort.is_cancelled()
                     || tokio::time::Instant::now() >= self.deadline
                 {
                     break 'routes;
+                }
+                if !outcome.text.is_empty() || !outcome.reasoning.is_empty() || !error.retryable() {
+                    continue 'routes;
                 }
                 if error.retry_after().is_some_and(|v| v > 30) {
                     continue 'routes;
@@ -297,6 +324,13 @@ impl Routing {
                         _ = tokio::time::sleep(delay)=>{},
                     }
                 }
+            }
+        }
+        if outcome.text.is_empty() && outcome.reasoning.is_empty() {
+            if let Some(last) = outcome.failed_attempts.last() {
+                outcome.text = last["text"].as_str().unwrap_or_default().into();
+                outcome.reasoning = last["reasoning"].as_str().unwrap_or_default().into();
+                if let Some(route) = self.routes.iter().find(|r| Some(r.id.as_str()) == last["route"].as_str()) { outcome.route = route.clone(); }
             }
         }
         self.stage(hub, "incomplete", &outcome.route, 0);
@@ -390,6 +424,10 @@ fn estimated_input(req: &GenRequest, route: &Route) -> usize {
         + 3
 
 }
+fn can_failover(error: &ProviderError) -> bool {
+    error.retryable() || matches!(error, ProviderError::Http { status: 401 | 403 | 404 | 408 | 500..=599, .. }
+        | ProviderError::InvalidResponse(_) | ProviderError::Network(_))
+}
 fn prepare_request(request: &GenRequest, route: &Route) -> Result<GenRequest, ProviderError> {
     let mut req = request.clone();
     req.model = route.upstream_model.clone();
@@ -455,7 +493,7 @@ fn prepare_request(request: &GenRequest, route: &Route) -> Result<GenRequest, Pr
 mod tests {
     use super::*;
     fn route(protocol: &str) -> Route {
-        Route { id: "r".into(), provider: "".into(), protocol: protocol.into(), upstream_model: "gpt-4o".into(), priority: 0, enabled: true, config: Default::default() }
+        Route { id: "r".into(), channel_id: String::new(), provider: "".into(), protocol: protocol.into(), upstream_model: "gpt-4o".into(), priority: 0, enabled: true, config: Default::default() }
     }
     fn request() -> GenRequest {
         GenRequest { messages: vec![nast_providers::ChatMessage { role: "user".into(), content: "hello".into(), name: None }], model: "gpt-4o".into(), temperature: 1.0, top_p: 1.0, frequency_penalty: 0.0, presence_penalty: 0.0, max_tokens: 300, stop: vec![], stream: true, assistant_prefill: None, use_sysprompt: true, extra_headers: vec![], extra_body: json!({}) }

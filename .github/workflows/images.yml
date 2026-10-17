@@ -54,8 +54,7 @@ jobs:
       - name: Real HTTP onboarding, authentication and routing
         run: |
           export NAST_E2E_HTTP_HOST="$(hostname -I | cut -d' ' -f1)"
-          python tests/parity/model_setup.py
-          python tests/parity/model_sync.py
+          python tests/parity/channels.py
           python tests/parity/auth.py
           python tests/parity/routing.py
       - name: Retain acceptance evidence
@@ -65,8 +64,7 @@ jobs:
           name: browser-acceptance
           retention-days: 7
           path: |
-            /tmp/nast-model-setup-*/
-            /tmp/nast-model-sync-*/
+            .cache/channels-*/
             /tmp/nast-auth-*/
             /tmp/nast-routing-*/
 

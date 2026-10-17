@@ -27,7 +27,10 @@ def main(image):
         catalog=json.loads(first);route=catalog['models'][0]['routes'][0]
         assert route['upstream_model']=='legacy-model'
         stored=json.loads((user/'secrets.json').read_text())
-        assert stored[route['config']['credential_ref']][0]['value']=='isolated-migration-test-key'
+        assert catalog['schema_version']==2
+        channel=next(c for c in catalog['channels'] if c['id']==route['channel_id'])
+        assert stored[channel['credential_ref']][0]['value']=='isolated-migration-test-key'
+        assert 'endpoint' not in route['config'] and 'credential_ref' not in route['config']
         assert (user/'backups/pre-models-secrets.json').read_bytes()==original_secrets
         assert (user/'backups/pre-models-settings.json').read_bytes()==original_settings
         subprocess.run(['docker','restart',name],check=True,capture_output=True)

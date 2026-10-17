@@ -94,7 +94,7 @@ async def main():
             (user/'models.json').mkdir()
             try:
                 broken=await call('model_catalog.get');broken['models'][0]['display_name']='must not publish'
-                await fails('model_catalog.save',catalog=broken,credentials={'a':'must-not-publish'})
+                await fails('model_catalog.save',catalog=broken,channel_credentials={broken['models'][0]['routes'][0]['channel_id']:'must-not-publish'})
                 assert (await call('model_catalog.get'))['models'][0]['display_name']=='主模型'
             finally:
                 (user/'models.json').rmdir();(user/'models.saved').rename(user/'models.json')
@@ -118,11 +118,12 @@ async def main():
             await generate(chat);assert server.captures[-1]['route']=='b'
             await generate(other);assert server.captures[-1]['route']=='a'
             await switch(chat,'default');assert (await selection(chat))['active_route']=='b'
-            await switch(chat,'second');assert 'active_route' not in await selection(chat)
+            await switch(chat,'second');assert not (await selection(chat)).get('active_route')
             await switch(chat,'default')
+            assert (await selection(chat))['active_route']=='b'
             passed('routing/exact-retries-fallback-stickiness-conversation-isolation-secrets')
 
-            for status in [400,401,403,413,422,500]:
+            for status in [400,413,422]:
                 current=await new();server.plans['a']=[{'status':status}];start=len(server.captures)
                 await fails('generate.run',avatar=avatar,chat_file=current,user_message='fail')
                 assert len(server.captures)-start==1
@@ -130,7 +131,10 @@ async def main():
             for status in [429,502,503,504]:
                 current=await new();server.plans['a']=[{'status':status}];start=len(server.captures)
                 await generate(current);assert [c['route'] for c in server.captures[start:]]==['a','a']
-            current=await new();server.plans['a']=[{'status':401,'message':'invalid credential key-a; check account'}]
+            for status in [401,403,404,500]:
+                current=await new();server.plans['a']=[{'status':status}];start=len(server.captures)
+                await generate(current);assert [c['route'] for c in server.captures[start:]]==['a','b']
+            current=await new();server.plans['a']=[{'status':400,'message':'invalid credential key-a; check account'}]
             error=await fails('generate.run',avatar=avatar,chat_file=current)
             assert 'check account' in error and 'key-a' not in error and '[REDACTED]' in error
             passed('routing/transient-and-terminal-status-boundaries')
@@ -150,18 +154,19 @@ async def main():
                     assert [c['route'] for c in server.captures[start:]]==['a','a','b']
                     assert result['routing']['status']=='complete'
                 else:
-                    assert len(server.captures)-start==1
-                    assert result['routing']['status']=='incomplete'
+                    assert [c['route'] for c in server.captures[start:]]==['a','b']
+                    assert result['routing']['status']=='complete'
                     saved=(await lines(current))[-1]
-                    assert saved['extra']['nast_model']['status']=='incomplete'
+                    assert saved['extra']['nast_model']['status']=='complete'
                     assert saved['extra']['reasoning']
-                    assert 'active_route' not in await selection(current)
+                    assert (await selection(current))['active_route']=='b'
+                    assert result['routing']['failed_attempts'][0]['route']=='a'
                 server.plans['a']=[]
             passed('stream/eof-before-content-and-partial-body-or-reasoning')
             current=await new();server.plans['a']=[{'invalid_json':True}];start=len(server.captures)
-            await fails('generate.run',avatar=avatar,chat_file=current)
-            assert len(server.captures)-start==1
-            passed('stream/invalid-response-is-terminal')
+            await generate(current)
+            assert [c['route'] for c in server.captures[start:]]==['a','b']
+            passed('stream/invalid-response-fails-over')
             current=await new();server.plans['a']=[{'status':503}];start=len(server.captures)
             task=asyncio.create_task(generate(current,task_id='cancel-backoff'))
             while len(server.captures)==start: await asyncio.sleep(.02)
@@ -238,11 +243,11 @@ async def main():
             assert len(result['replies'])==2
             await call('conversation_model.set',conversation=group_ref,model_id='second')
             await call('conversation_model.set',conversation=group_ref,model_id='default')
-            server.plans['a']=[{'cutoff':'reasoning'}];start=len(server.captures)
+            server.plans['b']=[{'cutoff':'reasoning'}];start=len(server.captures)
             result=await call('generate.group',id=group['id'],chat_id=group['chat_id'],user_message='partial')
-            assert len(result['replies'])==1 and len(server.captures)-start==1
-            assert result['replies'][0]['routing']['status']=='incomplete'
-            passed('groups/shared-stickiness-and-stop-after-partial-member')
+            assert len(result['replies'])==2 and [c['route'] for c in server.captures[start:]]==['b','a','a']
+            assert result['replies'][0]['routing']['status']=='complete'
+            passed('groups/shared-stickiness-and-partial-member-failover')
             a,b,c=route('a',priority=10),route('b',priority=5),route('c',priority=0)
             a['enabled']=b['enabled']=False
             await configure([a,b,c])
@@ -304,7 +309,7 @@ async def main():
             while len(server.captures)==start: await asyncio.sleep(.02)
             changed=await call('model_catalog.get')
             changed['models'][0]['routes'][1]['upstream_model']='changed-after-start'
-            await call('model_catalog.save',catalog=changed,credentials={'b':'changed-key'})
+            await call('model_catalog.save',catalog=changed,channel_credentials={changed['models'][0]['routes'][1]['channel_id']:'changed-key'})
             await task
             attempts=server.captures[start:]
             assert [c['route'] for c in attempts]==['a','a','b']
@@ -323,7 +328,7 @@ async def main():
             assert [c['route'] for c in server.captures[start:]]==['a','a','b']
             timed['config']['idle_timeout_secs']=1
             await configure([timed,route('b')]);current=await new();server.plans['a']=[{'chunk_delay':2}];start=len(server.captures)
-            result=await generate(current);assert result['routing']['status']=='incomplete' and len(server.captures)-start==1
+            result=await generate(current);assert result['routing']['status']=='complete' and [c['route'] for c in server.captures[start:]]==['a','b']
             passed('timeouts/first-content-failover-and-reasoning-idle-partial')
             current=await new();await switch(current,'second')
             deleted=await call('model_catalog.get');deleted['models']=[deleted['models'][0]]

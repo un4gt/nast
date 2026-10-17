@@ -198,6 +198,28 @@ async fn secrets_set(state: SharedState, params: Value) -> RpcResult {
 
 /// 模型列表：默认用已保存配置；连接测试可传 url/key 覆盖（不必先保存）。
 async fn models_list(state: SharedState, params: Value) -> RpcResult {
+    if let Some(id) = params["channel_id"].as_str() {
+        let (channel, key) = {
+            let secrets = state.secrets.read().await;
+            let catalog = state.catalog.lock().unwrap();
+            let channel = catalog.channels.iter().find(|c| c.id == id).cloned()
+                .ok_or_else(|| RpcError::NotFound("渠道不存在".into()))?;
+            let key = channel.credential_ref.as_deref().and_then(|k| crate::connection::active_secret(&secrets, k)).unwrap_or_default();
+            (channel, key)
+        };
+        if channel.protocol != "openai" { return Err(RpcError::BadRequest("该协议暂不支持获取模型列表，请手动关联模型 ID".into())); }
+        let route = crate::model_catalog::Route {
+            id: "discovery".into(), channel_id: channel.id, provider: channel.name, protocol: channel.protocol,
+            upstream_model: "discovery".into(), priority: 0, enabled: true,
+            config: crate::model_catalog::RouteConfig { endpoint: channel.endpoint.clone(), headers: channel.headers, ..Default::default() },
+        };
+        let provider = nast_providers::Provider::configured(nast_providers::ProviderKind::OpenAiCompat { base_url: channel.endpoint.clone(), api_key: key },
+            channel.endpoint, 10, vec![]);
+        let data = tokio::time::timeout(std::time::Duration::from_secs(20), provider.list_models_with_headers(&route.config.headers)).await
+            .map_err(|_| RpcError::BadRequest("获取模型列表超时".into()))?
+            .map_err(|e| RpcError::Generation(json!({"message":e.to_string(),"retryable":e.retryable()})))?;
+        return Ok(json!({"data":data}));
+    }
     // Preview an unsaved connection. Never fall back to a global secret or send a
     // saved key to an edited endpoint. Listing models must not publish a draft.
     if let Some(draft) = params.get("connection") {
@@ -210,6 +232,15 @@ async fn models_list(state: SharedState, params: Value) -> RpcResult {
         let mut key = String::new();
         if let Some(value) = draft.get("key") {
             key = value.as_str().ok_or_else(|| RpcError::BadRequest("API 密钥须为字符串".into()))?.trim().into();
+        } else if let Some(id) = draft["channel_id"].as_str() {
+            let secrets = state.secrets.read().await;
+            let catalog = state.catalog.lock().unwrap();
+            if let Some(channel) = catalog.channels.iter().find(|c| c.id == id) {
+                if channel.protocol != "openai" || channel.endpoint.trim_end_matches('/') != endpoint {
+                    return Err(RpcError::BadRequest("渠道地址或协议已改变，请重新填写密钥".into()));
+                }
+                key = channel.credential_ref.as_deref().and_then(|k| crate::connection::active_secret(&secrets, k)).unwrap_or_default();
+            }
         } else if let Some(id) = draft["route_id"].as_str() {
             let secrets = state.secrets.read().await;
             let catalog = state.catalog.lock().unwrap();
@@ -219,8 +250,16 @@ async fn models_list(state: SharedState, params: Value) -> RpcResult {
                 }
             }
         }
+        let headers: std::collections::BTreeMap<String, String> = serde_json::from_value(draft.get("headers").cloned().unwrap_or(json!({})))
+            .map_err(|_| RpcError::BadRequest("请求头须为字符串键值对象".into()))?;
+        for (name, value) in &headers {
+            if ["authorization", "x-api-key", "x-goog-api-key", "host"].contains(&name.to_lowercase().as_str())
+                || reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() || reqwest::header::HeaderValue::from_str(value).is_err() {
+                return Err(RpcError::BadRequest("公共请求头无效，鉴权请使用密钥字段".into()));
+            }
+        }
         let provider = nast_providers::Provider::new(nast_providers::ProviderKind::OpenAiCompat { base_url: endpoint.into(), api_key: key });
-        let data = tokio::time::timeout(std::time::Duration::from_secs(20), provider.list_models()).await
+        let data = tokio::time::timeout(std::time::Duration::from_secs(20), provider.list_models_with_headers(&headers)).await
             .map_err(|_| RpcError::BadRequest("获取模型列表超时，请检查 API 地址或手动填写模型 ID".into()))?
             .map_err(|e| RpcError::Generation(json!({"message":e.to_string(),"retryable":e.retryable(),"detail":e})))?;
         return Ok(json!({"data":data}));

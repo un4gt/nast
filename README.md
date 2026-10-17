@@ -35,7 +35,7 @@ curl -fsS http://127.0.0.1:8000/healthz
 
 默认仅监听服务器本机 `127.0.0.1:8000`。有域名时，按[教程](docs/src/deployment.md)配置宿主机 Nginx 和 Certbot，启用 HTTPS 后设置 `NAST_PUBLIC_ORIGIN`、`NAST_COOKIE_SECURE`；暂时没有域名，可在自己的电脑运行 `ssh -N -L 18000:127.0.0.1:8000 用户名@服务器IP`，再打开 `http://127.0.0.1:18000` 登录。
 
-登录后导入角色卡，在「设置 → 模型」添加模型；同一 API 下的多个模型可批量同步。可选 QQ 接入：在同一 `.env` 设置 `COMPOSE_PROFILES=qq` 和随机 `NAST_BRIDGE_TOKEN`，再执行上述 pull/up 命令，查看 `sudo docker compose logs -f qq` 扫码。详见[完整部署教程](docs/src/deployment.md)；Discord 和飞书暂未实现。
+登录后导入角色卡，在「设置 → 模型与渠道」添加渠道、获取模型列表，并将模型关联到一个或多个渠道。会话正常沿用已选渠道，故障时自动切换。可选 QQ 接入：在同一 `.env` 设置 `COMPOSE_PROFILES=qq` 和随机 `NAST_BRIDGE_TOKEN`，再执行上述 pull/up 命令，查看 `sudo docker compose logs -f qq` 扫码。详见[完整部署教程](docs/src/deployment.md)；Discord 和飞书暂未实现。
 
 - 核心镜像：`ghcr.io/un4gt/nast:latest`；桥接镜像：`ghcr.io/un4gt/nast-bridges:latest`，均可公开拉取。
 - [镜像部署 Compose](deploy/compose.yaml) 无 `build` 字段，网页与 QQ 共用一份 `.env`，配置不同于下方源码部署。
@@ -70,7 +70,7 @@ cp .env.example .env        # 填写 NAST_USERNAME 和 NAST_PASSWORD
 docker compose up -d --build
 ```
 
-- **Web UI**：http://127.0.0.1:8000 （导入角色卡、在「设置 → 模型」添加模型并填写 API 配置）
+- **Web UI**：http://127.0.0.1:8000 （导入角色卡、在「设置 → 模型与渠道」连接渠道并关联模型）
 - 数据：named volume `nast-data`（settings/models/secrets/角色卡/聊天/世界书/预设）；
   插件位于镜像内 `/app/plugins`，如需本机管理可挂载 `./plugins:/app/plugins`
 - 网络命名为 `nast-net`，供本仓库 `nast-bridges/` 中的 IM 桥接接入（当前 QQ 可用）

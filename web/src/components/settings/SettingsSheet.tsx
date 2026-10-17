@@ -41,7 +41,7 @@ import { CustomCommandsPanel } from './sections/CustomCommandsPanel';
 import { TtsPanel } from './sections/TtsPanel';
 
 const SECTIONS = [
-  { id: 'connection', icon: Plug, label: '模型', group: '对话', hint: '逻辑模型、路由与凭据' },
+  { id: 'connection', icon: Plug, label: '模型与渠道', group: '对话', hint: '选择模型，连接你的服务' },
   { id: 'preset', icon: FolderOpen, label: '预设', group: '对话', hint: '保存与切换整套生成配置' },
   { id: 'prompts', icon: ListOrdered, label: '提示词管理', group: '对话', hint: '提示词顺序与内容' },
   { id: 'sampling', icon: SlidersHorizontal, label: '采样参数', group: '对话', hint: '温度、Top P 与惩罚项' },

@@ -218,17 +218,21 @@ impl Provider {
     /// 拉取模型列表（OpenAI 兼容 GET {base}/models；ST /status 路由同源）。
     /// 返回模型 id 列表（data[].id，缺失时降级取 id 字符串数组）。
     pub async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        self.list_models_with_headers(&std::collections::BTreeMap::new()).await
+    }
+    pub async fn list_models_with_headers(&self, headers: &std::collections::BTreeMap<String, String>) -> Result<Vec<String>, ProviderError> {
         let ProviderKind::OpenAiCompat { base_url, api_key } = &self.kind else {
             return Err(ProviderError::Config(
                 "model list is only supported for the OpenAI-compatible source".into(),
             ));
         };
         let url = format!("{}/models", base_url.trim_end_matches('/'));
-        let resp = self
+        let mut request = self
             .client
             .get(&url)
-            .bearer_auth(api_key)
-            .send()
+            .bearer_auth(api_key);
+        for (name, value) in headers { request = request.header(name, value); }
+        let resp = request.send()
             .await
             .map_err(ProviderError::network)?;
         let status = resp.status();

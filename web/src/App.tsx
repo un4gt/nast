@@ -18,6 +18,7 @@ import { SettingsSheet } from './components/settings/SettingsSheet';
 import { WelcomeScreen } from './components/layout/WelcomeScreen';
 import { TtsControls } from './components/chat/TtsControls';
 import { useAutoTts } from './tts/use-auto-tts';
+import { currentConversation } from './models';
 
 export default function App({ onLogout }: { onLogout?: () => void }) {
   const {
@@ -108,9 +109,15 @@ export default function App({ onLogout }: { onLogout?: () => void }) {
         .catch(() => {});
     });
     const onDisconnect = rpc.on('$disconnected', () => setConnected(false));
+    const onReset = rpc.on('generation_stream_reset', data => {
+      if (JSON.stringify(data.conversation) === JSON.stringify(currentConversation())) {
+        useStore.setState({ streamingText: '', streamingReasoning: '' });
+      }
+    });
     return () => {
       onConnect();
       onDisconnect();
+      onReset();
       rpc.disconnect();
     };
   }, []);
